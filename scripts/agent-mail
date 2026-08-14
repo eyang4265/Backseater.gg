@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf '%s\n' "Usage:" \
+    "  scripts/agent-mail inbox <codex|claude>" \
+    "  scripts/agent-mail send <codex|claude> <codex|claude> <subject> <message>" >&2
+  exit 2
+}
+
+[[ $# -ge 2 ]] || usage
+
+command="$1"
+recipient="$2"
+case "$recipient" in
+  codex|claude) ;;
+  *) usage ;;
+esac
+
+git_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+mail_root="$git_dir/agent-mail"
+inbox="$mail_root/$recipient"
+
+case "$command" in
+  inbox)
+    [[ $# -eq 2 ]] || usage
+    if [[ ! -d "$inbox" ]]; then
+      printf 'No messages for %s.\n' "$recipient"
+      exit 0
+    fi
+    found=0
+    while IFS= read -r message; do
+      found=1
+      printf '%s\n' "--- ${message##*/}"
+      sed -n '1,160p' "$message"
+    done < <(find "$inbox" -maxdepth 1 -type f -name '*.md' -print | sort)
+    [[ "$found" -eq 1 ]] || printf 'No messages for %s.\n' "$recipient"
+    ;;
+  send)
+    [[ $# -eq 5 ]] || usage
+    sender="$recipient"
+    recipient="$3"
+    subject="$4"
+    message="$5"
+    case "$recipient" in
+      codex|claude) ;;
+      *) usage ;;
+    esac
+    [[ "$sender" != "$recipient" ]] || {
+      printf '%s\n' 'Sender and recipient must differ.' >&2
+      exit 2
+    }
+    mkdir -p "$mail_root/$recipient"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    safe_subject="$(printf '%s' "$subject" | tr -cs '[:alnum:]' '-' | sed 's/^-//; s/-$//')"
+    [[ -n "$safe_subject" ]] || safe_subject="message"
+    tmp_file="$(mktemp "$mail_root/$recipient/.mail.XXXXXX")"
+    {
+      printf '# %s\n\n' "$subject"
+      printf -- '- From: %s\n- To: %s\n- Sent: %s\n\n' "$sender" "$recipient" "$stamp"
+      printf '%s\n' "$message"
+    } > "$tmp_file"
+    mv "$tmp_file" "$mail_root/$recipient/${stamp}-${sender}-${safe_subject}.md"
+    printf 'Sent mail to %s.\n' "$recipient"
+    ;;
+  *) usage ;;
+esac

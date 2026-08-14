@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.cache/
+.venv/
+venv/
+
+# Secrets — never commit. See json/secrets.example.json.
+json/secrets.json
+
+# Runtime state, rewritten by the pollers.
+json/data.json
+json/int_subscriptions.json
+json/*_state.json
+json/*.tmp
+
+# Local Claude Code permissions are machine-specific.
+.claude/settings.local.json
