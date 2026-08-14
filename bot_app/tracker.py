@@ -256,7 +256,10 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
     """Find games that tracked accounts entered since the previous poll."""
     accounts = load_accounts()
     previous = load_live_game_state()
-    current: dict[str, str] = {}
+    # Keep the last announced game for each account even while they are not
+    # in a lobby. This prevents a restart (or a temporary API miss) from
+    # causing the same active game to be announced again.
+    current = dict(previous)
     grouped: dict[str, tuple[dict[str, Any], list[TrackedPlayer]]] = {}
 
     def fetch(account: Account) -> tuple[Account, dict[str, Any] | None]:
@@ -279,7 +282,10 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
                 continue
             key = f"{account.server}:{game_id}"
             current[account.discord_id] = key
-            if previous.get(account.discord_id) == key:
+            # A lobby is announced once globally, not once per tracked
+            # account. This prevents a second tracked player joining an
+            # already-announced game from triggering a duplicate post.
+            if key in previous.values():
                 continue
             if key not in grouped:
                 grouped[key] = (game, [])
