@@ -38,6 +38,7 @@ def _status_line(record: dict[str, Any]) -> str | None:
 
 class RiotInfoCommands(commands.Cog):
     def __init__(self, bot: discord.Bot) -> None:
+        """Initialize the instance."""
         self.bot = bot
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Current Champion Rotation")
@@ -49,15 +50,21 @@ class RiotInfoCommands(commands.Cog):
         try:
             champion_ids = await asyncio.to_thread(get_client().champion_rotation)
         except RiotAPIError as error:
-            await ctx.respond(embed=make_embed(f"Could not fetch the rotation: {error}"))
+            await ctx.respond(
+                embed=make_embed(f"Could not fetch the rotation: {error}")
+            )
             return
 
-        catalog = ddragon.catalog()
+        catalog = await asyncio.to_thread(ddragon.catalog)
         names = sorted(
             filter(
                 None,
                 (
-                    (catalog.by_key(champion_id).name if catalog and catalog.by_key(champion_id) else None)
+                    (
+                        catalog.by_key(champion_id).name
+                        if catalog and catalog.by_key(champion_id)
+                        else None
+                    )
                     for champion_id in champion_ids
                 ),
             )
@@ -77,21 +84,28 @@ class RiotInfoCommands(commands.Cog):
         try:
             status = await asyncio.to_thread(get_client().platform_status, server)
         except RiotAPIError as error:
-            await ctx.respond(embed=make_embed(f"Could not fetch server status: {error}"))
+            await ctx.respond(
+                embed=make_embed(f"Could not fetch server status: {error}")
+            )
             return
 
         lines = [
             line
-            for record in [*status.get("maintenances", []), *status.get("incidents", [])]
+            for record in [
+                *status.get("maintenances", []),
+                *status.get("incidents", []),
+            ]
             if (line := _status_line(record))
         ]
         await ctx.respond(
             embed=make_embed(
-                "\n".join(lines) or "No recent issues or events to report on this server.",
+                "\n".join(lines)
+                or "No recent issues or events to report on this server.",
                 title=f"Server Status: {server}",
             )
         )
 
 
 def setup(bot: discord.Bot) -> None:
+    """Register this command module with the bot."""
     bot.add_cog(RiotInfoCommands(bot))

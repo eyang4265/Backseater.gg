@@ -16,7 +16,9 @@ from .announce import (
     format_match,
     publish,
     publish_live_games,
+    resolve_announcement_channel,
 )
+from .guest_policy import GUEST_PUUID, guest_is_in_game_with_crispy
 from .queues import RANKED_QUEUE_IDS
 from .ranks import RankSnapshot, fetch_ranks, lp_change
 from .riot import RiotAPIError, get_client
@@ -32,11 +34,10 @@ from .store import (
 
 LOGGER = logging.getLogger(__name__)
 
-#: Recent matches to examine per account per poll.
+
 MATCH_LOOKBACK = 20
 
-#: Accounts and matches fetched at once. Requests are rate-limited centrally,
-#: so this bounds thread count rather than request rate.
+
 _FETCH_WORKERS = 8
 
 
@@ -47,49 +48,79 @@ class _AccountPoll:
     new_match_ids: list[str] = field(default_factory=list)
 
 
-def update_all_rank_snapshots() -> tuple[int, int]:
-    """Refresh every tracked account's stored ranks.
+@dataclass(frozen=True)
+class _PendingRank:
+    poll: _AccountPoll
+    queue_id: int
+    snapshot: RankSnapshot
+    participant: dict[str, Any]
+    attributable: bool
 
-    Run at startup to establish the baseline that LP changes are measured
-    against. An account counts as failed only when its ranks couldn't be
-    fetched at all — being unranked in a queue is fine.
 
-    Both queues come from one request per account; the previous version issued
-    two identical requests, one per queue.
-    """
+def fetch_all_rank_snapshots() -> tuple[dict[str, dict[int, RankSnapshot]], int]:
+    """Fetch current ranks without mutating LP-attribution baselines."""
     accounts = load_accounts()
-    state = load_tracker_state()
-    updated = 0
+    snapshots: dict[str, dict[int, RankSnapshot]] = {}
     failed = 0
 
     def fetch(account: Account) -> tuple[Account, dict[int, RankSnapshot] | None]:
+        """Fetch one item for the enclosing operation."""
         return account, fetch_ranks(account.puuid, account.server)
 
-    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(len(accounts), 1))) as pool:
+    with ThreadPoolExecutor(
+        max_workers=min(_FETCH_WORKERS, max(len(accounts), 1))
+    ) as pool:
         for account, ranks in pool.map(fetch, accounts.values()):
             if ranks is None:
                 failed += 1
                 LOGGER.warning("Could not fetch ranks for %s", account.riot_id)
                 continue
-            entry = state.setdefault(account.discord_id, PlayerState())
-            entry.ranks.update(ranks)
-            updated += 1
-
-    save_tracker_state(state)
-    return updated, failed
+            snapshots[account.discord_id] = ranks
+    return snapshots, failed
 
 
-def _poll_accounts(accounts: dict[str, Account], state: dict[str, PlayerState]) -> list[_AccountPoll]:
+def update_all_rank_snapshots() -> tuple[int, int]:
+    """Fill missing rank baselines for every tracked account.
+
+    Run at startup to establish baselines for new state. Once a baseline
+    exists, only :meth:`PlayerState.record_rank` may move it; overwriting it
+    here could erase an unprocessed game's LP change.
+
+    Both queues come from one request per account; the previous version issued
+    two identical requests, one per queue.
+    """
+    state = load_tracker_state()
+    snapshots, failed = fetch_all_rank_snapshots()
+    dirty = False
+    for discord_id, ranks in snapshots.items():
+        entry = state.setdefault(discord_id, PlayerState())
+        for queue_id, snapshot in ranks.items():
+            if entry.ranks.get(queue_id) is None:
+                entry.ranks[queue_id] = snapshot
+                dirty = True
+    if dirty:
+        save_tracker_state(state)
+    return len(snapshots), failed
+
+
+def _poll_accounts(
+    accounts: dict[str, Account], state: dict[str, PlayerState]
+) -> list[_AccountPoll]:
     """List each account's unseen match ids, oldest first."""
     client = get_client()
 
     def fetch(account: Account) -> _AccountPoll:
+        """Fetch one item for the enclosing operation."""
         entry = state.setdefault(account.discord_id, PlayerState())
         poll = _AccountPoll(account=account, state=entry)
         try:
-            match_ids = client.match_ids(account.puuid, account.server, count=MATCH_LOOKBACK)
+            match_ids = client.match_ids(
+                account.puuid, account.server, count=MATCH_LOOKBACK
+            )
         except RiotAPIError as error:
-            LOGGER.warning("Could not fetch match ids for %s: %s", account.riot_id, error)
+            LOGGER.warning(
+                "Could not fetch match ids for %s: %s", account.riot_id, error
+            )
             return poll
         known = set(entry.matches)
         poll.new_match_ids = [
@@ -114,6 +145,7 @@ def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
         return {}
 
     def fetch(item: tuple[str, str]) -> tuple[str, dict[str, Any] | None]:
+        """Fetch one item for the enclosing operation."""
         match_id, server = item
         try:
             return match_id, get_client().match(match_id, server)
@@ -152,9 +184,9 @@ def collect_new_matches() -> list[MatchAnnouncement]:
 
     Each player's stored rank for the match's queue is the pre-match baseline.
     When a ranked match is announced, the current rank is fetched, the swing is
-    reported, and the new rank becomes the next baseline — committed only if
-    the match actually produced an announcement, so the baseline always
-    corresponds to the last announced game.
+    reported, and the new rank becomes the next baseline. Multi-game batches
+    are still announced, but receive one unattributed resync point because an
+    individual LP change cannot be assigned safely.
     """
     accounts = load_accounts()
     state = load_tracker_state()
@@ -173,70 +205,119 @@ def collect_new_matches() -> list[MatchAnnouncement]:
                 match_order.append(match_id)
             participants[match_id].append(poll)
 
-    # Announce chronologically.
-    match_order.sort(key=lambda mid: matches[mid].get("info", {}).get("gameEndTimestamp", 0))
+    match_order.sort(
+        key=lambda mid: matches[mid].get("info", {}).get("gameEndTimestamp", 0)
+    )
     ranked_by_player = _ranked_matches_per_player(match_order, matches, participants)
 
     announcements: list[MatchAnnouncement] = []
+    announced_ids: set[str] = set()
+    silently_processed: set[tuple[str, str]] = set()
     dirty = False
 
     for match_id in match_order:
         match = matches[match_id]
         queue_id = match.get("info", {}).get("queueId")
         players: list[TrackedPlayer] = []
-        pending_ranks: list[tuple[PlayerState, int, RankSnapshot]] = []
+        pending_ranks: list[_PendingRank] = []
+        match_participants = match.get("info", {}).get("participants", []) or []
+        guest_can_be_announced = guest_is_in_game_with_crispy(match_participants)
 
         for poll in participants[match_id]:
             account = poll.account
+            visible = account.puuid != GUEST_PUUID or guest_can_be_announced
+            if not visible:
+                silently_processed.add((account.discord_id, match_id))
             if queue_id not in RANKED_QUEUE_IDS:
-                players.append(
-                    TrackedPlayer(
-                        puuid=account.puuid,
-                        riot_id=account.riot_id,
-                        server=account.server,
+                if visible:
+                    players.append(
+                        TrackedPlayer(
+                            puuid=account.puuid,
+                            riot_id=account.riot_id,
+                            server=account.server,
+                        )
                     )
-                )
                 continue
 
             in_queue = ranked_by_player.get((account.discord_id, queue_id), [])
             is_only_game = len(in_queue) == 1
             is_last_game = bool(in_queue) and in_queue[-1] == match_id
-
-            if not is_only_game and not is_last_game:
+            participant = next(
+                (
+                    item
+                    for item in match_participants
+                    if item.get("puuid") == account.puuid
+                ),
+                None,
+            )
+            if participant is None:
                 continue
 
-            current = (fetch_ranks(account.puuid, account.server) or {}).get(queue_id)
-            if current is not None:
-                pending_ranks.append((poll.state, queue_id, current))
+            current = None
+            if is_only_game or is_last_game:
+                current = (fetch_ranks(account.puuid, account.server) or {}).get(
+                    queue_id
+                )
+                if current is not None:
+                    pending_ranks.append(
+                        _PendingRank(
+                            poll=poll,
+                            queue_id=queue_id,
+                            snapshot=current,
+                            participant=participant,
+                            attributable=is_only_game and visible,
+                        )
+                    )
 
-            if not is_only_game:
-                # Several new games in this queue: resync the baseline only.
+            if not visible:
                 continue
-
             players.append(
                 TrackedPlayer(
                     puuid=account.puuid,
                     riot_id=account.riot_id,
                     server=account.server,
-                    lp_change=lp_change(poll.state.ranks.get(queue_id), current),
-                    rank=current,
+                    lp_change=(
+                        lp_change(poll.state.ranks.get(queue_id), current)
+                        if is_only_game
+                        else None
+                    ),
+                    rank=current if is_only_game else poll.state.ranks.get(queue_id),
                 )
             )
 
         announcement = format_match(match, players)
+
+        finished = bool(match.get("info", {}).get("gameEndTimestamp"))
+        for pending in pending_ranks:
+            if not finished or (announcement is None and pending.attributable):
+                continue
+            changed = pending.poll.state.record_rank(
+                pending.queue_id,
+                pending.snapshot,
+                match_id=match_id,
+                won=pending.participant.get("win"),
+                attributable=pending.attributable,
+                timestamp=int(match.get("info", {}).get("gameEndTimestamp", 0) / 1000)
+                or None,
+            )
+            dirty = dirty or changed
         if announcement is None:
             continue
 
         announcements.append(announcement)
-        for player_state, ranked_queue, snapshot in pending_ranks:
-            player_state.ranks[ranked_queue] = snapshot
-            dirty = True
+        announced_ids.add(match_id)
 
-    # Only matches whose details actually arrived are marked as seen. Marking
-    # a failed fetch as seen would drop that game permanently; leaving it
-    # unmarked lets the next poll retry it, bounded by the lookback window.
     for poll in polls:
-        fetched = [match_id for match_id in poll.new_match_ids if match_id in matches]
+        fetched = [
+            match_id
+            for match_id in poll.new_match_ids
+            if match_id in matches
+            and (
+                matches[match_id].get("info", {}).get("queueId") not in RANKED_QUEUE_IDS
+                or match_id in announced_ids
+                or (poll.account.discord_id, match_id) in silently_processed
+            )
+        ]
         if fetched:
             poll.state.remember(fetched)
             dirty = True
@@ -249,24 +330,39 @@ def collect_new_matches() -> list[MatchAnnouncement]:
 
 async def poll_and_announce(bot: Any) -> None:
     """Background loop entry point."""
-    await publish(bot, await asyncio.to_thread(collect_new_matches))
+    channel = await resolve_announcement_channel(bot)
+    if channel is None:
+        LOGGER.warning(
+            "Skipping match collection until the fallback channel is available"
+        )
+        return
+    await publish(
+        bot,
+        await asyncio.to_thread(collect_new_matches),
+        global_channel=channel,
+    )
 
 
 def collect_new_live_games() -> list[LiveGameAnnouncement]:
     """Find games that tracked accounts entered since the previous poll."""
     accounts = load_accounts()
     previous = load_live_game_state()
-    # Keep the last announced game for each account even while they are not
-    # in a lobby. This prevents a restart (or a temporary API miss) from
-    # causing the same active game to be announced again.
-    current = dict(previous)
+
+    current = {
+        discord_id: previous[discord_id]
+        for discord_id in accounts
+        if discord_id in previous
+    }
     grouped: dict[str, tuple[dict[str, Any], list[TrackedPlayer]]] = {}
 
     def fetch(account: Account) -> tuple[Account, dict[str, Any] | None]:
+        """Fetch one item for the enclosing operation."""
         try:
             return account, get_client().active_game(account.puuid, account.server)
         except RiotAPIError as error:
-            LOGGER.warning("Could not fetch active game for %s: %s", account.riot_id, error)
+            LOGGER.warning(
+                "Could not fetch active game for %s: %s", account.riot_id, error
+            )
             return account, None
 
     if not accounts:
@@ -276,17 +372,34 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
         for account, game in games:
             if not game:
                 continue
+            if account.puuid == GUEST_PUUID and not guest_is_in_game_with_crispy(
+                game.get("participants", []) or []
+            ):
+                continue
             game_id = game.get("gameId")
             if game_id is None:
                 LOGGER.warning("Active game for %s had no gameId", account.riot_id)
                 continue
             key = f"{account.server}:{game_id}"
             current[account.discord_id] = key
-            # A lobby is announced once globally, not once per tracked
-            # account. This prevents a second tracked player joining an
-            # already-announced game from triggering a duplicate post.
+
             if key in previous.values():
                 continue
+
+            # The spectator endpoint can briefly return a lobby after the
+            # game has ended.  If the bot was offline during that window,
+            # posting this as a live game would duplicate the match update.
+            # Let the match poll announce the completed game instead.
+            try:
+                match = get_client().match(f"{account.server}_{game_id}", account.server)
+            except RiotAPIError as error:
+                LOGGER.debug(
+                    "Could not verify whether live game %s has finished: %s", key, error
+                )
+                match = None
+            if isinstance(match, dict) and match.get("info", {}).get("gameEndTimestamp"):
+                continue
+
             if key not in grouped:
                 grouped[key] = (game, [])
             grouped[key][1].append(
@@ -309,4 +422,14 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
 
 async def poll_live_games_and_announce(bot: Any) -> None:
     """Background loop entry point for first-seen live-game announcements."""
-    await publish_live_games(bot, await asyncio.to_thread(collect_new_live_games))
+    channel = await resolve_announcement_channel(bot)
+    if channel is None:
+        LOGGER.warning(
+            "Skipping live-game collection until the fallback channel is available"
+        )
+        return
+    await publish_live_games(
+        bot,
+        await asyncio.to_thread(collect_new_live_games),
+        global_channel=channel,
+    )

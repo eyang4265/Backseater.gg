@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,14 +13,22 @@ from .riot import get_client
 LOGGER = logging.getLogger(__name__)
 
 SUB_MASTER_TIERS: tuple[str, ...] = (
-    "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND",
+    "IRON",
+    "BRONZE",
+    "SILVER",
+    "GOLD",
+    "PLATINUM",
+    "EMERALD",
+    "DIAMOND",
 )
 DIVISIONS: dict[str, int] = {"IV": 0, "III": 1, "II": 2, "I": 3}
 _DIVISION_LABELS: dict[int, str] = {index: label for label, index in DIVISIONS.items()}
 APEX_TIERS: frozenset[str] = frozenset({"MASTER", "GRANDMASTER", "CHALLENGER"})
-TIER_LABELS: dict[str, str] = {tier: tier.title() for tier in (*SUB_MASTER_TIERS, *APEX_TIERS)}
+TIER_LABELS: dict[str, str] = {
+    tier: tier.title() for tier in (*SUB_MASTER_TIERS, *APEX_TIERS)
+}
 
-#: Points per tier on the flattened scale, and the value at which apex tiers begin.
+
 _TIER_SPAN = 400
 _DIVISION_SPAN = 100
 APEX_THRESHOLD = len(SUB_MASTER_TIERS) * _TIER_SPAN
@@ -39,17 +48,21 @@ class RankSnapshot:
     lp: int = 0
     wins: int = 0
     losses: int = 0
+    updated_at: int | None = None
 
     @property
     def is_ranked(self) -> bool:
+        """Handle ranked."""
         return bool(self.tier)
 
     @property
     def games(self) -> int:
+        """Handle games."""
         return self.wins + self.losses
 
     @property
     def winrate(self) -> float | None:
+        """Handle winrate."""
         return self.wins / self.games if self.games else None
 
     @property
@@ -59,18 +72,19 @@ class RankSnapshot:
 
     @classmethod
     def from_entry(cls, entry: dict[str, Any]) -> "RankSnapshot":
+        """Handle entry."""
         return cls(
             tier=entry.get("tier"),
             division=entry.get("rank", "") or "",
             lp=entry.get("leaguePoints", 0),
             wins=entry.get("wins", 0),
             losses=entry.get("losses", 0),
+            updated_at=int(time.time()),
         )
 
-    # The on-disk shape predates this class; keep it stable so existing
-    # match_tracker_state.json files stay readable.
     @classmethod
     def from_state(cls, raw: dict[str, Any] | None) -> "RankSnapshot | None":
+        """Handle state."""
         if not isinstance(raw, dict):
             return None
         return cls(
@@ -79,16 +93,21 @@ class RankSnapshot:
             lp=raw.get("lp", 0),
             wins=raw.get("wins", 0),
             losses=raw.get("losses", 0),
+            updated_at=raw.get("updated_at"),
         )
 
     def to_state(self) -> dict[str, Any]:
-        return {
+        """Handle state."""
+        state = {
             "tier": self.tier,
             "rank": self.division,
             "lp": self.lp,
             "wins": self.wins,
             "losses": self.losses,
         }
+        if self.updated_at is not None:
+            state["updated_at"] = self.updated_at
+        return state
 
 
 def rank_value(tier: str | None, division: str | None, lp: int) -> int | None:
@@ -137,10 +156,8 @@ def lp_change(before: RankSnapshot | None, after: RankSnapshot | None) -> str | 
 
 
 def average_value(values: list[int]) -> float | None:
+    """Handle value."""
     return sum(values) / len(values) if values else None
-
-
-# -- fetching --------------------------------------------------------------
 
 
 def fetch_ranks(puuid: str, server: str) -> dict[int, RankSnapshot] | None:
@@ -165,7 +182,9 @@ def fetch_ranks(puuid: str, server: str) -> dict[int, RankSnapshot] | None:
     }
 
 
-def fetch_rank(puuid: str, server: str, queue_id: int = SOLO_QUEUE_ID) -> RankSnapshot | None:
+def fetch_rank(
+    puuid: str, server: str, queue_id: int = SOLO_QUEUE_ID
+) -> RankSnapshot | None:
     """One queue's snapshot, or None if the fetch failed."""
     ranks = fetch_ranks(puuid, server)
     if ranks is None:

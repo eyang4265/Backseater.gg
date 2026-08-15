@@ -24,9 +24,15 @@ _COMMANDS = (
         "**`/livegame`** — Show the current lobby, champions, ranks, and win rates.\n"
         "Usage: `/livegame` (uses your tracked account by default).\n\n"
         "**`/matchhistory`** — Show the 10 most recent games with results and stats.\n"
-        "Usage: `/matchhistory` or add a player/server.\n\n"
+        "Usage: `/matchhistory`; optionally filter by `game_mode` or `champion`, or add a player/server.\n\n"
         "**`/matchlist`** — Show recent match IDs.\n"
-        "Usage: `/matchlist` or add a player/server.",
+        "Usage: `/matchlist` or add a player/server.\n\n"
+        "**`/track`** — Link your Discord user to a Riot account.\n"
+        "Usage: `/track summoner:<name> tag:<tag> server:<server>`.\n\n"
+        "**`/untrack`** — Remove your tracked account.\n"
+        "Usage: `/untrack`.\n\n"
+        "**`/accounts`** — List all tracked accounts.\n"
+        "Usage: `/accounts`.",
     ),
     (
         "Match and champion commands",
@@ -35,13 +41,27 @@ _COMMANDS = (
         "**`/timeline`** — Show timeline-derived kills, deaths, damage, and economy.\n"
         "Usage: `/timeline`; optionally provide `match_id` and `position`.\n\n"
         "**`/mastery`** — Show all champion mastery or details for one champion.\n"
-        "Usage: `/mastery`; optionally provide `champion` or a player.",
+        "Usage: `/mastery`; optionally provide `champion` or a player.\n\n"
+        "**`/today`** — Show today's saved LP movement.\n"
+        "Usage: `/today`; optionally provide a player or `queue`.\n\n"
+        "**`/lpgraph`** — Graph saved LP history.\n"
+        "Usage: `/lpgraph`; optionally provide a player, `queue`, or `days`.\n\n"
+        "**`/leaderboard`** — Rank tracked accounts from saved snapshots.\n"
+        "Usage: `/leaderboard`; optionally choose a `queue`.\n\n"
+        "**`/championstats`** — Aggregate champion results from cached matches.\n"
+        "Usage: `/championstats`; optionally provide a player or `champion`.\n\n"
+        "**`/duo`** — Show the cached record for two tracked players.\n"
+        "Usage: `/duo teammate:<user>`; optionally provide the primary player.",
     ),
     (
         "Riot information",
         "**`/rotation`** — Show this week's free champion rotation.\n\n"
         "**`/serverstatus`** — Show active maintenance and incidents.\n"
-        "Usage: `/serverstatus`; optionally choose a `server`.",
+        "Usage: `/serverstatus`; optionally choose a `server`.\n\n"
+        "**`/setchannel`** — Route this server's announcements to a channel (Manage Server).\n"
+        "Usage: `/setchannel`; optionally choose a `channel`.\n\n"
+        "**`/unsetchannel`** — Remove this server's announcement route (Manage Server).\n"
+        "Usage: `/unsetchannel`.",
     ),
 )
 
@@ -50,10 +70,14 @@ class CommandDirectory(commands.Cog):
     """Show the slash commands available to everyone in the server."""
 
     def __init__(self, bot: discord.Bot) -> None:
+        """Initialize the instance."""
         self.bot = bot
 
-    @discord.slash_command(guild_ids=GUILD_IDS, description="List available bot commands")
+    @discord.slash_command(
+        guild_ids=GUILD_IDS, description="List available bot commands"
+    )
     async def commands(self, ctx: discord.ApplicationContext) -> None:
+        """Handle commands."""
         log_command(ctx)
         embed = make_embed(
             "Use the optional player fields to look up someone other than your tracked account.",
@@ -65,4 +89,5 @@ class CommandDirectory(commands.Cog):
 
 
 def setup(bot: discord.Bot) -> None:
+    """Register this command module with the bot."""
     bot.add_cog(CommandDirectory(bot))

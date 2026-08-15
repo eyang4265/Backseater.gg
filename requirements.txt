@@ -2,3 +2,5 @@ py-cord>=2.6,<3
 requests>=2.31
 # Optional: without it, announcements go out without the damage chart.
 matplotlib>=3.8
+# Windows does not ship an IANA timezone database for zoneinfo.
+tzdata>=2025.2; platform_system == "Windows"

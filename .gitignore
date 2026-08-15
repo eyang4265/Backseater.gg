@@ -13,6 +13,7 @@ json/data.json
 json/int_subscriptions.json
 json/*_state.json
 json/*.tmp
+json/*.sqlite
 
 # Local Claude Code permissions are machine-specific.
 .claude/settings.local.json

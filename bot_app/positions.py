@@ -20,7 +20,7 @@ SMITE_SPELL_ID = 11
 ROLE_ORDER: tuple[str, ...] = ("Top", "Jungle", "Mid", "Bottom", "Support")
 _ROLE_INDEX = {role: index for index, role in enumerate(ROLE_ORDER)}
 
-#: Riot's post-game ``teamPosition`` values, in this module's vocabulary.
+
 POSITION_LABELS: dict[str, str] = {
     "TOP": "Top",
     "JUNGLE": "Jungle",
@@ -29,7 +29,7 @@ POSITION_LABELS: dict[str, str] = {
     "UTILITY": "Support",
 }
 
-#: Fallback when a champion's exact tag pair isn't listed below.
+
 _SINGLE_TAG_ROLES: dict[str, tuple[str, ...]] = {
     "Assassin": ("Mid",),
     "Fighter": ("Top",),
@@ -39,9 +39,7 @@ _SINGLE_TAG_ROLES: dict[str, tuple[str, ...]] = {
     "Tank": ("Top",),
 }
 
-# Tag order in Data Dragon is meaningful: ["Mage", "Support"] (Xerath) leans
-# Mid while ["Support", "Mage"] (Lulu) leans Support, so combinations are
-# keyed by the ordered pair rather than an unordered set.
+
 _TAG_PAIR_ROLES: dict[tuple[str, str], tuple[str, ...]] = {
     ("Assassin", "Fighter"): ("Mid",),
     ("Assassin", "Mage"): ("Mid",),
@@ -64,7 +62,7 @@ _TAG_PAIR_ROLES: dict[tuple[str, str], tuple[str, ...]] = {
     ("Tank", "Support"): ("Support",),
 }
 
-#: Champions whose real lane disagrees with what their tags imply.
+
 _ROLE_OVERRIDES: dict[str, tuple[str, ...]] = {
     "Akshan": ("Mid",),
     "Elise": ("Support",),
@@ -126,7 +124,12 @@ def assign_team_positions(
     used: set[str] = set()
 
     for index, participant in enumerate(participants):
-        spells = (participant.get("spell1Id"), participant.get("spell2Id"))
+        spells = (
+            participant.get("spell1Id"),
+            participant.get("spell2Id"),
+            participant.get("summoner1Id"),
+            participant.get("summoner2Id"),
+        )
         if SMITE_SPELL_ID in spells and "Jungle" not in used:
             assigned[index] = "Jungle"
             used.add("Jungle")
@@ -152,8 +155,6 @@ def assign_team_positions(
         for slot, index in enumerate(open_indices):
             assigned[index] = best[slot]
     elif open_indices:
-        # Counts didn't line up (e.g. Riot reported duplicate positions).
-        # Fill what's left rather than leaving anyone unassigned.
         for index, role in zip(open_indices, [*open_roles, *ROLE_ORDER]):
             assigned[index] = role
 

@@ -19,7 +19,15 @@ from ...timeline import (
     opponent_participant_id,
     participant_at_slot,
 )
-from ..shared import GUILD_IDS, SERVERS, Target, log_command, not_found_embed, resolve_target, set_player_author
+from ..shared import (
+    GUILD_IDS,
+    SERVERS,
+    Target,
+    log_command,
+    not_found_embed,
+    set_player_author,
+    target_for,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +35,7 @@ _NO_LANE_DATA = "No lane opponent found (ARAM/Arena or missing position data)."
 
 
 def _first_blood_text(participant: dict) -> str:
+    """Handle blood text."""
     if participant.get("firstBloodKill"):
         return "Yes (kill)"
     if participant.get("firstBloodAssist"):
@@ -36,6 +45,7 @@ def _first_blood_text(participant: dict) -> str:
 
 class MatchCommands(commands.Cog):
     def __init__(self, bot: discord.Bot) -> None:
+        """Initialize the instance."""
         self.bot = bot
 
     @discord.slash_command(
@@ -72,9 +82,9 @@ class MatchCommands(commands.Cog):
         )
         await ctx.defer()
 
-        target = resolve_target(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, tag, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server))
+            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
             return
 
         selected_id = match_id or await self._latest_match_id(ctx, target)
@@ -85,18 +95,23 @@ class MatchCommands(commands.Cog):
         try:
             match = await asyncio.to_thread(client.match, selected_id, target.server)
         except RiotAPIError as error:
-            await ctx.respond(embed=make_embed(f"Could not fetch match `{selected_id}`: {error}"))
+            await ctx.respond(
+                embed=make_embed(f"Could not fetch match `{selected_id}`: {error}")
+            )
             return
 
         participants = match.get("info", {}).get("participants", []) or []
-        # `target` says which match to pull; `subject` is who the embed reports
-        # on. They differ only when a position was asked for.
+
         subject = target
         if position is None:
-            participant = next((p for p in participants if p.get("puuid") == target.puuid), None)
+            participant = next(
+                (p for p in participants if p.get("puuid") == target.puuid), None
+            )
             if participant is None:
                 await ctx.respond(
-                    embed=make_embed(f"{target.riot_id} wasn't found in match `{selected_id}`.")
+                    embed=make_embed(
+                        f"{target.riot_id} wasn't found in match `{selected_id}`."
+                    )
                 )
                 return
         else:
@@ -108,22 +123,36 @@ class MatchCommands(commands.Cog):
                     )
                 )
                 return
-            subject = Target(puuid=participant.get("puuid", ""), server=target.server)
+            name = (
+                participant.get("riotIdGameName")
+                or participant.get("summonerName")
+                or "Unknown player"
+            )
+            tag_line = participant.get("riotIdTagline")
+            subject = Target(
+                puuid=participant.get("puuid", ""),
+                server=target.server,
+                riot_id=f"{name}#{tag_line}" if tag_line else name,
+            )
 
         try:
-            payload = await asyncio.to_thread(client.match_timeline, selected_id, target.server)
+            payload = await asyncio.to_thread(
+                client.match_timeline, selected_id, target.server
+            )
         except RiotAPIError as error:
             await ctx.respond(
-                embed=make_embed(f"Could not fetch the timeline for `{selected_id}`: {error}")
+                embed=make_embed(
+                    f"Could not fetch the timeline for `{selected_id}`: {error}"
+                )
             )
             return
 
         analysis = MatchTimeline(payload)
-        embed = self._build_embed(match, participants, participant, analysis, selected_id)
+        embed = await asyncio.to_thread(
+            self._build_embed, match, participants, participant, analysis, selected_id
+        )
         set_player_author(embed, subject)
 
-        # Fetching the map art and rendering the plot both block, so they run
-        # off the event loop.
         kill_map = await asyncio.to_thread(build_kill_map, match, analysis, participant)
         if kill_map is None:
             await ctx.respond(embed=embed)
@@ -133,6 +162,7 @@ class MatchCommands(commands.Cog):
 
     @staticmethod
     async def _latest_match_id(ctx, target: Target) -> str | None:
+        """Handle match id."""
         try:
             match_ids = await asyncio.to_thread(
                 get_client().match_ids, target.puuid, target.server, count=1
@@ -141,21 +171,29 @@ class MatchCommands(commands.Cog):
             await ctx.respond(embed=make_embed(f"Could not fetch match list: {error}"))
             return None
         if not match_ids:
-            await ctx.respond(embed=make_embed(f"No matches found for {target.riot_id}."))
+            await ctx.respond(
+                embed=make_embed(f"No matches found for {target.riot_id}.")
+            )
             return None
         return match_ids[0]
 
     @staticmethod
-    def _build_embed(match, participants, participant, analysis, match_id) -> discord.Embed:
+    def _build_embed(
+        match, participants, participant, analysis, match_id
+    ) -> discord.Embed:
+        """Build embed."""
         participant_id = participant.get("participantId")
         solo = analysis.solo_kill_stats(participant_id)
 
         opponent_id = opponent_participant_id(match, participant)
-        opponent = next((p for p in participants if p.get("participantId") == opponent_id), None)
+        opponent = next(
+            (p for p in participants if p.get("participantId") == opponent_id), None
+        )
 
         catalog = ddragon.catalog()
 
         def champion_name(record) -> str:
+            """Handle name."""
             champion = catalog.by_key(record.get("championId")) if catalog else None
             return champion.name if champion else record.get("championName", "Unknown")
 
@@ -163,14 +201,20 @@ class MatchCommands(commands.Cog):
             lane_header, lane_body = "Lane Diff", _NO_LANE_DATA
         else:
             position = participant.get("teamPosition")
-            # Both laners share a cap: the opponent is the same role.
+
             cap = max_level_for_position(position)
-            lane_header = f"Lane vs {champion_name(opponent)} ({(position or '').title()})"
-            series = analysis.lane_diff_series(participant_id, opponent_id, max_level=cap)
+            lane_header = (
+                f"Lane vs {champion_name(opponent)} ({(position or '').title()})"
+            )
+            series = analysis.lane_diff_series(
+                participant_id, opponent_id, max_level=cap
+            )
             lane_body = format_lane_lines(series) or _NO_LANE_DATA
 
         outcome = "Victory" if participant.get("win") else "Defeat"
-        cs = participant.get("totalMinionsKilled", 0) + participant.get("neutralMinionsKilled", 0)
+        cs = participant.get("totalMinionsKilled", 0) + participant.get(
+            "neutralMinionsKilled", 0
+        )
 
         embed = discord.Embed(
             title=f"Match Stats — {match_id}",
@@ -217,4 +261,5 @@ class MatchCommands(commands.Cog):
 
 
 def setup(bot: discord.Bot) -> None:
+    """Register this command module with the bot."""
     bot.add_cog(MatchCommands(bot))

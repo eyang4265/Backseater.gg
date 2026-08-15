@@ -19,6 +19,7 @@ _indexed_count = -1
 
 
 def _emoji_index() -> dict[str, Any]:
+    """Handle index."""
     from .runtime import get_bot
 
     bot = get_bot()
@@ -46,7 +47,11 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
 
     candidates: list[str] = []
     if champion is not None:
-        candidates += [champion.internal_id, champion.name, champion.name.replace(" ", "").replace("'", "")]
+        candidates += [
+            champion.internal_id,
+            champion.name,
+            champion.name.replace(" ", "").replace("'", ""),
+        ]
     if name:
         candidates += [name, name.replace(" ", "").replace("'", "")]
 
@@ -65,4 +70,5 @@ def rank_emoji(tier: str | None) -> Any | None:
 
 
 def prefixed(emoji: Any | None, text: str) -> str:
+    """Handle prefixed."""
     return f"{emoji} {text}" if emoji else text

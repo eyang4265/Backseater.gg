@@ -16,11 +16,11 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Platform:
     code: str
-    #: Regional route for account-v1 (americas / asia / europe).
+
     account_route: str
-    #: Regional route for match-v5 (americas / asia / europe / sea).
+
     match_route: str
-    #: op.gg's slug for this platform, or None where op.gg has no presence.
+
     opgg_slug: str | None
 
 
@@ -47,13 +47,14 @@ _PLATFORMS: tuple[Platform, ...] = (
 
 PLATFORMS: dict[str, Platform] = {platform.code: platform for platform in _PLATFORMS}
 
-#: Platform codes offered in slash-command dropdowns.
+
 SERVERS: list[str] = [platform.code for platform in _PLATFORMS]
 
 DEFAULT_PLATFORM = "NA1"
 
 
 def platform(code: str | None) -> Platform | None:
+    """Handle platform."""
     if not code:
         return None
     return PLATFORMS.get(code.upper())
@@ -82,7 +83,9 @@ def opgg_url(code: str | None, riot_id: str | None) -> str | None:
     return f"https://op.gg/lol/summoners/{found.opgg_slug}/{quote(name)}-{quote(tag)}"
 
 
-def split_riot_id(summoner: str | None, tag: str | None) -> tuple[str | None, str | None]:
+def split_riot_id(
+    summoner: str | None, tag: str | None
+) -> tuple[str | None, str | None]:
     """Accept a combined ``Name#Tag`` in the summoner field.
 
     An explicitly supplied tag always wins over one embedded in the name.

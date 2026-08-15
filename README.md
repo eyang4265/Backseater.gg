@@ -17,7 +17,8 @@ Configuration is read from environment variables first, then from
 `json/secrets.json` (gitignored — copy `json/secrets.example.json` and fill it
 in). Required: `DISCORD_TOKEN`, `RIOT_API_KEY`, `DISCORD_OWNER_ID`,
 `ANNOUNCEMENT_CHANNEL_ID`. Optional: `GUILD_IDS`, `TFT_API_KEY`,
-`POLL_INTERVAL_SECONDS`, `LOG_LEVEL`.
+`POLL_INTERVAL_SECONDS`, `MAX_TRACKED_ACCOUNTS`, `TIMEZONE` (IANA name),
+`MATCH_CACHE_ENABLED`, `LOG_LEVEL`.
 
 ```bash
 .venv/bin/python main.py
@@ -29,9 +30,8 @@ in). Required: `DISCORD_TOKEN`, `RIOT_API_KEY`, `DISCORD_OWNER_ID`,
 python3 -m unittest discover -s tests -t .
 ```
 
-The suite covers the pure logic — routing, the rank scale, poller state,
-timeline analysis, the champion catalog, role assignment, and the possible-int
-classifier — and needs neither network access nor a Discord token.
+The suite covers the pure logic, pollers, registry, LP history, guild routing,
+and SQLite match cache, and needs neither network access nor a Discord token.
 
 ## Layout
 
@@ -40,10 +40,11 @@ classifier — and needs neither network access nor a Discord token.
 | Layer | Modules | Responsibility |
 | --- | --- | --- |
 | Configuration | `config`, `runtime` | Settings, and the handle to the Discord client |
-| Domain | `routing`, `queues`, `ranks`, `positions`, `timeline` | Pure logic, no I/O |
-| Adapters | `riot`, `ddragon`, `store` | Riot API, the Data Dragon CDN, JSON files on disk |
+| Domain | `routing`, `queues`, `positions`, `timeline` | Pure logic, no I/O |
+| Services | `ranks`, `history`, `lp_history`, `leaderboard` | Rank math and stored-state queries; `ranks.fetch_ranks` delegates to Riot |
+| Adapters | `riot`, `ddragon`, `store`, `match_cache` | Riot API, Data Dragon, JSON and SQLite state |
 | Presentation | `emoji`, `render`, `charts` | Embeds, team columns, images |
-| Features | `announce`, `tracker`, `guest_tracker`, `accounts` | Polling, formatting, publishing |
+| Features | `announce`, `tracker`, `guest_tracker`, `account_registry` | Polling, formatting, publishing, account management |
 | Interface | `commands/` | Slash-command cogs |
 
 Two rules keep it that way:

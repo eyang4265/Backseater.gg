@@ -37,14 +37,16 @@ def refresh_riot_ids() -> RiotIdRefresh:
     client = get_client()
 
     def resolve(account: Account) -> tuple[Account, str | None]:
-        # Bypass the riot-id cache: noticing name changes is the whole point.
+        """Resolve resolve."""
         return account, client.riot_id(account.puuid, account.server, refresh=True)
 
     updated: dict[str, Account] = dict(accounts)
     with ThreadPoolExecutor(max_workers=min(_REFRESH_WORKERS, len(accounts))) as pool:
         for account, riot_id in pool.map(resolve, accounts.values()):
             if riot_id is None:
-                result.failed.append(f"<@{account.discord_id}>: could not update {account.riot_id}")
+                result.failed.append(
+                    f"<@{account.discord_id}>: could not update {account.riot_id}"
+                )
             elif riot_id != account.riot_id:
                 result.changed.append(f"{account.riot_id} -> {riot_id}")
                 updated[account.discord_id] = replace(account, riot_id=riot_id)

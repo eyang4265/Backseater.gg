@@ -8,6 +8,7 @@ from .queues import queue_name
 
 
 def _format_duration(total_seconds: int) -> str:
+    """Format duration."""
     minutes, seconds = divmod(max(int(total_seconds), 0), 60)
     return f"{minutes}:{seconds:02d}"
 
@@ -20,7 +21,9 @@ def format_match_history_line(
     time_label: str,
 ) -> str:
     """One readable recent-game entry for a Discord embed description."""
-    cs = participant.get("totalMinionsKilled", 0) + participant.get("neutralMinionsKilled", 0)
+    cs = participant.get("totalMinionsKilled", 0) + participant.get(
+        "neutralMinionsKilled", 0
+    )
     outcome = "Victory" if participant.get("win") else "Defeat"
     kda = f"{participant.get('kills', 0)}/{participant.get('deaths', 0)}/{participant.get('assists', 0)}"
     return (

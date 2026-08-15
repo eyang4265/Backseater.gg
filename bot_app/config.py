@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,8 +36,11 @@ class Settings:
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
     poll_interval_seconds: int = 120
+    max_tracked_accounts: int = 25
+    timezone: str = "UTC"
+    match_cache_enabled: bool = True
     tft_api_key: str = ""
-    # Riot dev keys allow 20 requests/second and 100 requests/2 minutes.
+
     riot_rate_limits: tuple[tuple[int, float], ...] = ((20, 1.0), (100, 120.0))
     request_timeout_seconds: float = 20.0
     max_retries: int = 4
@@ -45,6 +49,7 @@ class Settings:
 
 
 def _load_secrets_file() -> dict[str, object]:
+    """Load secrets file."""
     try:
         with SECRETS_PATH.open(encoding="utf-8") as secrets_file:
             data = json.load(secrets_file)
@@ -67,6 +72,7 @@ def _get(file_values: dict[str, object], key: str, default: object = None) -> ob
 
 
 def _require(file_values: dict[str, object], key: str) -> str:
+    """Handle require."""
     value = _get(file_values, key)
     if value is None or not str(value).strip():
         raise ConfigError(
@@ -77,6 +83,7 @@ def _require(file_values: dict[str, object], key: str) -> str:
 
 
 def _int_list(value: object) -> tuple[int, ...]:
+    """Handle list."""
     if value is None or value == "":
         return ()
     values = value.replace(",", " ").split() if isinstance(value, str) else value
@@ -85,12 +92,15 @@ def _int_list(value: object) -> tuple[int, ...]:
     try:
         return tuple(int(item) for item in values)
     except (TypeError, ValueError) as error:
-        raise ConfigError("guild_ids must be a comma-separated list of numeric Discord IDs.") from error
+        raise ConfigError(
+            "guild_ids must be a comma-separated list of numeric Discord IDs."
+        ) from error
 
 
 def _positive_int(file_values: dict[str, object], key: str, default: int) -> int:
+    """Handle int."""
     try:
-        value = int(_get(file_values, key, default))
+        value = int(str(_get(file_values, key, default)))
     except (TypeError, ValueError) as error:
         raise ConfigError(f"{key} must be an integer.") from error
     if value <= 0:
@@ -99,13 +109,39 @@ def _positive_int(file_values: dict[str, object], key: str, default: int) -> int
 
 
 def _positive_float(file_values: dict[str, object], key: str, default: float) -> float:
+    """Handle float."""
     try:
-        value = float(_get(file_values, key, default))
+        value = float(str(_get(file_values, key, default)))
     except (TypeError, ValueError) as error:
         raise ConfigError(f"{key} must be a number.") from error
     if value <= 0:
         raise ConfigError(f"{key} must be greater than zero.")
     return value
+
+
+def _boolean(file_values: dict[str, object], key: str, default: bool) -> bool:
+    """Handle boolean."""
+    value = _get(file_values, key, default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{key} must be true or false.")
+
+
+def _timezone(file_values: dict[str, object]) -> str:
+    """Handle timezone."""
+    name = str(_get(file_values, "timezone", "UTC") or "UTC")
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise ConfigError(
+            f"timezone must be a valid IANA timezone (got {name!r})."
+        ) from error
+    return name
 
 
 @lru_cache(maxsize=1)
@@ -118,11 +154,18 @@ def get_settings() -> Settings:
         tft_api_key=str(_get(file_values, "tft_api_key", "") or ""),
         discord_owner_id=_positive_int(file_values, "discord_owner_id", 0),
         guild_ids=_int_list(_get(file_values, "guild_ids", ())),
-        announcement_channel_id=_positive_int(file_values, "announcement_channel_id", 0),
+        announcement_channel_id=_positive_int(
+            file_values, "announcement_channel_id", 0
+        ),
         openai_api_key=str(_get(file_values, "openai_api_key", "") or ""),
         openai_model=str(_get(file_values, "openai_model", "gpt-5-mini")),
         poll_interval_seconds=_positive_int(file_values, "poll_interval_seconds", 120),
-        request_timeout_seconds=_positive_float(file_values, "request_timeout_seconds", 20.0),
+        max_tracked_accounts=_positive_int(file_values, "max_tracked_accounts", 25),
+        timezone=_timezone(file_values),
+        match_cache_enabled=_boolean(file_values, "match_cache_enabled", True),
+        request_timeout_seconds=_positive_float(
+            file_values, "request_timeout_seconds", 20.0
+        ),
         max_retries=_positive_int(file_values, "max_retries", 4),
         log_level=str(_get(file_values, "log_level", "INFO")),
         _source="env+file" if file_values else "env",

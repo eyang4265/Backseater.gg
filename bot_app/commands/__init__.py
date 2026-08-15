@@ -10,16 +10,20 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from . import admin, ai, info, mastery, player
+from . import admin, ai, guilds, info, mastery, player, rankings, registry, stats
 from .match import setup_recap, setup_timeline
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     import discord
 
 LOGGER = logging.getLogger(__name__)
 
 _SETUPS = (
     player.setup,
+    registry.setup,
+    rankings.setup,
+    guilds.setup,
+    stats.setup,
     mastery.setup,
     setup_timeline,
     setup_recap,

@@ -42,11 +42,8 @@ BLUE_TEAM_ID = 100
 RED_TEAM_ID = 200
 TEAM_IDS = (BLUE_TEAM_ID, RED_TEAM_ID)
 
-#: Widest fan-out is a ten-player lobby; one worker each keeps latency flat.
+
 _LOOKUP_WORKERS = 10
-
-
-# -- basic embeds ----------------------------------------------------------
 
 
 def make_embed(
@@ -104,6 +101,7 @@ def relative_time(timestamp_ms: int | None) -> str:
 
 
 def kda_text(participant: dict[str, Any]) -> str:
+    """Handle text."""
     return (
         f"{participant.get('kills', 0)}/"
         f"{participant.get('deaths', 0)}/"
@@ -111,20 +109,22 @@ def kda_text(participant: dict[str, Any]) -> str:
     )
 
 
-# -- rank labels -----------------------------------------------------------
-
-
-def rank_text(snapshot: RankSnapshot | None, *, with_winrate: bool = False) -> str | None:
+def rank_text(
+    snapshot: RankSnapshot | None, *, with_winrate: bool = False
+) -> str | None:
     """``"🏆 Plat II (0 LP)"``. None when there is no rank to show."""
     if snapshot is None or not snapshot.is_ranked:
         return None
     tier = snapshot.tier or ""
     label = TIER_LABELS.get(tier, tier.title())
     if tier in APEX_TIERS or not snapshot.division:
-        text = emoji_lookup.prefixed(emoji_lookup.rank_emoji(tier), f"{label} ({snapshot.lp} LP)")
+        text = emoji_lookup.prefixed(
+            emoji_lookup.rank_emoji(tier), f"{label} ({snapshot.lp} LP)"
+        )
     else:
         text = emoji_lookup.prefixed(
-            emoji_lookup.rank_emoji(tier), f"{label} {snapshot.division} ({snapshot.lp} LP)"
+            emoji_lookup.rank_emoji(tier),
+            f"{label} {snapshot.division} ({snapshot.lp} LP)",
         )
     if with_winrate and snapshot.winrate is not None:
         text += f" · {snapshot.winrate * 100:.0f}%"
@@ -140,23 +140,23 @@ def average_rank_text(value: float | None) -> str:
     icon = emoji_lookup.rank_emoji(tier)
     if not division:
         return emoji_lookup.prefixed(icon, f"Master+ ({lp} LP)")
-    return emoji_lookup.prefixed(icon, f"{TIER_LABELS.get(tier, tier.title())} {division} ({lp} LP)")
+    return emoji_lookup.prefixed(
+        icon, f"{TIER_LABELS.get(tier, tier.title())} {division} ({lp} LP)"
+    )
 
 
 def winrate_text(snapshot: RankSnapshot | None) -> str | None:
+    """Handle text."""
     if snapshot is None or snapshot.winrate is None:
         return None
     return f"{snapshot.winrate * 100:.0f}%"
-
-
-# -- team columns ----------------------------------------------------------
 
 
 class NameStyle(Enum):
     """What identifies a player in the left-hand column."""
 
     SUMMONER = "summoner"
-    #: Used by the guest tracker, where one player deliberately has no name shown.
+
     CHAMPION = "champion"
 
 
@@ -168,7 +168,7 @@ class TeamColumns:
     red_ranks: list[str] = field(default_factory=list)
     blue_average: str = "Unranked"
     red_average: str = "Unranked"
-    #: Header over both rank columns; names the queue when it isn't the default.
+
     rank_header: str = "Rank:"
     debug_lines: list[str] = field(default_factory=list)
 
@@ -193,7 +193,7 @@ def add_team_columns(embed: discord.Embed, columns: TeamColumns) -> None:
     flowing Red's names up into Blue's row. The blank line after Blue's
     entries adds breathing room without the gap a full-width field leaves.
     """
-    spacer = "​"  # zero-width space: Discord rejects an empty field value
+    spacer = "​"
     embed.add_field(
         name=f"Blue Team | {columns.blue_average}",
         value=("\n".join(columns.blue_names) or "—") + f"\n{spacer}",
@@ -210,12 +210,19 @@ def add_team_columns(embed: discord.Embed, columns: TeamColumns) -> None:
         value="\n".join(columns.red_names) or "—",
         inline=True,
     )
-    embed.add_field(name=columns.rank_header, value="\n".join(columns.red_ranks) or "—", inline=True)
+    embed.add_field(
+        name=columns.rank_header, value="\n".join(columns.red_ranks) or "—", inline=True
+    )
     embed.add_field(name=spacer, value=spacer, inline=True)
 
 
-def _columns_from_rows(rows: Sequence[_Row], *, rank_header: str = "Rank:") -> TeamColumns:
+def _columns_from_rows(
+    rows: Sequence[_Row], *, rank_header: str = "Rank:"
+) -> TeamColumns:
+    """Handle from rows."""
+
     def team(team_id: int) -> tuple[list[str], list[str], float | None]:
+        """Build the team rows for one side."""
         entries = sorted(
             (row for row in rows if row.team_id == team_id),
             key=lambda row: role_sort_key(row.position),
@@ -262,8 +269,11 @@ def _positions_by_index(
         known = (
             [
                 POSITION_LABELS.get(
-                    participants[index].get("teamPosition")
-                    or participants[index].get("individualPosition")
+                    str(
+                        participants[index].get("teamPosition")
+                        or participants[index].get("individualPosition")
+                        or ""
+                    )
                 )
                 for index in indices
             ]
@@ -282,7 +292,9 @@ def _positions_by_index(
     return positions
 
 
-def _resolve_concurrently(items: Sequence[Any], resolve: Callable[[Any], Any]) -> list[Any]:
+def _resolve_concurrently(
+    items: Sequence[Any], resolve: Callable[[Any], Any]
+) -> list[Any]:
     """Run a blocking per-player lookup across all players at once.
 
     These are independent, network-bound, and rate-limited centrally, so
@@ -298,12 +310,14 @@ def _resolve_concurrently(items: Sequence[Any], resolve: Callable[[Any], Any]) -
 class _PlayerLookup:
     riot_id: str | None
     rank: RankSnapshot | None
-    #: True when the rank request itself failed, as opposed to the player
-    #: simply being unranked.
+
     rank_unavailable: bool
 
 
-def _lookup_player(puuid: str | None, server: str | None, queue_id: int) -> _PlayerLookup:
+def _lookup_player(
+    puuid: str | None, server: str | None, queue_id: int
+) -> _PlayerLookup:
+    """Handle player."""
     if not puuid or not server:
         return _PlayerLookup(None, None, True)
     client = get_client()
@@ -336,9 +350,10 @@ def build_match_columns(
     highlighted = set(highlight_puuids) | set(tracked_puuids())
     catalog = ddragon.catalog()
 
-    # match-v5's championName is already Data Dragon's internal id.
     champion_ids = [p.get("championName", "Unknown champion") for p in participants]
-    positions = _positions_by_index(participants, champion_ids, use_reported_positions=True)
+    positions = _positions_by_index(
+        participants, champion_ids, use_reported_positions=True
+    )
 
     lookups = _resolve_concurrently(
         [(p.get("puuid"), server) for p in participants],
@@ -374,7 +389,9 @@ def build_match_columns(
     return _columns_from_rows(rows)
 
 
-def build_lobby_columns(game: dict[str, Any], server: str) -> TeamColumns:
+def build_lobby_columns(
+    game: dict[str, Any], server: str, *, queue_id: int | None = None
+) -> TeamColumns:
     """Columns for a live game from the Spectator API.
 
     The lobby's own queue picks which ranked standing is shown — a Flex game
@@ -390,15 +407,19 @@ def build_lobby_columns(game: dict[str, Any], server: str) -> TeamColumns:
     if not participants:
         return TeamColumns()
 
-    rank_queue = rank_queue_for_match(game.get("gameQueueConfigId"))
+    rank_queue = queue_id or rank_queue_for_match(game.get("gameQueueConfigId"))
 
     catalog = ddragon.catalog()
-    champions = [catalog.by_key(p.get("championId")) if catalog else None for p in participants]
+    champions = [
+        catalog.by_key(p.get("championId")) if catalog else None for p in participants
+    ]
     champion_ids = [
         champion.internal_id if champion else f"Champion {p.get('championId')}"
         for champion, p in zip(champions, participants)
     ]
-    positions = _positions_by_index(participants, champion_ids, use_reported_positions=False)
+    positions = _positions_by_index(
+        participants, champion_ids, use_reported_positions=False
+    )
 
     lookups = _resolve_concurrently(
         [p.get("puuid") for p in participants],

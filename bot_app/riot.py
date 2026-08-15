@@ -31,14 +31,14 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from .config import get_settings
+from .match_cache import MatchCache, get_match_cache
 from .routing import DEFAULT_PLATFORM, account_route, match_route
 
 LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-#: Riot returns 404 for "this player is not in a game", which is a normal
-#: answer rather than a failure, so those endpoints map it to None.
+
 _NOT_FOUND = object()
 
 
@@ -46,6 +46,7 @@ class RiotAPIError(RuntimeError):
     """A Riot API request failed after exhausting its retries."""
 
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        """Initialize the instance."""
         super().__init__(message)
         self.status_code = status_code
 
@@ -54,6 +55,7 @@ class RateLimiter:
     """Sliding-window limiter enforcing several (requests, seconds) budgets."""
 
     def __init__(self, limits: tuple[tuple[int, float], ...]) -> None:
+        """Initialize the instance."""
         self._limits = limits
         self._timestamps: list[deque[float]] = [deque() for _ in limits]
         self._lock = threading.Lock()
@@ -65,7 +67,9 @@ class RateLimiter:
                 now = time.monotonic()
                 wait_for = 0.0
 
-                for (max_requests, window), stamps in zip(self._limits, self._timestamps):
+                for (max_requests, window), stamps in zip(
+                    self._limits, self._timestamps
+                ):
                     cutoff = now - window
                     while stamps and stamps[0] <= cutoff:
                         stamps.popleft()
@@ -88,22 +92,26 @@ class TTLCache:
     """
 
     def __init__(self, ttl_seconds: float, max_entries: int = 2048) -> None:
+        """Initialize the instance."""
         self._ttl = ttl_seconds
         self._max_entries = max_entries
         self._entries: dict[Any, tuple[float, Any]] = {}
         self._lock = threading.Lock()
 
-    def get_or_set(self, key: Any, produce: Callable[[], T]) -> T:
+    def get_or_set(
+        self, key: Any, produce: Callable[[], T], *, cache_none: bool = False
+    ) -> T:
+        """Return or set."""
         now = time.monotonic()
         with self._lock:
             hit = self._entries.get(key)
             if hit is not None and hit[0] > now:
                 return hit[1]
 
-        # Produced outside the lock: a slow HTTP call must not block readers
-        # of unrelated keys. A duplicate concurrent miss is cheaper than
-        # serializing every lookup behind one mutex.
         value = produce()
+
+        if value is None and not cache_none:
+            return value
 
         with self._lock:
             if len(self._entries) >= self._max_entries:
@@ -112,24 +120,29 @@ class TTLCache:
         return value
 
     def _evict_expired(self, now: float) -> None:
-        expired = [key for key, (deadline, _) in self._entries.items() if deadline <= now]
+        """Handle expired."""
+        expired = [
+            key for key, (deadline, _) in self._entries.items() if deadline <= now
+        ]
         for key in expired:
             del self._entries[key]
         if len(self._entries) >= self._max_entries:
-            # Still full of live entries — drop the oldest insertions.
             for key in list(self._entries)[: self._max_entries // 4]:
                 del self._entries[key]
 
     def invalidate(self, key: Any) -> None:
+        """Handle invalidate."""
         with self._lock:
             self._entries.pop(key, None)
 
     def clear(self) -> None:
+        """Handle clear."""
         with self._lock:
             self._entries.clear()
 
 
 def _retry_after_seconds(response: requests.Response, default: float) -> float:
+    """Handle after seconds."""
     raw = response.headers.get("Retry-After")
     if raw is None:
         return default
@@ -142,16 +155,19 @@ def _retry_after_seconds(response: requests.Response, default: float) -> float:
 class RiotClient:
     """Thread-safe client for the Riot Games API."""
 
-    def __init__(self) -> None:
+    def __init__(self, match_cache: MatchCache | None = None) -> None:
+        """Initialize the instance."""
         settings = get_settings()
         self._api_key = settings.riot_api_key
         self._timeout = settings.request_timeout_seconds
         self._max_retries = settings.max_retries
         self._limiter = RateLimiter(settings.riot_rate_limits)
+        self._match_cache = (
+            match_cache or get_match_cache() if settings.match_cache_enabled else None
+        )
 
         self._session = requests.Session()
-        # Pool comfortably above the widest fan-out (10 lobby players) so
-        # concurrent lookups reuse connections instead of queueing.
+
         adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16)
         self._session.mount("https://", adapter)
         self._session.headers.update(
@@ -161,8 +177,6 @@ class RiotClient:
         self._riot_id_cache = TTLCache(ttl_seconds=6 * 3600)
         self._summoner_cache = TTLCache(ttl_seconds=600)
         self._league_cache = TTLCache(ttl_seconds=60)
-
-    # -- transport ---------------------------------------------------------
 
     def _get(
         self,
@@ -213,16 +227,18 @@ class RiotClient:
             try:
                 return response.json()
             except ValueError as error:
-                raise RiotAPIError(f"GET {path} returned malformed JSON: {error}") from error
+                raise RiotAPIError(
+                    f"GET {path} returned malformed JSON: {error}"
+                ) from error
 
-        raise RiotAPIError(f"GET {path} failed after {self._max_retries} attempts: {last_error}")
+        raise RiotAPIError(
+            f"GET {path} failed after {self._max_retries} attempts: {last_error}"
+        )
 
     @staticmethod
     def _backoff(attempt: int) -> float:
         """Exponential backoff with jitter, capped so a retry never stalls a poll."""
         return min(0.5 * (2**attempt), 8.0) * (0.75 + random.random() * 0.5)
-
-    # -- account-v1 --------------------------------------------------------
 
     def riot_id(
         self, puuid: str, server: str = DEFAULT_PLATFORM, *, refresh: bool = False
@@ -238,12 +254,17 @@ class RiotClient:
             self._riot_id_cache.invalidate(("riot_id", puuid))
 
         def fetch() -> str | None:
+            """Fetch one item for the enclosing operation."""
             route = account_route(server)
             if route is None:
-                LOGGER.warning("Unknown platform %r; cannot resolve puuid %s", server, puuid)
+                LOGGER.warning(
+                    "Unknown platform %r; cannot resolve puuid %s", server, puuid
+                )
                 return None
             try:
-                account = self._get(route, f"/riot/account/v1/accounts/by-puuid/{puuid}")
+                account = self._get(
+                    route, f"/riot/account/v1/accounts/by-puuid/{puuid}"
+                )
             except RiotAPIError as error:
                 LOGGER.warning("Could not resolve puuid %s: %s", puuid, error)
                 return None
@@ -257,18 +278,21 @@ class RiotClient:
         """Resolve a ``Name``/``Tag`` pair to a puuid."""
         route = account_route(server)
         if route is None:
-            LOGGER.warning("Unknown platform %r; cannot resolve %s#%s", server, summoner, tag)
+            LOGGER.warning(
+                "Unknown platform %r; cannot resolve %s#%s", server, summoner, tag
+            )
             return None
         try:
             account = self._get(
-                route, f"/riot/account/v1/accounts/by-riot-id/{quote(summoner)}/{quote(tag)}"
+                route,
+                f"/riot/account/v1/accounts/by-riot-id/{quote(summoner)}/{quote(tag)}",
             )
         except RiotAPIError as error:
-            LOGGER.warning("Could not resolve %s#%s on %s: %s", summoner, tag, server, error)
+            LOGGER.warning(
+                "Could not resolve %s#%s on %s: %s", summoner, tag, server, error
+            )
             return None
         return account.get("puuid")
-
-    # -- summoner-v4 -------------------------------------------------------
 
     def summoner(self, puuid: str, server: str) -> dict[str, Any] | None:
         """Summoner record (level, profile icon). Cached briefly."""
@@ -276,6 +300,7 @@ class RiotClient:
             return None
 
         def fetch() -> dict[str, Any] | None:
+            """Fetch one item for the enclosing operation."""
             try:
                 return self._get(server, f"/lol/summoner/v4/summoners/by-puuid/{puuid}")
             except RiotAPIError as error:
@@ -285,14 +310,14 @@ class RiotClient:
         return self._summoner_cache.get_or_set(("summoner", server, puuid), fetch)
 
     def summoner_level(self, puuid: str, server: str) -> int | None:
+        """Handle level."""
         record = self.summoner(puuid, server)
         return record.get("summonerLevel") if record else None
 
     def profile_icon_id(self, puuid: str, server: str) -> int | None:
+        """Handle icon id."""
         record = self.summoner(puuid, server)
         return record.get("profileIconId") if record else None
-
-    # -- league-v4 ---------------------------------------------------------
 
     def league_entries(self, puuid: str, server: str) -> list[dict[str, Any]] | None:
         """Every ranked entry for an account, or None if the fetch failed.
@@ -304,17 +329,19 @@ class RiotClient:
             return None
 
         def fetch() -> list[dict[str, Any]] | None:
+            """Fetch one item for the enclosing operation."""
             try:
                 return self._get(server, f"/lol/league/v4/entries/by-puuid/{puuid}")
             except RiotAPIError as error:
-                LOGGER.warning("Could not fetch league entries for %s: %s", puuid, error)
+                LOGGER.warning(
+                    "Could not fetch league entries for %s: %s", puuid, error
+                )
                 return None
 
         return self._league_cache.get_or_set(("league", server, puuid), fetch)
 
-    # -- match-v5 ----------------------------------------------------------
-
     def match_ids(self, puuid: str, server: str, *, count: int = 20) -> list[str]:
+        """Handle ids."""
         route = match_route(server)
         if route is None:
             LOGGER.warning("Unknown platform %r; cannot list matches", server)
@@ -326,14 +353,25 @@ class RiotClient:
         )
 
     def match(self, match_id: str, server: str) -> dict[str, Any]:
+        """Handle match."""
+        if self._match_cache is not None:
+            cached = self._match_cache.get(match_id)
+            if cached is not None:
+                return cached
         route = match_route(server) or match_route(DEFAULT_PLATFORM)
-        return self._get(route, f"/lol/match/v5/matches/{match_id}")
+        if route is None:
+            raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
+        payload = self._get(route, f"/lol/match/v5/matches/{match_id}")
+        if self._match_cache is not None:
+            self._match_cache.put(match_id, server, payload)
+        return payload
 
     def match_timeline(self, match_id: str, server: str) -> dict[str, Any]:
+        """Handle timeline."""
         route = match_route(server) or match_route(DEFAULT_PLATFORM)
+        if route is None:
+            raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
         return self._get(route, f"/lol/match/v5/matches/{match_id}/timeline")
-
-    # -- spectator-v5 ------------------------------------------------------
 
     def active_game(self, puuid: str, server: str) -> dict[str, Any] | None:
         """The player's live game, or None when they aren't in one."""
@@ -344,21 +382,26 @@ class RiotClient:
         )
         return None if result is _NOT_FOUND else result
 
-    # -- champion mastery / rotation / status ------------------------------
-
     def champion_masteries(self, puuid: str, server: str) -> list[dict[str, Any]]:
-        return self._get(server, f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}")
+        """Handle masteries."""
+        return self._get(
+            server, f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}"
+        )
 
     def top_champion_masteries(
         self, puuid: str, server: str, *, count: int = 3
     ) -> list[dict[str, Any]]:
+        """Handle champion masteries."""
         return self._get(
             server,
             f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/top",
             params={"count": count},
         )
 
-    def champion_mastery(self, puuid: str, server: str, champion_id: int) -> dict[str, Any] | None:
+    def champion_mastery(
+        self, puuid: str, server: str, champion_id: int
+    ) -> dict[str, Any] | None:
+        """Handle mastery."""
         result = self._get(
             server,
             f"/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/by-champion/{champion_id}",
@@ -367,10 +410,12 @@ class RiotClient:
         return None if result is _NOT_FOUND else result
 
     def champion_rotation(self, server: str = DEFAULT_PLATFORM) -> list[int]:
+        """Handle rotation."""
         payload = self._get(server, "/lol/platform/v3/champion-rotations")
         return payload.get("freeChampionIds", [])
 
     def platform_status(self, server: str) -> dict[str, Any]:
+        """Handle status."""
         return self._get(server, "/lol/status/v4/platform-data")
 
 

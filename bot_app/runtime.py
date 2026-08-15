@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
+if TYPE_CHECKING:
     import discord
 
 _bot: "discord.Bot | None" = None
 
 
 def configure_bot(bot: "discord.Bot") -> None:
+    """Handle bot."""
     global _bot
     _bot = bot
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -10,11 +11,17 @@ from discord.ext import commands
 
 from ... import guest_tracker
 from ...accounts import refresh_riot_ids
-from ...announce import GoldView, TrackedPlayer, build_announcement_embed, format_match
+from ...announce import MatchAnnouncementView, TrackedPlayer, build_announcement_embed, format_match
 from ...charts import MATPLOTLIB_AVAILABLE
 from ...config import JSON_DIR
 from ...queues import lobby_queue_name
-from ...render import NameStyle, add_team_columns, build_lobby_columns, format_duration, make_embed
+from ...render import (
+    NameStyle,
+    add_team_columns,
+    build_lobby_columns,
+    format_duration,
+    make_embed,
+)
 from ...services.riot_api import RiotAPIError, get_client
 from ...routing import DEFAULT_PLATFORM
 from ...store import load_accounts, read_json
@@ -22,8 +29,10 @@ from ..shared import GUILD_IDS, log_command
 
 LOGGER = logging.getLogger(__name__)
 
-#: The account /selftest falls back to when no match id is given.
-SELFTEST_PUUID = "7ZZXIU4VCFrp089nPP9-GyeZOLOnyynl9qckvRrClsbbWWD4lQQKK-slhgJG-D2BjP8ElALjQKQrIg"
+
+SELFTEST_PUUID = (
+    "7ZZXIU4VCFrp089nPP9-GyeZOLOnyynl9qckvRrClsbbWWD4lQQKK-slhgJG-D2BjP8ElALjQKQrIg"
+)
 SELFTEST_SERVER = DEFAULT_PLATFORM
 SELFTEST_NAME = "StealthSwifter"
 
@@ -59,23 +68,29 @@ def _tracked_players_in(match: dict[str, Any]) -> list[TrackedPlayer]:
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot: discord.Bot) -> None:
+        """Initialize the instance."""
         self.bot = bot
 
-    @discord.slash_command(guild_ids=GUILD_IDS, description="List tracked accounts (owner only)")
+    @discord.slash_command(
+        guild_ids=GUILD_IDS, description="List tracked accounts (owner only)"
+    )
     @commands.is_owner()
     async def data(self, ctx):
         """Every tracked Discord user and their Riot ID."""
         log_command(ctx)
         accounts = load_accounts()
         listing = "\n".join(
-            f"<@{account.discord_id}>: {account.riot_id}" for account in accounts.values()
+            f"<@{account.discord_id}>: {account.riot_id}"
+            for account in accounts.values()
         )
         await ctx.respond(
             embed=make_embed(listing or "No accounts are tracked.", title="Data"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @discord.slash_command(guild_ids=GUILD_IDS, description="Update every saved Riot ID (owner only)")
+    @discord.slash_command(
+        guild_ids=GUILD_IDS, description="Update every saved Riot ID (owner only)"
+    )
     @commands.is_owner()
     async def updateriotids(self, ctx):
         """Re-resolve every tracked account's riot id and report what moved."""
@@ -90,18 +105,26 @@ class AdminCommands(commands.Cog):
 
         LOGGER.info("Riot ID refresh: %s", report.replace("\n", "; "))
         await ctx.respond(
-            embed=make_embed(report[:_EMBED_DESCRIPTION_LIMIT], title="Update Complete"),
+            embed=make_embed(
+                report[:_EMBED_DESCRIPTION_LIMIT], title="Update Complete"
+            ),
             ephemeral=True,
         )
 
-    @discord.slash_command(guild_ids=GUILD_IDS, description="Alias for /updateriotids (owner only)")
+    @discord.slash_command(
+        guild_ids=GUILD_IDS, description="Alias for /updateriotids (owner only)"
+    )
     @commands.is_owner()
     async def reload(self, ctx):
+        """Handle reload."""
         await self.updateriotids(ctx)
 
-    @discord.slash_command(guild_ids=GUILD_IDS, description="Connectivity check (owner only)")
+    @discord.slash_command(
+        guild_ids=GUILD_IDS, description="Connectivity check (owner only)"
+    )
     @commands.is_owner()
     async def test(self, ctx):
+        """Handle test."""
         log_command(ctx)
         await ctx.respond(embed=make_embed("Hi"))
 
@@ -144,13 +167,14 @@ class AdminCommands(commands.Cog):
 
         await self._live_match(ctx, match_id)
 
-    # -- selftest modes ----------------------------------------------------
-
     @staticmethod
     async def _sample_livegame(ctx) -> None:
+        """Handle livegame."""
         game = _load_sample("sample_livegame.json")
         if game is None:
-            await ctx.respond(embed=make_embed("Could not load json/samples/sample_livegame.json."))
+            await ctx.respond(
+                embed=make_embed("Could not load json/samples/sample_livegame.json.")
+            )
             return
 
         server = game.get("platformId") or DEFAULT_PLATFORM
@@ -165,35 +189,48 @@ class AdminCommands(commands.Cog):
         await ctx.respond(embed=embed)
 
     async def _sample_match(self, ctx) -> None:
+        """Handle match."""
         match = _load_sample("sample_match.json")
         if match is None or "info" not in match:
-            await ctx.respond(embed=make_embed("Could not load json/samples/sample_match.json."))
+            await ctx.respond(
+                embed=make_embed("Could not load json/samples/sample_match.json.")
+            )
             return
         await self._respond_with_announcement(ctx, match, _tracked_players_in(match))
 
     async def _sample_guest(self, ctx) -> None:
+        """Handle guest."""
         match = _load_sample("sample_match.json")
         if match is None or "info" not in match:
-            await ctx.respond(embed=make_embed("Could not load json/samples/sample_match.json."))
+            await ctx.respond(
+                embed=make_embed("Could not load json/samples/sample_match.json.")
+            )
             return
 
         players = guest_tracker.build_guest_players(match)
         if players is None:
             await ctx.respond(
                 embed=make_embed(
-                    f'No participant named "{guest_tracker.GUEST_NAME}" was found in '
+                    f'"{guest_tracker.GUEST_NAME}" and CrispyPineapple were not both present in '
                     "json/samples/sample_match.json."
                 )
             )
             return
-        await self._respond_with_announcement(ctx, match, players, name_style=NameStyle.CHAMPION)
+        await self._respond_with_announcement(
+            ctx, match, players, name_style=NameStyle.CHAMPION
+        )
 
     async def _live_match(self, ctx, match_id: str | None) -> None:
+        """Handle match."""
         client = get_client()
         try:
-            selected_id = match_id or self._latest_selftest_match_id()
+            selected_id = match_id or await asyncio.to_thread(
+                self._latest_selftest_match_id
+            )
         except RiotAPIError as error:
-            await ctx.respond(embed=make_embed(f"Could not fetch a match to test with: {error}"))
+            await ctx.respond(
+                embed=make_embed(f"Could not fetch a match to test with: {error}")
+            )
             return
 
         if selected_id is None:
@@ -201,17 +238,23 @@ class AdminCommands(commands.Cog):
             return
 
         try:
-            match = client.match(selected_id, SELFTEST_SERVER)
+            match = await asyncio.to_thread(client.match, selected_id, SELFTEST_SERVER)
         except RiotAPIError as error:
-            await ctx.respond(embed=make_embed(f"Could not fetch match `{selected_id}`: {error}"))
+            await ctx.respond(
+                embed=make_embed(f"Could not fetch match `{selected_id}`: {error}")
+            )
             return
 
         if "info" not in match:
-            await ctx.respond(embed=make_embed(f"Match `{selected_id}` returned no data."))
+            await ctx.respond(
+                embed=make_embed(f"Match `{selected_id}` returned no data.")
+            )
             return
 
         players = _tracked_players_in(match)
-        if not match_id and not any(player.puuid == SELFTEST_PUUID for player in players):
+        if not match_id and not any(
+            player.puuid == SELFTEST_PUUID for player in players
+        ):
             await ctx.respond(
                 embed=make_embed(
                     f"{SELFTEST_NAME}'s latest match could not be matched to the configured PUUID."
@@ -223,6 +266,7 @@ class AdminCommands(commands.Cog):
 
     @staticmethod
     def _latest_selftest_match_id() -> str | None:
+        """Handle selftest match id."""
         match_ids = get_client().match_ids(SELFTEST_PUUID, SELFTEST_SERVER, count=1)
         return match_ids[0] if match_ids else None
 
@@ -264,9 +308,10 @@ class AdminCommands(commands.Cog):
         await ctx.respond(
             embed=embed,
             file=chart,
-            view=GoldView(announcement.match),
+            view=MatchAnnouncementView(announcement),
         )
 
 
 def setup(bot: discord.Bot) -> None:
+    """Register this command module with the bot."""
     bot.add_cog(AdminCommands(bot))

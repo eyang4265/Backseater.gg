@@ -19,15 +19,14 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Any
 
-#: Game-world units, roughly one screen width.
+
 SOLO_KILL_PROXIMITY = 1400
 _PROXIMITY_SQUARED = SOLO_KILL_PROXIMITY**2
 
-#: How close a frame must land to a target minute mark to count as data for
-#: it, rather than the game simply having ended first.
+
 LANE_DIFF_TOLERANCE_MS = 30_000
 
-#: Spacing of the marks :meth:`MatchTimeline.lane_diff_series` steps through.
+
 LANE_DIFF_INTERVAL_MS = 300_000
 
 
@@ -50,6 +49,7 @@ class KillEvent:
 
     @property
     def minute(self) -> int:
+        """Handle minute."""
         return self.timestamp // 60_000
 
 
@@ -61,10 +61,9 @@ class LaneDiff:
     cs: int
 
 
-#: Where champion levels stop for most roles; XP past it buys nothing.
 MAX_LEVEL = 18
 
-#: Top lane keeps levelling past the usual cap.
+
 TOP_LANE_MAX_LEVEL = 20
 
 
@@ -115,7 +114,7 @@ def format_diff(value: int) -> str:
 def format_levels(value: float) -> str:
     """Signed level gap to one decimal: ``"+2.5"`` / ``"-1.2"``."""
     rounded = round(value, 1)
-    # Without this, a hair below zero formats as "-0.0".
+
     return "+0.0" if rounded == 0 else f"{rounded:+.1f}"
 
 
@@ -134,7 +133,9 @@ def format_lane_lines(series: list[tuple[int, "LaneDiff"]]) -> str:
     )
 
 
-def opponent_participant_id(match: dict[str, Any], participant: dict[str, Any]) -> int | None:
+def opponent_participant_id(
+    match: dict[str, Any], participant: dict[str, Any]
+) -> int | None:
     """The mirrored laner on the other team, or None (ARAM, Arena, no data)."""
     position = participant.get("teamPosition")
     if not position:
@@ -146,7 +147,9 @@ def opponent_participant_id(match: dict[str, Any], participant: dict[str, Any]) 
     return None
 
 
-def participant_at_slot(match: dict[str, Any], slot: int | None) -> dict[str, Any] | None:
+def participant_at_slot(
+    match: dict[str, Any], slot: int | None
+) -> dict[str, Any] | None:
     """The player in a 1-10 draft slot: 1-5 blue top→support, 6-10 red.
 
     Riot numbers participants in that order, so the slot is the
@@ -161,27 +164,37 @@ def participant_at_slot(match: dict[str, Any], slot: int | None) -> dict[str, An
 
 
 def _cs(participant_frame: dict[str, Any]) -> int:
-    return participant_frame.get("minionsKilled", 0) + participant_frame.get("jungleMinionsKilled", 0)
+    """Handle cs."""
+    return participant_frame.get("minionsKilled", 0) + participant_frame.get(
+        "jungleMinionsKilled", 0
+    )
 
 
 class MatchTimeline:
     """Indexed view over one match's timeline payload."""
 
     def __init__(self, payload: dict[str, Any]) -> None:
+        """Initialize the instance."""
         frames = payload.get("info", {}).get("frames", []) or []
-        self._frames: list[dict[str, Any]] = sorted(frames, key=lambda f: f.get("timestamp", 0))
-        self._timestamps: list[int] = [frame.get("timestamp", 0) for frame in self._frames]
-        self._positions: list[dict[int, tuple[float, float]] | None] = [None] * len(self._frames)
+        self._frames: list[dict[str, Any]] = sorted(
+            frames, key=lambda f: f.get("timestamp", 0)
+        )
+        self._timestamps: list[int] = [
+            frame.get("timestamp", 0) for frame in self._frames
+        ]
+        self._positions: list[dict[int, tuple[float, float]] | None] = [None] * len(
+            self._frames
+        )
         self._solo_kills: list[dict[str, Any]] | None = None
         self._champion_kills: list[KillEvent] | None = None
 
-    # -- frame lookup ------------------------------------------------------
-
     def _frame_index_at_or_before(self, timestamp: int) -> int | None:
+        """Handle index at or before."""
         index = bisect_right(self._timestamps, timestamp) - 1
         return index if index >= 0 else None
 
     def _nearest_frame_index(self, timestamp: int) -> int | None:
+        """Handle frame index."""
         if not self._timestamps:
             return None
         index = bisect_left(self._timestamps, timestamp)
@@ -197,7 +210,9 @@ class MatchTimeline:
         cached = self._positions[index]
         if cached is None:
             cached = {}
-            for key, participant_frame in self._frames[index].get("participantFrames", {}).items():
+            for key, participant_frame in (
+                self._frames[index].get("participantFrames", {}).items()
+            ):
                 position = participant_frame.get("position")
                 if position:
                     try:
@@ -206,8 +221,6 @@ class MatchTimeline:
                         continue
             self._positions[index] = cached
         return cached
-
-    # -- solo kills --------------------------------------------------------
 
     def _classified_solo_kills(self) -> list[dict[str, Any]]:
         """Every ``CHAMPION_KILL`` event that qualifies as a solo kill.
@@ -225,11 +238,12 @@ class MatchTimeline:
         return self._solo_kills
 
     def _is_solo_kill(self, event: dict[str, Any]) -> bool:
+        """Handle solo kill."""
         if event.get("assistingParticipantIds"):
             return False
         killer_id = event.get("killerId")
         victim_id = event.get("victimId")
-        # Turret and minion kills carry no killerId; executions can lack a victimId.
+
         if not killer_id or not victim_id:
             return False
 
@@ -250,15 +264,18 @@ class MatchTimeline:
         return True
 
     def solo_kill_stats(self, participant_id: int | None) -> SoloKillStats:
+        """Handle kill stats."""
         if participant_id is None:
             return SoloKillStats()
         events = self._classified_solo_kills()
         return SoloKillStats(
-            solo_kills=sum(1 for event in events if event.get("killerId") == participant_id),
-            solo_deaths=sum(1 for event in events if event.get("victimId") == participant_id),
+            solo_kills=sum(
+                1 for event in events if event.get("killerId") == participant_id
+            ),
+            solo_deaths=sum(
+                1 for event in events if event.get("victimId") == participant_id
+            ),
         )
-
-    # -- kill locations ----------------------------------------------------
 
     def champion_kills(self) -> list[KillEvent]:
         """Every kill that carries a map position, oldest first.
@@ -283,7 +300,9 @@ class MatchTimeline:
                             victim_id=event.get("victimId") or None,
                             x=x,
                             y=y,
-                            assist_count=len(event.get("assistingParticipantIds") or ()),
+                            assist_count=len(
+                                event.get("assistingParticipantIds") or ()
+                            ),
                         )
                     )
             self._champion_kills = sorted(events, key=lambda event: event.timestamp)
@@ -300,8 +319,6 @@ class MatchTimeline:
             [event for event in events if event.killer_id == participant_id],
             [event for event in events if event.victim_id == participant_id],
         )
-
-    # -- lane diffs --------------------------------------------------------
 
     def lane_diff_at(
         self,
@@ -322,7 +339,10 @@ class MatchTimeline:
             return None
 
         index = self._nearest_frame_index(timestamp)
-        if index is None or abs(self._timestamps[index] - timestamp) > LANE_DIFF_TOLERANCE_MS:
+        if (
+            index is None
+            or abs(self._timestamps[index] - timestamp) > LANE_DIFF_TOLERANCE_MS
+        ):
             return None
 
         participant_frames = self._frames[index].get("participantFrames", {})

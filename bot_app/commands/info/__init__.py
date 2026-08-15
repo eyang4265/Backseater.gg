@@ -10,5 +10,6 @@ __all__ = ["CommandDirectory", "RiotInfoCommands", "setup"]
 
 
 def setup(bot: discord.Bot) -> None:
+    """Register this command module with the bot."""
     setup_commands(bot)
     setup_riot_info(bot)

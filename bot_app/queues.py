@@ -10,7 +10,7 @@ SOLO_QUEUE_ID = 420
 FLEX_QUEUE_ID = 440
 RANKED_QUEUE_IDS = frozenset({SOLO_QUEUE_ID, FLEX_QUEUE_ID})
 
-#: Riot's ranked ``queueType`` string per ranked queue id.
+
 QUEUE_TYPES: dict[int, str] = {
     SOLO_QUEUE_ID: "RANKED_SOLO_5x5",
     FLEX_QUEUE_ID: "RANKED_FLEX_SR",
@@ -51,6 +51,7 @@ QUEUE_NAMES: dict[int, str] = {
 
 
 def queue_name(queue_id: int | None) -> str:
+    """Handle name."""
     if queue_id is None:
         return "Unknown Queue"
     return QUEUE_NAMES.get(queue_id, f"Queue {queue_id}")
@@ -64,4 +65,5 @@ def lobby_queue_name(queue_id: int | None) -> str:
 
 
 def is_ranked(queue_id: int | None) -> bool:
+    """Handle ranked."""
     return queue_id in RANKED_QUEUE_IDS

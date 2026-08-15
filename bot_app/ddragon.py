@@ -23,17 +23,15 @@ LOGGER = logging.getLogger(__name__)
 _VERSIONS_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
 _CDN = "https://ddragon.leagueoflegends.com/cdn"
 
-#: How long a cached catalog is trusted before re-checking for a new patch.
+
 _REFRESH_SECONDS = 6 * 3600
 _FETCH_ATTEMPTS = 3
 _TIMEOUT = 10.0
 
-#: Data Dragon's id for the plain grey "no icon set" avatar, used so embeds
-#: always have a real image rather than a broken link.
+
 BLANK_PROFILE_ICON_ID = 29
 
-#: Community shorthand that doesn't survive normalisation ("tf" shares
-#: nothing with "twistedfate"). Values are Data Dragon internal ids.
+
 _ALIASES: dict[str, str] = {
     "asol": "AurelionSol",
     "cait": "Caitlyn",
@@ -88,10 +86,9 @@ def normalize(text: str) -> str:
 @dataclass(frozen=True)
 class Champion:
     key: int
-    #: Data Dragon internal id — the backend convention, matching match-v5's
-    #: ``championName`` field (e.g. "DrMundo", "MonkeyKing").
+
     internal_id: str
-    #: Display name shown to users (e.g. "Dr. Mundo", "Wukong").
+
     name: str
     tags: tuple[str, ...]
 
@@ -100,22 +97,25 @@ class ChampionCatalog:
     """Indexed view over one patch's champion.json."""
 
     def __init__(self, version: str, champions: Iterable[Champion]) -> None:
+        """Initialize the instance."""
         self.version = version
         self.champions: tuple[Champion, ...] = tuple(champions)
         self._by_key: dict[int, Champion] = {c.key: c for c in self.champions}
-        self._by_internal_id: dict[str, Champion] = {c.internal_id: c for c in self.champions}
+        self._by_internal_id: dict[str, Champion] = {
+            c.internal_id: c for c in self.champions
+        }
 
-        # One lookup table covering display names, internal ids, and aliases.
         self._by_query: dict[str, Champion] = {}
         for champion in self.champions:
             self._by_query.setdefault(normalize(champion.name), champion)
             self._by_query.setdefault(normalize(champion.internal_id), champion)
         for alias, internal_id in _ALIASES.items():
-            champion = self._by_internal_id.get(internal_id)
-            if champion is not None:
-                self._by_query.setdefault(normalize(alias), champion)
+            aliased = self._by_internal_id.get(internal_id)
+            if aliased is not None:
+                self._by_query.setdefault(normalize(alias), aliased)
 
     def by_key(self, champion_key: int | str | None) -> Champion | None:
+        """Handle key."""
         if champion_key is None:
             return None
         try:
@@ -124,6 +124,7 @@ class ChampionCatalog:
             return None
 
     def by_internal_id(self, internal_id: str | None) -> Champion | None:
+        """Handle internal id."""
         return self._by_internal_id.get(internal_id) if internal_id else None
 
     def by_query(self, text: str | None) -> Champion | None:
@@ -134,6 +135,7 @@ class ChampionCatalog:
 
     @property
     def tags_by_internal_id(self) -> dict[str, tuple[str, ...]]:
+        """Handle by internal id."""
         return {c.internal_id: c.tags for c in self.champions}
 
 
@@ -141,6 +143,7 @@ class _CatalogLoader:
     """Loads and caches the catalog, serving stale data rather than failing."""
 
     def __init__(self) -> None:
+        """Initialize the instance."""
         self._lock = threading.Lock()
         self._catalog: ChampionCatalog | None = None
         self._loaded_at = 0.0
@@ -163,9 +166,12 @@ class _CatalogLoader:
             return self._version
 
     def catalog(self) -> ChampionCatalog | None:
+        """Handle catalog."""
         now = time.monotonic()
         with self._lock:
-            fresh = self._catalog is not None and now - self._loaded_at < _REFRESH_SECONDS
+            fresh = (
+                self._catalog is not None and now - self._loaded_at < _REFRESH_SECONDS
+            )
             if fresh:
                 return self._catalog
 
@@ -207,23 +213,35 @@ class _CatalogLoader:
         """
         with self._lock:
             if self._catalog is not None:
-                LOGGER.warning("Data Dragon: %s; serving cached patch %s", reason, self._catalog.version)
+                LOGGER.warning(
+                    "Data Dragon: %s; serving cached patch %s",
+                    reason,
+                    self._catalog.version,
+                )
                 return self._catalog
         LOGGER.error("Data Dragon: %s, and no cached copy is available", reason)
         return None
 
     @staticmethod
     def _fetch_version() -> str | None:
+        """Fetch version."""
         try:
             response = requests.get(_VERSIONS_URL, timeout=_TIMEOUT)
             response.raise_for_status()
             return response.json()[0]
-        except (requests.RequestException, IndexError, KeyError, TypeError, ValueError) as error:
+        except (
+            requests.RequestException,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
             LOGGER.warning("Could not fetch the current League version: %s", error)
             return None
 
     @staticmethod
     def _fetch_champions(version: str) -> dict[str, Any] | None:
+        """Fetch champions."""
         url = f"{_CDN}/{version}/data/en_US/champion.json"
         for attempt in range(_FETCH_ATTEMPTS):
             try:
@@ -231,14 +249,19 @@ class _CatalogLoader:
                 response.raise_for_status()
                 return response.json()
             except (requests.RequestException, ValueError) as error:
-                LOGGER.warning("champion.json attempt %d/%d failed: %s", attempt + 1, _FETCH_ATTEMPTS, error)
+                LOGGER.warning(
+                    "champion.json attempt %d/%d failed: %s",
+                    attempt + 1,
+                    _FETCH_ATTEMPTS,
+                    error,
+                )
                 time.sleep(0.5 * (attempt + 1))
         return None
 
 
 _loader = _CatalogLoader()
 
-#: Minimap art keyed by "<version>/<mapId>"; see :func:`map_image`.
+
 _map_images: dict[str, bytes] = {}
 _map_image_lock = threading.Lock()
 
@@ -249,20 +272,22 @@ def catalog() -> ChampionCatalog | None:
 
 
 def current_version() -> str | None:
+    """Handle version."""
     return _loader.version()
 
 
-# -- convenience lookups ---------------------------------------------------
-
-
-def champion_name(champion_key: int | str | None, default: str | None = None) -> str | None:
+def champion_name(
+    champion_key: int | str | None, default: str | None = None
+) -> str | None:
     """Display name for a numeric champion key (e.g. 36 → "Dr. Mundo")."""
     active = catalog()
     champion = active.by_key(champion_key) if active else None
     return champion.name if champion else default
 
 
-def champion_internal_id(champion_key: int | str | None, default: str | None = None) -> str | None:
+def champion_internal_id(
+    champion_key: int | str | None, default: str | None = None
+) -> str | None:
     """Data Dragon internal id for a numeric key (e.g. 36 → "DrMundo")."""
     active = catalog()
     champion = active.by_key(champion_key) if active else None
@@ -277,6 +302,7 @@ def champion_key_for_name(text: str | None) -> int | None:
 
 
 def champion_tags_by_internal_id() -> dict[str, tuple[str, ...]]:
+    """Handle tags by internal id."""
     active = catalog()
     return active.tags_by_internal_id if active else {}
 
@@ -303,8 +329,6 @@ def map_image(map_id: int | None, version: str | None = None) -> bytes | None:
         response = requests.get(url, timeout=_TIMEOUT)
         response.raise_for_status()
     except requests.RequestException as error:
-        # Not cached: a transient CDN failure shouldn't disable the map for
-        # the rest of the process's life.
         LOGGER.warning("Could not fetch map art %s: %s", url, error)
         return None
 
