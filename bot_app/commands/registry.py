@@ -7,7 +7,7 @@ import asyncio
 import discord
 from discord.ext import commands
 
-from ..account_registry import RegistryError, track_account, untrack_account
+from ..account_registry import RegistryError, track_account
 from ..config import get_settings
 from ..paginator import Paginator
 from ..render import make_embed
@@ -75,34 +75,9 @@ class RegistryCommands(commands.Cog):
         )
 
     @discord.slash_command(
-        guild_ids=GUILD_IDS, description="Stop tracking a Riot account"
-    )
-    @discord.option(
-        "user", discord.User, description="User (owner only)", required=False
-    )
-    async def untrack(self, ctx, user=None):
-        """Handle untrack."""
-        log_command(ctx, user=user)
-        target_user = user or ctx.author
-        is_owner = ctx.author.id == get_settings().discord_owner_id
-        if user is not None and user.id != ctx.author.id and not is_owner:
-            await ctx.respond(
-                embed=make_embed("Only the bot owner can unlink another user."),
-                ephemeral=True,
-            )
-            return
-        await ctx.defer(ephemeral=True)
-        removed = await asyncio.to_thread(untrack_account, target_user.id)
-        text = (
-            f"Stopped tracking **{removed.riot_id}**."
-            if removed
-            else "That user has no tracked account."
-        )
-        await ctx.respond(embed=make_embed(text), ephemeral=True)
-
-    @discord.slash_command(
         guild_ids=GUILD_IDS, description="List tracked Riot accounts"
     )
+    @commands.is_owner()
     async def accounts(self, ctx):
         """Handle accounts."""
         log_command(ctx)

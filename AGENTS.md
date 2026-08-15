@@ -2,11 +2,16 @@
 
 Before running `main.py`, stop the currently running Discord bot with `Ctrl+C`.
 Run `main.py` anytime you change a file with the system Python:
-`/usr/bin/python3 main.py`. Do not use the project's `.venv` by default.
+`/usr/bin/python3 main.py`.
 
-When you add a new public slash command, also add it to the `/commands` command directory with a description and usage instructions. Keep owner-only commands out of that directory.
+When you add or change a public slash command, update the `/commands` command directory with its current description and usage instructions. Keep owner-only commands out of that directory.
 
 For any new command that requires a player, default to the account linked to the invoking Discord user when no player is supplied. For commands that require a match, default to that account's most recent match. Player-oriented commands should provide optional `server`, `summoner`, and `user` options so callers can select another account when needed.
+
+Whenever functionality is added, changed, or removed, update the implemented-
+features sections in both `AGENTS.md` and `CLAUDE.md`, keep their development
+instructions synchronized, and update all affected docstrings before finishing
+the task.
 
 ## Implemented features
 

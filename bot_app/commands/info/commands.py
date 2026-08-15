@@ -42,16 +42,10 @@ _COMMANDS = (
         "Usage: `/timeline`; optionally provide `match_id` and `position`.\n\n"
         "**`/mastery`** — Show all champion mastery or details for one champion.\n"
         "Usage: `/mastery`; optionally provide `champion` or a player.\n\n"
-        "**`/today`** — Show today's saved LP movement.\n"
-        "Usage: `/today`; optionally provide a player or `queue`.\n\n"
-        "**`/lpgraph`** — Graph saved LP history.\n"
-        "Usage: `/lpgraph`; optionally provide a player, `queue`, or `days`.\n\n"
         "**`/leaderboard`** — Rank tracked accounts from saved snapshots.\n"
         "Usage: `/leaderboard`; optionally choose a `queue`.\n\n"
         "**`/championstats`** — Aggregate champion results from cached matches.\n"
-        "Usage: `/championstats`; optionally provide a player or `champion`.\n\n"
-        "**`/duo`** — Show the cached record for two tracked players.\n"
-        "Usage: `/duo teammate:<user>`; optionally provide the primary player.",
+        "Usage: `/championstats`; optionally provide a player or `champion`.",
     ),
     (
         "Riot information",

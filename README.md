@@ -10,7 +10,7 @@ player's ten latest games with their result, champion, KDA, CS, queue, and durat
 ## Running it
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 Configuration is read from environment variables first, then from
@@ -21,7 +21,7 @@ in). Required: `DISCORD_TOKEN`, `RIOT_API_KEY`, `DISCORD_OWNER_ID`,
 `MATCH_CACHE_ENABLED`, `LOG_LEVEL`.
 
 ```bash
-.venv/bin/python main.py
+/usr/bin/python3 main.py
 ```
 
 ## Tests

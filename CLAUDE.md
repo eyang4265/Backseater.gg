@@ -2,18 +2,23 @@
 
 Before running `main.py`, stop the currently running Discord bot with `Ctrl+C`.
 Run `main.py` anytime you change a file with the system Python:
-`/usr/bin/python3 main.py`. Do not use the project's `.venv` by default.
+`/usr/bin/python3 main.py`.
 
-When you add a new public slash command, also add it to the `/commands` command directory with a description and usage instructions. Keep owner-only commands out of that directory.
+When you add or change a public slash command, update the `/commands` command directory with its current description and usage instructions. Keep owner-only commands out of that directory.
 
 For any new command that requires a player, default to the account linked to the invoking Discord user when no player is supplied. For commands that require a match, default to that account's most recent match. Player-oriented commands should provide optional `server`, `summoner`, and `user` options so callers can select another account when needed.
 
+Whenever functionality is added, changed, or removed, update the implemented-
+features sections in both `AGENTS.md` and `CLAUDE.md`, keep their development
+instructions synchronized, and update all affected docstrings before finishing
+the task.
+
 ## Implemented features
 
-- Discord slash commands for profiles, live games, match history, match lists, OP.GG links, PUUID lookup, mastery, match recaps, timelines, champion rotation, server status, and command discovery.
+- Discord slash commands for profiles, live games using the shared registered-player live-game announcement renderer with reversible Flex/Solo rank toggles, filtered match history (game mode and champion), match lists, OP.GG links, PUUID lookup, mastery, match recaps, timelines, champion rotation, server status, and command discovery.
 - Account registry commands for tracking, untracking, listing, refreshing, ownership reassignment, duplicate prevention, roster limits, and defaulting commands to the invoking user's linked account.
-- Automatic ranked-match announcements with LP changes, rank information, team columns, damage charts, gold summaries, chronological processing, and durable deduplication.
-- Automatic live-game announcements with lobby queue, duration, participant champions, ranks, win rates, inferred positions, and one announcement per shared lobby.
+- Automatic ranked-match announcements with LP changes, rank information, Flex-to-Solo rank toggle, team columns, tracked-player-highlighted damage-dealt, timeline-based team gold-difference, damage-taken, and healing-and-shielding charts with navigation buttons, chronological processing, and durable deduplication.
+- Automatic live-game announcements with lobby queue, duration, participant champions, ranks, Ranked Solo toggle for Flex lobbies, win rates, inferred positions, and one announcement per shared lobby.
 - Guest announcements that remain anonymous, trigger only when Guest and CrispyPineapple are in the same game, and allow every queue when both are present. CrispyPineapple alone follows normal tracked-player behavior.
 - Per-guild announcement-channel configuration with a mandatory global fallback, guild membership routing, conservative handling of transient Discord failures, and cached batch lookups.
 - Rank history with persisted snapshots, LP attribution, promotion and season-reset handling, local-day summaries, LP graphs, and a paginated leaderboard.
