@@ -11,6 +11,7 @@ from ..account_registry import RegistryError, track_account
 from ..config import get_settings
 from ..paginator import Paginator
 from ..render import make_embed
+from ..routing import split_riot_id
 from ..store import Account, load_accounts
 from .shared import GUILD_IDS, SERVERS, log_command
 
@@ -36,15 +37,21 @@ class RegistryCommands(commands.Cog):
         self.bot = bot
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Track a Riot account")
-    @discord.option("summoner", description="Game Name")
-    @discord.option("tag", description="Tagline")
+    @discord.option("summoner", description="Game Name#Tag")
     @discord.option("server", description="Server", choices=SERVERS)
     @discord.option(
         "user", discord.User, description="User (owner only)", required=False
     )
-    async def track(self, ctx, summoner, tag, server, user=None):
+    async def track(self, ctx, summoner, server, user=None):
         """Handle track."""
-        log_command(ctx, summoner=summoner, tag=tag, server=server, user=user)
+        log_command(ctx, summoner=summoner, server=server, user=user)
+        name, tag = split_riot_id(summoner, None)
+        if not tag:
+            await ctx.respond(
+                embed=make_embed("Give a Riot ID in the form `Name#Tag`."),
+                ephemeral=True,
+            )
+            return
         target_user = user or ctx.author
         is_owner = ctx.author.id == get_settings().discord_owner_id
         if user is not None and user.id != ctx.author.id and not is_owner:
@@ -58,7 +65,7 @@ class RegistryCommands(commands.Cog):
             account = await asyncio.to_thread(
                 track_account,
                 target_user.id,
-                summoner,
+                name,
                 tag,
                 server,
                 allow_reassign=is_owner,

@@ -33,7 +33,12 @@ from .render import (
 )
 from .routing import opgg_url
 from .riot import get_client
-from .store import load_accounts, load_guild_channels
+from .store import (
+    load_accounts,
+    load_embed_button_states,
+    load_guild_channels,
+    remember_embed_button_state,
+)
 
 LOGGER = logging.getLogger(__name__)
 _UNSET = object()
@@ -70,6 +75,92 @@ class LiveGameAnnouncement:
     text: str
     game: dict[str, Any]
     highlight_puuids: set[str]
+
+
+def _announcement_payload(announcement: MatchAnnouncement) -> dict[str, Any]:
+    """Serialize the data needed to rebuild a completed-match view."""
+    return {
+        "text": announcement.text,
+        "outcome": announcement.outcome,
+        "match": announcement.match,
+        "highlight_puuids": sorted(announcement.highlight_puuids),
+        "name_style": announcement.name_style.value,
+    }
+
+
+def _live_game_payload(announcement: LiveGameAnnouncement) -> dict[str, Any]:
+    """Serialize the data needed to rebuild a live-game view."""
+    return {
+        "text": announcement.text,
+        "game": announcement.game,
+        "highlight_puuids": sorted(announcement.highlight_puuids),
+    }
+
+
+def _announcement_from_payload(payload: dict[str, Any]) -> MatchAnnouncement:
+    """Restore a completed-match announcement from JSON state."""
+    try:
+        name_style = NameStyle(payload.get("name_style", NameStyle.SUMMONER.value))
+    except ValueError:
+        name_style = NameStyle.SUMMONER
+    return MatchAnnouncement(
+        text=str(payload.get("text", "")),
+        outcome=payload.get("outcome"),
+        match=payload.get("match", {}),
+        highlight_puuids=set(payload.get("highlight_puuids", [])),
+        name_style=name_style,
+    )
+
+
+def _live_game_from_payload(payload: dict[str, Any]) -> LiveGameAnnouncement:
+    """Restore a live-game announcement from JSON state."""
+    return LiveGameAnnouncement(
+        text=str(payload.get("text", "")),
+        game=payload.get("game", {}),
+        highlight_puuids=set(payload.get("highlight_puuids", [])),
+    )
+
+
+async def remember_match_view_state(
+    message: Any, channel_id: int, announcement: MatchAnnouncement
+) -> None:
+    """Persist a completed-match embed's button state so it survives a bot restart.
+
+    Every poster of a MatchAnnouncementView must call this — the poller does,
+    but a caller that skips it (as the /match command previously did) leaves
+    that message's buttons dead after the next restart, since there's nothing
+    for register_persistent_embed_views to restore from.
+    """
+    message_id = getattr(message, "id", None)
+    if isinstance(message_id, int) and isinstance(channel_id, int):
+        await asyncio.to_thread(
+            remember_embed_button_state,
+            message_id,
+            channel_id,
+            "match",
+            _announcement_payload(announcement),
+        )
+
+
+def register_persistent_embed_views(bot: Any) -> int:
+    """Register JSON-backed match/live-game views after a bot restart."""
+    restored = 0
+    for state in load_embed_button_states():
+        try:
+            view = (
+                MatchAnnouncementView(_announcement_from_payload(state["payload"]))
+                if state["kind"] == "match"
+                else LiveGameAnnouncementView(_live_game_from_payload(state["payload"]))
+                if state["kind"] == "live_game"
+                else None
+            )
+            if view is None:
+                continue
+            bot.add_view(view, message_id=state["message_id"])
+            restored += 1
+        except (KeyError, TypeError, ValueError):
+            LOGGER.warning("Skipping malformed persistent embed view state")
+    return restored
 
 
 def _result_for(participant: dict[str, Any]) -> str:
@@ -310,12 +401,56 @@ async def resolve_announcement_channels(
     return channels
 
 
+_DEFAULT_CHART_FIELD = "totalDamageDealtToChampions"
+
+# Mirrors GoldView's six chart buttons: (field, label). Shared so any control
+# that rebuilds the embed can render whichever chart was already on screen
+# instead of always resetting to the default damage chart.
+_CHART_LABELS: dict[str, str] = {
+    "totalDamageDealtToChampions": "Dmg Done",
+    "goldEarned": "Gold",
+    "teamGoldDifference": "Gold Graph",
+    "totalDamageTaken": "Dmg Taken",
+    "healingAndShielding": "H&S",
+    "visionScore": "Vision",
+}
+
+
+async def _build_match_chart(
+    match: dict[str, Any], field: str, highlight_puuids: set[str]
+) -> discord.File | None:
+    """Render the chart for one match statistic field."""
+    filename = DAMAGE_CHART_FILENAME if field == _DEFAULT_CHART_FIELD else f"{field}.png"
+    if field == "teamGoldDifference":
+        info = match.get("info", {})
+        match_id = match.get("metadata", {}).get("matchId")
+        timeline = await asyncio.to_thread(
+            get_client().match_timeline, match_id, info.get("platformId") or "NA1"
+        )
+        return await asyncio.to_thread(build_team_gold_difference_chart, timeline, filename=filename)
+    return await asyncio.to_thread(
+        build_damage_chart,
+        match,
+        highlight_puuids,
+        metric_field=field,
+        chart_title=_CHART_LABELS.get(field, field),
+        filename=filename,
+    )
+
+
 async def build_announcement_embed(
     announcement: MatchAnnouncement,
     *,
     rank_queue_id: int | None = None,
+    show_rank_names: bool = False,
+    active_field: str = _DEFAULT_CHART_FIELD,
 ) -> tuple[discord.Embed, discord.File | None]:
     """Render an announcement into an embed plus its optional chart attachment.
+
+    ``active_field`` picks which of GoldView's charts to render — defaulting
+    to the damage chart for a fresh announcement, but callers that already
+    have a different chart on screen (e.g. the rank-toggle buttons) pass the
+    field currently shown so toggling ranks doesn't reset it.
 
     Both the column lookups and the chart render are blocking, so each runs on
     a worker thread rather than on the event loop.
@@ -330,19 +465,22 @@ async def build_announcement_embed(
         queue_id=rank_queue_id or info.get("queueId"),
         highlight_puuids=announcement.highlight_puuids,
         name_style=announcement.name_style,
+        show_rank_names=show_rank_names,
     )
-    add_team_columns(embed, columns)
+    add_team_columns(embed, columns, include_rank_rows=False)
 
-    chart = await asyncio.to_thread(
-        build_damage_chart, announcement.match, announcement.highlight_puuids
-    )
+    chart = await _build_match_chart(announcement.match, active_field, announcement.highlight_puuids)
     if chart is not None:
-        embed.set_image(url=f"attachment://{DAMAGE_CHART_FILENAME}")
+        embed.set_image(url=f"attachment://{chart.filename}")
     return embed, chart
 
 
 async def build_live_game_embed(
-    announcement: LiveGameAnnouncement, *, rank_queue_id: int | None = None
+    announcement: LiveGameAnnouncement,
+    *,
+    rank_queue_id: int | None = None,
+    name_style: NameStyle = NameStyle.SUMMONER,
+    show_rank_names: bool = False,
 ) -> discord.Embed:
     """Render a live-game announcement with the same ranked lobby columns."""
     game = announcement.game
@@ -352,8 +490,10 @@ async def build_live_game_embed(
         game,
         game.get("platformId") or "NA1",
         queue_id=rank_queue_id,
+        name_style=name_style,
+        show_rank_names=show_rank_names,
     )
-    add_team_columns(embed, columns)
+    add_team_columns(embed, columns, include_rank_rows=False)
     return embed
 
 
@@ -403,80 +543,6 @@ def gold_embed(match: dict[str, Any]) -> discord.Embed:
     return embed
 
 
-def team_stat_embed(
-    match: dict[str, Any], *, field: str, label: str, title: str
-) -> discord.Embed:
-    """Show one per-player team statistic and the blue-vs-red difference."""
-    participants = match.get("info", {}).get("participants", []) or []
-    teams = {
-        team_id: sorted(
-            (p for p in participants if p.get("teamId") == team_id),
-            key=lambda p: p.get("participantId", 0),
-        )
-        for team_id in (100, 200)
-    }
-    if not any(teams.values()):
-        return make_embed(f"{label} data was unavailable for this match.", title=title)
-
-    blue = [int(p.get(field, 0) or 0) for p in teams[100]]
-    red = [int(p.get(field, 0) or 0) for p in teams[200]]
-    rows = max(len(blue), len(red))
-    differences = [
-        blue[i] - red[i] if i < len(blue) and i < len(red) else None
-        for i in range(rows)
-    ]
-    embed = discord.Embed(title=title, color=discord.Color.gold())
-    embed.add_field(name="Blue Team", value="\n".join(f"{value:,}" for value in blue) or "—")
-    embed.add_field(name="Red Team", value="\n".join(f"{value:,}" for value in red) or "—")
-    embed.add_field(
-        name="Blue − Red",
-        value="\n".join(f"{value:+,}" if value is not None else "—" for value in differences)
-        or "—",
-    )
-    return embed
-
-
-class _GoldButton(discord.ui.Button):
-    def __init__(self, match: dict[str, Any]) -> None:
-        """Initialize the instance."""
-        super().__init__(
-            label="Show Gold", style=discord.ButtonStyle.secondary, emoji="🪙"
-        )
-        self._match = match
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Handle the component interaction."""
-        await interaction.response.edit_message(
-            embed=gold_embed(self._match),
-            attachments=[],
-            view=GoldView(self._match),
-        )
-
-
-class _StatButton(discord.ui.Button):
-    """Show a per-player team statistic."""
-
-    def __init__(self, match: dict[str, Any], *, field: str, label: str, emoji: str) -> None:
-        """Initialize the statistic button."""
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji=emoji)
-        self._match = match
-        self._field = field
-        self._title = label
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        """Render the selected statistic."""
-        await interaction.response.edit_message(
-            embed=team_stat_embed(
-                self._match,
-                field=self._field,
-                label=self._title,
-                title=self._title,
-            ),
-            attachments=[],
-            view=GoldView(self._match),
-        )
-
-
 class _ChartButton(discord.ui.Button):
     """Show a chart for one match statistic."""
 
@@ -496,6 +562,7 @@ class _ChartButton(discord.ui.Button):
             label=label,
             style=discord.ButtonStyle.secondary,
             emoji=emoji,
+            custom_id=f"embed:chart:{field}",
             disabled=field == active_field,
         )
         self._match = match
@@ -506,31 +573,16 @@ class _ChartButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Render the selected statistic chart."""
-        filename = f"{self._field}.png"
-        if self._field == "teamGoldDifference":
-            info = self._match.get("info", {})
-            match_id = self._match.get("metadata", {}).get("matchId")
-            timeline = await asyncio.to_thread(
-                get_client().match_timeline, match_id, info.get("platformId") or "NA1"
-            )
-            chart = await asyncio.to_thread(
-                build_team_gold_difference_chart, timeline, filename=filename
-            )
-        else:
-            chart = await asyncio.to_thread(
-                build_damage_chart,
-                self._match,
-                self._highlight_puuids,
-                metric_field=self._field,
-                chart_title=self._label,
-                filename=filename,
-            )
+        # Chart generation can include a Riot timeline request and must not
+        # leave Discord's three-second component acknowledgement window open.
+        await interaction.response.defer()
+        chart = await _build_match_chart(self._match, self._field, self._highlight_puuids)
         embed = interaction.message.embeds[0].copy() if interaction.message.embeds else make_embed(
             self._label, color=discord.Color.gold()
         )
         if chart is not None:
-            embed.set_image(url=f"attachment://{filename}")
-        await interaction.response.edit_message(
+            embed.set_image(url=f"attachment://{chart.filename}")
+        await interaction.edit_original_response(
             embed=embed,
             file=chart,
             view=GoldView(
@@ -552,9 +604,11 @@ class GoldView(discord.ui.View):
         highlight_puuids: set[str] | None = None,
         active_field: str | None = "totalDamageDealtToChampions",
         announcement: MatchAnnouncement | None = None,
+        rank_queue_id: int | None = None,
+        show_rank_names: bool = False,
     ) -> None:
         """Initialize the instance."""
-        super().__init__(timeout=900)
+        super().__init__(timeout=None)
         highlight_puuids = highlight_puuids or set()
         self._highlight_puuids = highlight_puuids
         self.add_item(
@@ -583,7 +637,7 @@ class GoldView(discord.ui.View):
             _ChartButton(
                 match,
                 field="teamGoldDifference",
-                label="Gold Diff",
+                label="Gold Graph",
                 emoji="📊",
                 highlight_puuids=highlight_puuids,
                 active_field=active_field,
@@ -605,42 +659,128 @@ class GoldView(discord.ui.View):
             _ChartButton(
                 match,
                 field="healingAndShielding",
-                label="Healing & Shielding",
+                label="H&S",
                 emoji="💚",
                 highlight_puuids=highlight_puuids,
                 active_field=active_field,
                 announcement=announcement,
             )
         )
+        self.add_item(
+            _ChartButton(
+                match,
+                field="visionScore",
+                label="Vision",
+                emoji="👁️",
+                highlight_puuids=highlight_puuids,
+                active_field=active_field,
+                announcement=announcement,
+            )
+        )
         if announcement is not None and announcement.match.get("info", {}).get("queueId") == FLEX_QUEUE_ID:
-            self.add_item(_SoloRankButton(announcement))
+            self.add_item(
+                _SoloRankButton(
+                    announcement, show_rank_names=show_rank_names, active_field=active_field
+                )
+            )
+        if announcement is not None:
+            self.add_item(
+                _RankNamesButton(
+                    announcement,
+                    target_show_rank_names=not show_rank_names,
+                    rank_queue_id=rank_queue_id,
+                    active_field=active_field,
+                )
+            )
 
 
 class _SoloRankButton(discord.ui.Button):
     """Switch a Flex announcement's team columns to Solo/Duo ranks."""
 
-    def __init__(self, announcement: MatchAnnouncement) -> None:
+    def __init__(
+        self,
+        announcement: MatchAnnouncement,
+        *,
+        show_rank_names: bool = False,
+        active_field: str = _DEFAULT_CHART_FIELD,
+    ) -> None:
         """Initialize the button."""
         super().__init__(
             label="Show Ranked Solo",
             style=discord.ButtonStyle.secondary,
             emoji="🏆",
+            custom_id="embed:match:solo_rank",
         )
         self._announcement = announcement
+        self._show_rank_names = show_rank_names
+        self._active_field = active_field
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        """Render the same match with Ranked Solo/Duo standings."""
+        """Render the same match with Ranked Solo/Duo standings, keeping the active chart."""
+        await interaction.response.defer()
         embed, chart = await build_announcement_embed(
-            self._announcement, rank_queue_id=SOLO_QUEUE_ID
+            self._announcement,
+            rank_queue_id=SOLO_QUEUE_ID,
+            show_rank_names=self._show_rank_names,
+            active_field=self._active_field,
         )
         attachment = chart
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
             file=attachment,
             view=GoldView(
                 self._announcement.match,
                 highlight_puuids=self._announcement.highlight_puuids,
+                active_field=self._active_field,
                 announcement=self._announcement,
+                rank_queue_id=SOLO_QUEUE_ID,
+                show_rank_names=self._show_rank_names,
+            ),
+        )
+
+
+class _RankNamesButton(discord.ui.Button):
+    """Toggle a match announcement's name column between summoner names and rank."""
+
+    def __init__(
+        self,
+        announcement: MatchAnnouncement,
+        *,
+        target_show_rank_names: bool,
+        rank_queue_id: int | None = None,
+        active_field: str = _DEFAULT_CHART_FIELD,
+    ) -> None:
+        """Initialize the button."""
+        super().__init__(
+            label="Ranks" if target_show_rank_names else "Players",
+            style=discord.ButtonStyle.secondary,
+            emoji="🏅" if target_show_rank_names else "🧑",
+            custom_id="embed:match:rank_names",
+        )
+        self._announcement = announcement
+        self._target_show_rank_names = target_show_rank_names
+        self._rank_queue_id = rank_queue_id
+        self._active_field = active_field
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Render the match with the selected name column, keeping the active chart."""
+        await interaction.response.defer()
+        embed, chart = await build_announcement_embed(
+            self._announcement,
+            rank_queue_id=self._rank_queue_id,
+            show_rank_names=self._target_show_rank_names,
+            active_field=self._active_field,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            file=chart,
+            view=GoldView(
+                self._announcement.match,
+                highlight_puuids=self._announcement.highlight_puuids,
+                active_field=self._active_field,
+                announcement=self._announcement,
+                rank_queue_id=self._rank_queue_id,
+                show_rank_names=self._target_show_rank_names,
             ),
         )
 
@@ -660,44 +800,103 @@ class MatchAnnouncementView(GoldView):
 class _LiveSoloRankButton(discord.ui.Button):
     """Switch a Flex live-game announcement to Solo/Duo standings."""
 
-    def __init__(self, announcement: LiveGameAnnouncement) -> None:
+    def __init__(
+        self, announcement: LiveGameAnnouncement, *, show_rank_names: bool
+    ) -> None:
         """Initialize the button."""
         super().__init__(
             label="Show Ranked Solo",
             style=discord.ButtonStyle.secondary,
             emoji="🏆",
+            custom_id="embed:live:solo_rank",
         )
         self._announcement = announcement
+        self._show_rank_names = show_rank_names
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Render the live lobby with Ranked Solo/Duo standings."""
+        await interaction.response.defer()
         embed = await build_live_game_embed(
-            self._announcement, rank_queue_id=SOLO_QUEUE_ID
+            self._announcement,
+            rank_queue_id=SOLO_QUEUE_ID,
+            show_rank_names=self._show_rank_names,
         )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
-            view=LiveGameAnnouncementView(self._announcement, rank_queue_id=SOLO_QUEUE_ID),
+            view=LiveGameAnnouncementView(
+                self._announcement,
+                rank_queue_id=SOLO_QUEUE_ID,
+                show_rank_names=self._show_rank_names,
+            ),
         )
 
 
 class _LiveFlexRankButton(discord.ui.Button):
     """Switch a live-game announcement back to Flex standings."""
 
-    def __init__(self, announcement: LiveGameAnnouncement) -> None:
+    def __init__(
+        self, announcement: LiveGameAnnouncement, *, show_rank_names: bool
+    ) -> None:
         """Initialize the button."""
         super().__init__(
             label="Show Ranked Flex",
             style=discord.ButtonStyle.secondary,
             emoji="🏆",
+            custom_id="embed:live:flex_rank",
         )
         self._announcement = announcement
+        self._show_rank_names = show_rank_names
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Render the live lobby with Flex standings."""
-        embed = await build_live_game_embed(self._announcement)
-        await interaction.response.edit_message(
+        await interaction.response.defer()
+        embed = await build_live_game_embed(
+            self._announcement, show_rank_names=self._show_rank_names
+        )
+        await interaction.edit_original_response(
             embed=embed,
-            view=LiveGameAnnouncementView(self._announcement),
+            view=LiveGameAnnouncementView(
+                self._announcement, show_rank_names=self._show_rank_names
+            ),
+        )
+
+
+class _LiveRankNamesButton(discord.ui.Button):
+    """Toggle a live-game announcement's name column between summoner names and rank."""
+
+    def __init__(
+        self,
+        announcement: LiveGameAnnouncement,
+        *,
+        target_show_rank_names: bool,
+        rank_queue_id: int | None = None,
+    ) -> None:
+        """Initialize the button."""
+        super().__init__(
+            label="Ranks" if target_show_rank_names else "Players",
+            style=discord.ButtonStyle.secondary,
+            emoji="🏅" if target_show_rank_names else "🧑",
+            custom_id="embed:live:rank_names",
+        )
+        self._announcement = announcement
+        self._target_show_rank_names = target_show_rank_names
+        self._rank_queue_id = rank_queue_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Render the live lobby with the selected name column."""
+        await interaction.response.defer()
+        embed = await build_live_game_embed(
+            self._announcement,
+            rank_queue_id=self._rank_queue_id,
+            show_rank_names=self._target_show_rank_names,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=LiveGameAnnouncementView(
+                self._announcement,
+                rank_queue_id=self._rank_queue_id,
+                show_rank_names=self._target_show_rank_names,
+            ),
         )
 
 
@@ -705,17 +904,28 @@ class LiveGameAnnouncementView(discord.ui.View):
     """Controls attached to live-game announcements."""
 
     def __init__(
-        self, announcement: LiveGameAnnouncement, *, rank_queue_id: int | None = None
+        self,
+        announcement: LiveGameAnnouncement,
+        *,
+        rank_queue_id: int | None = None,
+        show_rank_names: bool = False,
     ) -> None:
-        """Initialize the appropriate rank toggle when applicable."""
-        super().__init__(timeout=900)
+        """Initialize display and rank toggles for a live-game announcement."""
+        super().__init__(timeout=None)
         if announcement.game.get("gameQueueConfigId") == FLEX_QUEUE_ID:
-            button = (
-                _LiveFlexRankButton(announcement)
+            rank_button = (
+                _LiveFlexRankButton(announcement, show_rank_names=show_rank_names)
                 if rank_queue_id == SOLO_QUEUE_ID
-                else _LiveSoloRankButton(announcement)
+                else _LiveSoloRankButton(announcement, show_rank_names=show_rank_names)
             )
-            self.add_item(button)
+            self.add_item(rank_button)
+        self.add_item(
+            _LiveRankNamesButton(
+                announcement,
+                target_show_rank_names=not show_rank_names,
+                rank_queue_id=rank_queue_id,
+            )
+        )
 
 
 async def publish(
@@ -771,11 +981,12 @@ async def publish(
                     if chart_bytes is not None
                     else None
                 )
-                await channel.send(
+                message = await channel.send(
                     embed=embed,
                     file=chart_file,
                     view=MatchAnnouncementView(announcement),
                 )
+                await remember_match_view_state(message, channel.id, announcement)
             except Exception:
                 LOGGER.exception(
                     "Could not post a match announcement to %s", channel.id
@@ -819,10 +1030,19 @@ async def publish_live_games(
             continue
         for channel in channels:
             try:
-                await channel.send(
+                message = await channel.send(
                     embed=embed,
                     view=LiveGameAnnouncementView(announcement),
                 )
+                message_id = getattr(message, "id", None)
+                if isinstance(message_id, int) and isinstance(channel.id, int):
+                    await asyncio.to_thread(
+                        remember_embed_button_state,
+                        message_id,
+                        channel.id,
+                        "live_game",
+                        _live_game_payload(announcement),
+                    )
             except Exception:
                 LOGGER.exception(
                     "Could not post a live-game announcement to %s", channel.id

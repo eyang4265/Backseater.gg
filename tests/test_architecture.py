@@ -19,7 +19,13 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_requests_is_owned_by_network_adapters(self) -> None:
         """Verify that requests is owned by network adapters."""
         root = Path(__file__).resolve().parents[1] / "bot_app"
-        allowed = {root / "riot.py", root / "ddragon.py", root / "commands" / "ai.py"}
+        allowed = {
+            root / "riot.py",
+            root / "ddragon.py",
+            root / "opgg.py",
+            root / "coachless.py",
+            root / "commands" / "ai.py",
+        }
         offenders = []
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))

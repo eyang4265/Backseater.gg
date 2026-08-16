@@ -40,6 +40,7 @@ class Settings:
     timezone: str = "UTC"
     match_cache_enabled: bool = True
     tft_api_key: str = ""
+    sync_commands_enabled: bool = True
 
     riot_rate_limits: tuple[tuple[int, float], ...] = ((20, 1.0), (100, 120.0))
     request_timeout_seconds: float = 20.0
@@ -163,6 +164,7 @@ def get_settings() -> Settings:
         max_tracked_accounts=_positive_int(file_values, "max_tracked_accounts", 25),
         timezone=_timezone(file_values),
         match_cache_enabled=_boolean(file_values, "match_cache_enabled", True),
+        sync_commands_enabled=_boolean(file_values, "sync_commands_enabled", True),
         request_timeout_seconds=_positive_float(
             file_values, "request_timeout_seconds", 20.0
         ),

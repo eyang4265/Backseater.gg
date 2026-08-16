@@ -135,19 +135,18 @@ class MasteryCommands(commands.Cog):
     @discord.slash_command(guild_ids=GUILD_IDS, description="Player's Champion Mastery")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("champion", description="Champion", required=False)
     @discord.option("user", description="User", required=False)
-    async def mastery(self, ctx, server, summoner, tag, champion, user):
+    async def mastery(self, ctx, server, summoner, champion, user):
         """Every champion's mastery, or one champion's detail when named."""
         log_command(
-            ctx, server=server, summoner=summoner, tag=tag, champion=champion, user=user
+            ctx, server=server, summoner=summoner, champion=champion, user=user
         )
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         if champion:

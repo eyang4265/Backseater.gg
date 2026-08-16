@@ -330,6 +330,7 @@ def collect_new_matches() -> list[MatchAnnouncement]:
 
 async def poll_and_announce(bot: Any) -> None:
     """Background loop entry point."""
+    LOGGER.info("Checking for completed match announcements")
     channel = await resolve_announcement_channel(bot)
     if channel is None:
         LOGGER.warning(
@@ -422,6 +423,7 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
 
 async def poll_live_games_and_announce(bot: Any) -> None:
     """Background loop entry point for first-seen live-game announcements."""
+    LOGGER.info("Checking for live-game announcements")
     channel = await resolve_announcement_channel(bot)
     if channel is None:
         LOGGER.warning(

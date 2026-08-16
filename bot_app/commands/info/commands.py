@@ -18,17 +18,17 @@ _COMMANDS = (
     (
         "Player commands",
         "**`/profile`** — Show level, server, ranks, and top champions.\n"
-        "Usage: `/profile` or add `server`, `summoner`, and `tag`.\n\n"
+        "Usage: `/profile` or add `server` and `summoner` (accepts `Name#Tag`).\n\n"
         "**`/opgg`** — Get an OP.GG profile link.\n"
         "Usage: `/opgg` or add a player/server.\n\n"
         "**`/livegame`** — Show the current lobby, champions, ranks, and win rates.\n"
         "Usage: `/livegame` (uses your tracked account by default).\n\n"
-        "**`/matchhistory`** — Show the 10 most recent games with results and stats.\n"
-        "Usage: `/matchhistory`; optionally filter by `game_mode` or `champion`, or add a player/server.\n\n"
+        "**`/matchhistory`** — Show up to 10 recent games with results, stats, and a W/L score.\n"
+        "Usage: `/matchhistory`; optionally filter by `game_mode` or `champion` (filters search recent games for up to 10 matches), or add a player/server.\n\n"
         "**`/matchlist`** — Show recent match IDs.\n"
         "Usage: `/matchlist` or add a player/server.\n\n"
         "**`/track`** — Link your Discord user to a Riot account.\n"
-        "Usage: `/track summoner:<name> tag:<tag> server:<server>`.\n\n"
+        "Usage: `/track summoner:<name>#<tag> server:<server>`.\n\n"
         "**`/untrack`** — Remove your tracked account.\n"
         "Usage: `/untrack`.\n\n"
         "**`/accounts`** — List all tracked accounts.\n"
@@ -38,8 +38,12 @@ _COMMANDS = (
         "Match and champion commands",
         "**`/recap`** — Show post-game performance metrics and takeaways.\n"
         "Usage: `/recap`; optionally provide `match_id` or a player.\n\n"
+        "**`/match`** — Show a completed match like an automatic announcement.\n"
+        "Usage: `/match`; optionally provide `match_id` or a player.\n\n"
         "**`/timeline`** — Show timeline-derived kills, deaths, damage, and economy.\n"
         "Usage: `/timeline`; optionally provide `match_id` and `position`.\n\n"
+        "**`/jungleproximity`** — Show dwell-time and fight-based lane proximity, camp hovering, and a 15-minute heatmap.\n"
+        "Usage: `/jungleproximity`; optionally provide `match_id`, a player, or `team:enemy`.\n\n"
         "**`/mastery`** — Show all champion mastery or details for one champion.\n"
         "Usage: `/mastery`; optionally provide `champion` or a player.\n\n"
         "**`/today`** — Show today's saved LP movement.\n"
@@ -48,10 +52,13 @@ _COMMANDS = (
         "Usage: `/lpgraph`; optionally provide a player, `queue`, or `days`.\n\n"
         "**`/leaderboard`** — Rank tracked accounts from saved snapshots.\n"
         "Usage: `/leaderboard`; optionally choose a `queue`.\n\n"
-        "**`/championstats`** — Aggregate champion results from cached matches.\n"
-        "Usage: `/championstats`; optionally provide a player or `champion`.\n\n"
         "**`/duo`** — Show the cached record for two tracked players.\n"
-        "Usage: `/duo teammate:<user>`; optionally provide the primary player.",
+        "Usage: `/duo teammate:<user>`; optionally provide the primary player.\n\n"
+        "**`/champ`** — Show live OP.GG champion stats, skill order, rune emotes, and item build emotes.\n"
+        "Usage: `/champ champion:<name>` (uses global stats by default); optionally choose `server` and `position`, or use the position buttons.\n\n"
+        "**`/coachless`** — Show Coachless.gg rune and item WPA recommendations.\n"
+        "Usage: `/coachless champion:<name> role:<role>`; use buttons for runes, summs, starter, item stages, and boots, "
+        "plus a Bravery button for the highest-WPA option in each category among picks under 1% pick rate.",
     ),
     (
         "Riot information",

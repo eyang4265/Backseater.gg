@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from . import admin, ai, guilds, info, mastery, player, rankings, registry, stats
+from . import admin, ai, champ, coachless, duo, guilds, info, mastery, player, rankings, registry
 from .match import setup_recap, setup_timeline
 
 if TYPE_CHECKING:
@@ -23,7 +23,9 @@ _SETUPS = (
     registry.setup,
     rankings.setup,
     guilds.setup,
-    stats.setup,
+    champ.setup,
+    coachless.setup,
+    duo.setup,
     mastery.setup,
     setup_timeline,
     setup_recap,

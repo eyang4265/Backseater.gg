@@ -2,7 +2,7 @@
 
 import unittest
 
-from bot_app.history import format_match_history_line
+from bot_app.history import format_match_history_line, match_history_score
 
 
 class MatchHistoryLineTests(unittest.TestCase):
@@ -39,6 +39,15 @@ class MatchHistoryLineTests(unittest.TestCase):
                 self.info, self.participant, champion_label="Wukong", time_label="now"
             ).startswith("🟥 **Wukong** — Defeat")
         )
+
+    def test_score_counts_the_displayed_player_results(self) -> None:
+        """Verify that the history score counts wins and losses."""
+        matches = [
+            {"info": {"participants": [{"puuid": "p", "win": True}]}},
+            {"info": {"participants": [{"puuid": "p", "win": False}]}},
+            {"info": {"participants": [{"puuid": "p", "win": True}]}},
+        ]
+        self.assertEqual(match_history_score(matches, "p"), (2, 1))
 
 
 if __name__ == "__main__":

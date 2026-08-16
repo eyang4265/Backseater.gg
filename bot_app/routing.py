@@ -83,6 +83,28 @@ def opgg_url(code: str | None, riot_id: str | None) -> str | None:
     return f"https://op.gg/lol/summoners/{found.opgg_slug}/{quote(name)}-{quote(tag)}"
 
 
+def opgg_champion_url(
+    code: str | None, internal_id: str | None, position: str | None = None
+) -> str | None:
+    """Return an OP.GG champion stats/build URL for a platform and role."""
+    from urllib.parse import quote
+
+    if code and code.upper() == "GLOBAL":
+        if not internal_id:
+            return None
+        path = f"https://op.gg/lol/champions/{quote(internal_id)}/build"
+        if position and position != "all":
+            path += f"/{quote(position)}"
+        return f"{path}?region=global"
+    found = platform(code)
+    if found is None or found.opgg_slug is None or not internal_id:
+        return None
+    path = f"https://op.gg/lol/champions/{quote(internal_id)}/build"
+    if position and position != "all":
+        path += f"/{quote(position)}"
+    return f"{path}?region={found.opgg_slug}"
+
+
 def split_riot_id(
     summoner: str | None, tag: str | None
 ) -> tuple[str | None, str | None]:

@@ -7,6 +7,14 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from ...announce import (
+    MatchAnnouncementView,
+    TrackedPlayer,
+    build_announcement_embed,
+    format_match,
+    remember_match_view_state,
+)
+from ...queues import queue_name
 from ...services.riot_api import RiotAPIError, get_client
 from ..shared import (
     GUILD_IDS,
@@ -14,6 +22,7 @@ from ..shared import (
     log_command,
     make_embed,
     not_found_embed,
+    match_reference_index,
     set_player_author,
     target_for,
 )
@@ -40,29 +49,37 @@ class StatsCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
     @discord.option(
-        "match_id", description="Match ID; blank uses your latest game", required=False
+        "match_id", description="Match ID or recent-game number (1=latest); blank uses latest", required=False
     )
-    async def recap(self, ctx, server, summoner, tag, user, match_id):
-        """Handle recap."""
+    async def recap(self, ctx, server, summoner, user, match_id):
+        """Show a player's post-game performance summary for a selected match."""
         log_command(
-            ctx, server=server, summoner=summoner, tag=tag, user=user, match_id=match_id
+            ctx, server=server, summoner=summoner, user=user, match_id=match_id
         )
         await ctx.defer()
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            return
+        if match_id and match_id.isdigit() and match_reference_index(match_id) is None:
+            await ctx.respond(embed=make_embed("Recent-game numbers must be between 1 and 20."))
             return
         try:
-            ids = (
-                [match_id]
-                if match_id
-                else await asyncio.to_thread(
+            reference_index = match_reference_index(match_id)
+            if reference_index is not None:
+                ids = await asyncio.to_thread(
+                    get_client().match_ids,
+                    target.puuid,
+                    target.server,
+                    count=reference_index + 1,
+                )
+                ids = ids[reference_index : reference_index + 1]
+            else:
+                ids = [match_id] if match_id else await asyncio.to_thread(
                     get_client().match_ids, target.puuid, target.server, count=1
                 )
-            )
             if not ids:
                 await ctx.respond(embed=make_embed("No matches found."))
                 return
@@ -83,7 +100,7 @@ class StatsCommands(commands.Cog):
             x.get("goldEarned", 0) for x in enemy
         )
         embed = discord.Embed(
-            title=f"Game Recap — {ids[0]}",
+            title=f"Game Recap — {queue_name(match.get('info', {}).get('queueId'))} — {ids[0]}",
             description=f"**{p.get('championName', 'Unknown')}** · {'Victory' if p.get('win') else 'Defeat'} · {p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)}",
             color=discord.Color.green() if p.get("win") else discord.Color.red(),
         )
@@ -110,6 +127,56 @@ class StatsCommands(commands.Cog):
         )
         set_player_author(embed, target)
         await ctx.respond(embed=embed)
+
+    @discord.slash_command(
+        guild_ids=GUILD_IDS,
+        description="Show a completed match like the match announcement",
+    )
+    @discord.option("server", description="Server", choices=SERVERS, required=False)
+    @discord.option("summoner", description="Game Name", required=False)
+    @discord.option("user", description="User (defaults to you)", required=False)
+    @discord.option(
+        "match_id", description="Match ID or recent-game number (1=latest); blank uses latest", required=False
+    )
+    async def match(self, ctx, server, summoner, user, match_id):
+        """Render a completed match with the same embed and buttons as announcements."""
+        log_command(ctx, server=server, summoner=summoner, user=user, match_id=match_id)
+        await ctx.defer()
+        target = await target_for(ctx, server, summoner, user)
+        if target is None:
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            return
+        if match_id and match_id.isdigit() and match_reference_index(match_id) is None:
+            await ctx.respond(embed=make_embed("Recent-game numbers must be between 1 and 20."))
+            return
+        try:
+            index = match_reference_index(match_id)
+            if index is not None:
+                ids = await asyncio.to_thread(get_client().match_ids, target.puuid, target.server, count=index + 1)
+                selected = ids[index] if index < len(ids) else None
+            else:
+                ids = [match_id] if match_id else await asyncio.to_thread(get_client().match_ids, target.puuid, target.server, count=1)
+                selected = ids[0] if ids else None
+            if selected is None:
+                await ctx.respond(embed=make_embed("No matching game found."))
+                return
+            match_data = await asyncio.to_thread(get_client().match, selected, target.server)
+        except RiotAPIError as error:
+            await ctx.respond(embed=make_embed(f"Could not fetch match data: {error}"))
+            return
+        announcement = format_match(
+            match_data,
+            [TrackedPlayer(puuid=target.puuid, riot_id=target.riot_id, server=target.server)],
+            require_finished=False,
+            require_ranked_queue=False,
+        )
+        if announcement is None:
+            await ctx.respond(embed=make_embed("That player was not in this match."))
+            return
+        embed, chart = await build_announcement_embed(announcement)
+        message = await ctx.respond(embed=embed, file=chart, view=MatchAnnouncementView(announcement))
+        if message is not None:
+            await remember_match_view_state(message, message.channel.id, announcement)
 
 
 def setup(bot: discord.Bot) -> None:

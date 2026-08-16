@@ -265,6 +265,24 @@ _loader = _CatalogLoader()
 _map_images: dict[str, bytes] = {}
 _map_image_lock = threading.Lock()
 
+_asset_names: dict[str, dict[str, str]] = {}
+_asset_names_lock = threading.Lock()
+
+# Per cache-key locks so concurrent misses on the same Data Dragon asset file
+# coalesce into one fetch instead of each firing a redundant request.
+_asset_names_fetch_locks: dict[str, threading.Lock] = {}
+_asset_names_fetch_locks_guard = threading.Lock()
+
+
+def _asset_names_fetch_lock(cache_key: str) -> threading.Lock:
+    """Handle lock."""
+    with _asset_names_fetch_locks_guard:
+        lock = _asset_names_fetch_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _asset_names_fetch_locks[cache_key] = lock
+        return lock
+
 
 def catalog() -> ChampionCatalog | None:
     """The champion catalog for the current patch, or None if it was never loadable."""
@@ -343,3 +361,74 @@ def profile_icon_url(icon_id: int | None, version: str | None = None) -> str | N
     if not version:
         return None
     return f"{_CDN}/{version}/img/profileicon/{icon_id if icon_id is not None else BLANK_PROFILE_ICON_ID}.png"
+
+
+def _asset_name_map(cache_key: str, url: str, builder: Any) -> dict[str, str]:
+    """Fetch and cache one Data Dragon id-to-name table, keyed by patch version."""
+    with _asset_names_lock:
+        cached = _asset_names.get(cache_key)
+    if cached is not None:
+        return cached
+    with _asset_names_fetch_lock(cache_key):
+        with _asset_names_lock:
+            cached = _asset_names.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            response = requests.get(url, timeout=_TIMEOUT)
+            response.raise_for_status()
+            mapping = builder(response.json())
+        except (requests.RequestException, ValueError, KeyError, TypeError) as error:
+            LOGGER.warning("Could not fetch Data Dragon asset names from %s: %s", url, error)
+            return {}
+        with _asset_names_lock:
+            _asset_names[cache_key] = mapping
+        return mapping
+
+
+def item_name(item_id: int | str | None) -> str | None:
+    """Display name for a Data Dragon item id (e.g. 3020 → "Sorcerer's Shoes")."""
+    version = current_version()
+    if item_id is None or not version:
+        return None
+    names = _asset_name_map(
+        f"items:{version}",
+        f"{_CDN}/{version}/data/en_US/item.json",
+        lambda payload: {
+            item_key: entry.get("name", item_key) for item_key, entry in payload["data"].items()
+        },
+    )
+    return names.get(str(item_id))
+
+
+def rune_name(rune_id: int | str | None) -> str | None:
+    """Display name for a Data Dragon rune id (e.g. 8112 → "Electrocute")."""
+    version = current_version()
+    if rune_id is None or not version:
+        return None
+
+    def build(payload: Any) -> dict[str, str]:
+        names: dict[str, str] = {}
+        for tree in payload:
+            for slot in tree.get("slots", []):
+                for rune in slot.get("runes", []):
+                    names[str(rune["id"])] = rune["name"]
+        return names
+
+    names = _asset_name_map(f"runes:{version}", f"{_CDN}/{version}/data/en_US/runesReforged.json", build)
+    return names.get(str(rune_id))
+
+
+def summoner_spell_name(spell_id: int | str | None) -> str | None:
+    """Display name for a numeric summoner-spell key (e.g. 4 → "Flash")."""
+    version = current_version()
+    if spell_id is None or not version:
+        return None
+    names = _asset_name_map(
+        f"summoners:{version}",
+        f"{_CDN}/{version}/data/en_US/summoner.json",
+        lambda payload: {
+            entry["key"]: entry["name"] for entry in payload["data"].values() if "key" in entry
+        },
+    )
+    return names.get(str(spell_id))

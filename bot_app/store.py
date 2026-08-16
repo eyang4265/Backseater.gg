@@ -26,10 +26,12 @@ TRACKER_STATE_PATH = JSON_DIR / "match_tracker_state.json"
 GUEST_STATE_PATH = JSON_DIR / "guest_tracker_state.json"
 LIVE_GAME_STATE_PATH = JSON_DIR / "live_game_state.json"
 GUILD_STATE_PATH = JSON_DIR / "guilds.json"
+EMBED_BUTTON_STATE_PATH = JSON_DIR / "embed_button_state.json"
 
 
 MATCH_HISTORY_LIMIT = 100
 RANK_HISTORY_LIMIT = 500
+EMBED_BUTTON_STATE_LIMIT = 500
 
 
 _QUEUE_STATE_KEYS = {SOLO_QUEUE_ID: "solo", FLEX_QUEUE_ID: "flex"}
@@ -57,6 +59,40 @@ def write_json(path: Path, payload: Any, *, indent: int = 2) -> None:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=indent)
         temporary.replace(path)
+
+
+def load_embed_button_states() -> list[dict[str, Any]]:
+    """Load Discord message records used to restore persistent embed views."""
+    raw = read_json(EMBED_BUTTON_STATE_PATH, [])
+    if not isinstance(raw, list):
+        return []
+    return [
+        entry
+        for entry in raw
+        if isinstance(entry, dict)
+        and isinstance(entry.get("message_id"), int)
+        and isinstance(entry.get("kind"), str)
+        and isinstance(entry.get("payload"), dict)
+    ]
+
+
+def remember_embed_button_state(
+    message_id: int, channel_id: int, kind: str, payload: dict[str, Any]
+) -> None:
+    """Atomically remember one message's persistent embed view state."""
+    with _write_lock:
+        states = load_embed_button_states()
+        states = [entry for entry in states if entry.get("message_id") != message_id]
+        states.append(
+            {
+                "message_id": message_id,
+                "channel_id": channel_id,
+                "kind": kind,
+                "payload": payload,
+            }
+        )
+        states = states[-EMBED_BUTTON_STATE_LIMIT:]
+        write_json(EMBED_BUTTON_STATE_PATH, states, indent=2)
 
 
 def dedupe_tail(ids: Iterable[str], limit: int = MATCH_HISTORY_LIMIT) -> list[str]:

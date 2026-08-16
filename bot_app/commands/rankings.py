@@ -62,11 +62,11 @@ class RankingCommands(commands.Cog):
         """Initialize the instance."""
         self.bot = bot
 
-    async def _history_target(self, ctx, server, summoner, tag, user):
+    async def _history_target(self, ctx, server, summoner, user):
         """Handle target."""
-        target = await target_for(ctx, server, summoner, tag, user, include_icon=False)
+        target = await target_for(ctx, server, summoner, user, include_icon=False)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return None, None
         state = await asyncio.to_thread(_target_state, target)
         if state is None:
@@ -81,18 +81,17 @@ class RankingCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
     @discord.option(
         "queue", description="Ranked queue", choices=["solo", "flex"], required=False
     )
-    async def today(self, ctx, server, summoner, tag, user, queue="solo"):
+    async def today(self, ctx, server, summoner, user, queue="solo"):
         """Handle today."""
         log_command(
-            ctx, server=server, summoner=summoner, tag=tag, user=user, queue=queue
+            ctx, server=server, summoner=summoner, user=user, queue=queue
         )
         await ctx.defer()
-        target, state = await self._history_target(ctx, server, summoner, tag, user)
+        target, state = await self._history_target(ctx, server, summoner, user)
         if state is None:
             return
         entries = since_local_midnight(state, _queue_id(queue), get_settings().timezone)
@@ -112,7 +111,6 @@ class RankingCommands(commands.Cog):
     @discord.slash_command(guild_ids=GUILD_IDS, description="Graph stored LP history")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
     @discord.option(
         "queue", description="Ranked queue", choices=["solo", "flex"], required=False
@@ -125,19 +123,18 @@ class RankingCommands(commands.Cog):
         max_value=365,
         required=False,
     )
-    async def lpgraph(self, ctx, server, summoner, tag, user, queue="solo", days=30):
+    async def lpgraph(self, ctx, server, summoner, user, queue="solo", days=30):
         """Handle lpgraph."""
         log_command(
             ctx,
             server=server,
             summoner=summoner,
-            tag=tag,
             user=user,
             queue=queue,
             days=days,
         )
         await ctx.defer()
-        target, state = await self._history_target(ctx, server, summoner, tag, user)
+        target, state = await self._history_target(ctx, server, summoner, user)
         if state is None:
             return
         entries = state.history.get(_queue_id(queue), [])

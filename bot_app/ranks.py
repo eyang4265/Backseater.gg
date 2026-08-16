@@ -27,6 +27,7 @@ APEX_TIERS: frozenset[str] = frozenset({"MASTER", "GRANDMASTER", "CHALLENGER"})
 TIER_LABELS: dict[str, str] = {
     tier: tier.title() for tier in (*SUB_MASTER_TIERS, *APEX_TIERS)
 }
+TIER_LABELS["PLATINUM"] = "Plat"
 
 
 _TIER_SPAN = 400

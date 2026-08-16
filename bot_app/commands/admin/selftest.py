@@ -25,7 +25,7 @@ from ...render import (
 from ...services.riot_api import RiotAPIError, get_client
 from ...routing import DEFAULT_PLATFORM
 from ...store import load_accounts, read_json
-from ..shared import GUILD_IDS, log_command
+from ..shared import GUILD_IDS, log_command, match_reference_index
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class AdminCommands(commands.Cog):
     @commands.is_owner()
     @discord.option(
         "match_id",
-        description=f"Match ID (e.g. NA1_5619445010); blank for {SELFTEST_NAME}'s latest match",
+        description=f"Match ID or recent-game number (1=latest); blank for {SELFTEST_NAME}'s latest match",
         required=False,
     )
     @discord.option(
@@ -154,6 +154,10 @@ class AdminCommands(commands.Cog):
         """
         log_command(ctx, match_id=match_id, sample=sample)
         await ctx.defer()
+
+        if match_id and match_id.isdigit() and match_reference_index(match_id) is None:
+            await ctx.respond(embed=make_embed("Recent-game numbers must be between 1 and 20."))
+            return
 
         handlers = {
             "livegame": self._sample_livegame,
@@ -221,11 +225,14 @@ class AdminCommands(commands.Cog):
         )
 
     async def _live_match(self, ctx, match_id: str | None) -> None:
-        """Handle match."""
+        """Render a selected match; numeric references 1–20 count back from recent games."""
         client = get_client()
         try:
-            selected_id = match_id or await asyncio.to_thread(
-                self._latest_selftest_match_id
+            reference_index = match_reference_index(match_id)
+            selected_id = (
+                await asyncio.to_thread(self._latest_selftest_match_id, reference_index or 0)
+                if reference_index is not None
+                else match_id or await asyncio.to_thread(self._latest_selftest_match_id, 0)
             )
         except RiotAPIError as error:
             await ctx.respond(
@@ -265,10 +272,12 @@ class AdminCommands(commands.Cog):
         await self._respond_with_announcement(ctx, match, players)
 
     @staticmethod
-    def _latest_selftest_match_id() -> str | None:
+    def _latest_selftest_match_id(index: int = 0) -> str | None:
         """Handle selftest match id."""
-        match_ids = get_client().match_ids(SELFTEST_PUUID, SELFTEST_SERVER, count=1)
-        return match_ids[0] if match_ids else None
+        match_ids = get_client().match_ids(
+            SELFTEST_PUUID, SELFTEST_SERVER, count=index + 1
+        )
+        return match_ids[index] if index < len(match_ids) else None
 
     @staticmethod
     async def _respond_with_announcement(

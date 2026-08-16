@@ -6,6 +6,7 @@ from bot_app.routing import (
     SERVERS,
     account_route,
     match_route,
+    opgg_champion_url,
     opgg_url,
     platform,
     split_riot_id,
@@ -16,6 +17,13 @@ _MATCH_ROUTES = {"americas", "asia", "europe", "sea"}
 
 
 class RoutingTests(unittest.TestCase):
+    def test_global_opgg_champion_url(self) -> None:
+        """Global champion stats do not require a platform slug."""
+        self.assertEqual(
+            opgg_champion_url("GLOBAL", "Syndra", "mid"),
+            "https://op.gg/lol/champions/Syndra/build/mid?region=global",
+        )
+
     def test_every_offered_server_routes(self) -> None:
         """Verify that every offered server routes."""
         for code in SERVERS:
@@ -45,6 +53,13 @@ class RoutingTests(unittest.TestCase):
         """Verify that opgg url absent for unsupported platform or malformed id."""
         self.assertIsNone(opgg_url("PBE1", "Name#TAG"))
         self.assertIsNone(opgg_url("NA1", "no-hash-here"))
+
+    def test_opgg_champion_url_uses_server_and_position(self) -> None:
+        """Verify that champion stats URLs use the OP.GG region and position."""
+        self.assertEqual(
+            opgg_champion_url("NA1", "AurelionSol", "mid"),
+            "https://op.gg/lol/champions/AurelionSol/build/mid?region=na",
+        )
 
     def test_split_riot_id_prefers_an_explicit_tag(self) -> None:
         """Verify that split riot id prefers an explicit tag."""

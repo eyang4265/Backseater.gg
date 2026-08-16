@@ -209,7 +209,7 @@ class RiotClient:
 
             if response.status_code == 429:
                 delay = _retry_after_seconds(response, self._backoff(attempt))
-                LOGGER.info("Rate limited on %s; retrying in %.1fs", path, delay)
+                LOGGER.info("Rate limited on %s; retrying in %.1fs", url, delay)
                 time.sleep(delay)
                 continue
 
@@ -372,6 +372,13 @@ class RiotClient:
         if route is None:
             raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
         return self._get(route, f"/lol/match/v5/matches/{match_id}/timeline")
+
+    def match_replays(self, puuid: str, server: str) -> Any:
+        """Return replay metadata for a player from Match-V5."""
+        route = match_route(server) or match_route(DEFAULT_PLATFORM)
+        if route is None:
+            raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
+        return self._get(route, f"/lol/match/v5/matches/by-puuid/{puuid}/replays")
 
     def active_game(self, puuid: str, server: str) -> dict[str, Any] | None:
         """The player's live game, or None when they aren't in one."""

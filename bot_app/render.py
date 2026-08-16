@@ -23,6 +23,7 @@ import discord
 
 from . import ddragon, emoji as emoji_lookup
 from .positions import POSITION_LABELS, ROLE_ORDER, assign_team_positions, role_sort_key
+from .queues import ARENA_QUEUE_IDS, ARENA_TEAM_SIZES
 from .ranks import (
     APEX_TIERS,
     RankSnapshot,
@@ -168,6 +169,7 @@ class TeamColumns:
     red_ranks: list[str] = field(default_factory=list)
     blue_average: str = "Unranked"
     red_average: str = "Unranked"
+    arena_teams: list[tuple[str, list[str], list[str], str]] = field(default_factory=list)
 
     rank_header: str = "Rank:"
     debug_lines: list[str] = field(default_factory=list)
@@ -183,41 +185,79 @@ class _Row:
     debug: str = ""
 
 
-def add_team_columns(embed: discord.Embed, columns: TeamColumns) -> None:
-    """Add each team's name and rank columns as adjacent inline fields.
+def _summoner_label(riot_id: str, all_riot_ids: Sequence[str]) -> str:
+    """Game name alone, unless another player in this game shares it — then Name#Tag."""
+    game_name = riot_id.split("#", 1)[0]
+    duplicates = sum(1 for other in all_riot_ids if other.split("#", 1)[0] == game_name)
+    return riot_id if duplicates > 1 else game_name
 
-    Discord packs inline fields three to a row and splits the row's width
-    evenly between them, so each team gets a trailing zero-width spacer: that
-    keeps both rows at three fields, which is what lines Blue's and Red's rank
-    columns up at the same horizontal position, and stops Discord from
-    flowing Red's names up into Blue's row. The blank line after Blue's
-    entries adds breathing room without the gap a full-width field leaves.
+
+def add_team_columns(
+    embed: discord.Embed, columns: TeamColumns, *, include_rank_rows: bool = True
+) -> None:
+    """Add blue/red player and rank columns as two aligned inline rows.
+
+    Discord packs inline fields three to a row. Ordering blue players, red
+    players, spacer, then blue ranks, red ranks, spacer gives the live-game
+    embed the requested two-column team layout while preventing field flow. A
+    A full-width rule separates the player and rank rows. The zero-width line
+    after each blue value gives stacked mobile fields breathing room before
+    the corresponding red field.
+
+    ``include_rank_rows`` is set to false when the name column already shows
+    each player's rank, so the bottom rank block isn't shown twice.
     """
     spacer = "​"
+    if columns.arena_teams:
+        for label, names, _ranks, average in columns.arena_teams:
+            embed.add_field(
+                name=f"{label} | {average}",
+                value=("\n".join(names) or "—"),
+                inline=True,
+            )
+        if not include_rank_rows:
+            return
+        embed.add_field(name=spacer, value="━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
+        for label, _names, ranks, _average in columns.arena_teams:
+            embed.add_field(
+                name=f"{label} Rank",
+                value=("\n".join(ranks) or "—"),
+                inline=True,
+            )
+        return
     embed.add_field(
         name=f"Blue Team | {columns.blue_average}",
         value=("\n".join(columns.blue_names) or "—") + f"\n{spacer}",
         inline=True,
     )
     embed.add_field(
-        name=columns.rank_header,
-        value=("\n".join(columns.blue_ranks) or "—") + f"\n{spacer}",
-        inline=True,
-    )
-    embed.add_field(name=spacer, value=spacer, inline=True)
-    embed.add_field(
         name=f"Red Team | {columns.red_average}",
         value="\n".join(columns.red_names) or "—",
         inline=True,
     )
+    embed.add_field(name=spacer, value=spacer, inline=True)
+    if not include_rank_rows:
+        return
+    embed.add_field(name=spacer, value="━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
     embed.add_field(
-        name=columns.rank_header, value="\n".join(columns.red_ranks) or "—", inline=True
+        name=f"Blue Team {columns.rank_header.rstrip(':')}",
+        value=("\n".join(columns.blue_ranks) or "—") + f"\n{spacer}",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Red Team {columns.rank_header.rstrip(':')}",
+        value="\n".join(columns.red_ranks) or "—",
+        inline=True,
     )
     embed.add_field(name=spacer, value=spacer, inline=True)
 
 
 def _columns_from_rows(
-    rows: Sequence[_Row], *, rank_header: str = "Rank:"
+    rows: Sequence[_Row],
+    *,
+    rank_header: str = "Rank:",
+    arena: bool = False,
+    arena_team_size: int | None = None,
 ) -> TeamColumns:
     """Handle from rows."""
 
@@ -233,6 +273,39 @@ def _columns_from_rows(
             [row.rank for row in entries],
             average_value(values),
         )
+
+    if arena:
+        team_groups: list[list[_Row]] = []
+        distinct_team_ids = {row.team_id for row in rows}
+        expected_teams = (
+            (len(rows) + arena_team_size - 1) // arena_team_size
+            if arena_team_size
+            else len(distinct_team_ids)
+        )
+        # Spectator data for some Arena lobbies reports one shared teamId for
+        # every participant. Riot's participant order is team-contiguous in
+        # that payload, so recover the six 3-player teams from that order.
+        if (
+            arena_team_size
+            and len(rows) >= arena_team_size
+            and len(distinct_team_ids) < expected_teams
+        ):
+            team_groups = [
+                list(rows[index : index + arena_team_size])
+                for index in range(0, len(rows), arena_team_size)
+            ]
+        else:
+            for team_id in dict.fromkeys(row.team_id for row in rows):
+                team_groups.append([row for row in rows if row.team_id == team_id])
+
+        arena_teams = []
+        for number, group in enumerate(team_groups, start=1):
+            names = [row.name for row in group]
+            ranks = [row.rank for row in group]
+            average = average_value([row.value for row in group if row.value is not None])
+            arena_teams.append((f"Arena Team {number}", names, ranks, average_rank_text(average)))
+        return TeamColumns(arena_teams=arena_teams, rank_header=rank_header,
+                           debug_lines=[row.debug for row in rows if row.debug])
 
     blue_names, blue_ranks, blue_average = team(BLUE_TEAM_ID)
     red_names, red_ranks, red_average = team(RED_TEAM_ID)
@@ -335,6 +408,7 @@ def build_match_columns(
     queue_id: int | None = None,
     highlight_puuids: Iterable[str] = (),
     name_style: NameStyle = NameStyle.SUMMONER,
+    show_rank_names: bool = False,
 ) -> TeamColumns:
     """Columns for a finished match, ordered Top/Jungle/Mid/Bottom/Support.
 
@@ -342,11 +416,16 @@ def build_match_columns(
     this announcement is about — so a tracked player who happened to be in the
     lobby still stands out. ``queue_id`` selects which ranked queue's standing
     is shown: a Flex match shows Flex rank.
+
+    ``show_rank_names`` swaps the name column's label for each player's rank
+    text, for a compact toggle between "who's playing" and "what rank are
+    they" views. Each label is separated from its KDA by a centered dot.
     """
     if not participants:
         return TeamColumns()
 
     rank_queue = rank_queue_for_match(queue_id)
+    arena = queue_id in ARENA_QUEUE_IDS
     highlighted = set(highlight_puuids) | set(tracked_puuids())
     catalog = ddragon.catalog()
 
@@ -359,6 +438,7 @@ def build_match_columns(
         [(p.get("puuid"), server) for p in participants],
         lambda pair: _lookup_player(pair[0], pair[1], rank_queue),
     )
+    all_riot_ids = [lookup.riot_id or "-" for lookup in lookups]
 
     rows: list[_Row] = []
     for index, participant in enumerate(participants):
@@ -367,12 +447,18 @@ def build_match_columns(
         icon = emoji_lookup.champion_emoji(champion, name=champion_ids[index])
         lookup = lookups[index]
 
-        if name_style is NameStyle.CHAMPION:
+        rank_label = rank_text(lookup.rank) or "Unranked"
+
+        if show_rank_names:
+            label = rank_label
+        elif name_style is NameStyle.CHAMPION:
             label = champion_name
         else:
-            label = lookup.riot_id or "-"
+            label = _summoner_label(lookup.riot_id or "-", all_riot_ids)
 
-        entry = f"{emoji_lookup.prefixed(icon, label)} ({kda_text(participant)})"
+        entry = emoji_lookup.prefixed(icon, label)
+        if not show_rank_names:
+            entry = f"{entry} · ({kda_text(participant)})"
         if participant.get("puuid") in highlighted:
             entry = f"**{entry}**"
 
@@ -381,16 +467,21 @@ def build_match_columns(
                 team_id=participant.get("teamId", BLUE_TEAM_ID),
                 position=positions[index],
                 name=entry,
-                rank=rank_text(lookup.rank) or "Unranked",
+                rank=rank_label,
                 value=lookup.rank.value if lookup.rank else None,
             )
         )
 
-    return _columns_from_rows(rows)
+    return _columns_from_rows(rows, arena=arena, arena_team_size=ARENA_TEAM_SIZES.get(queue_id))
 
 
 def build_lobby_columns(
-    game: dict[str, Any], server: str, *, queue_id: int | None = None
+    game: dict[str, Any],
+    server: str,
+    *,
+    queue_id: int | None = None,
+    name_style: NameStyle = NameStyle.SUMMONER,
+    show_rank_names: bool = False,
 ) -> TeamColumns:
     """Columns for a live game from the Spectator API.
 
@@ -402,12 +493,18 @@ def build_lobby_columns(
     ``"Unranked"`` when it succeeded but they have no entry, so a Riot outage
     doesn't look like a lobby full of unranked players. Ranked players also
     get their win rate.
+
+    ``show_rank_names`` swaps the name column's label for each player's rank
+    text instead of their summoner name or champion, for a compact toggle
+    between "who's playing" and "what rank are they" views.
     """
     participants = game.get("participants", []) or []
     if not participants:
         return TeamColumns()
 
-    rank_queue = queue_id or rank_queue_for_match(game.get("gameQueueConfigId"))
+    lobby_queue_id = game.get("gameQueueConfigId")
+    rank_queue = queue_id or rank_queue_for_match(lobby_queue_id)
+    arena = lobby_queue_id in ARENA_QUEUE_IDS
 
     catalog = ddragon.catalog()
     champions = [
@@ -425,6 +522,7 @@ def build_lobby_columns(
         [p.get("puuid") for p in participants],
         lambda puuid: _lookup_player(puuid, server, rank_queue),
     )
+    all_riot_ids = [lookup.riot_id or "-" for lookup in lookups]
 
     highlighted = tracked_puuids()
     tags = ddragon.champion_tags_by_internal_id()
@@ -436,14 +534,20 @@ def build_lobby_columns(
         icon = emoji_lookup.champion_emoji(champion, name=champion_name)
         lookup = lookups[index]
 
-        label = emoji_lookup.prefixed(icon, lookup.riot_id or "-")
-        if participant.get("puuid") in highlighted:
-            label = f"**{label}**"
-
         if lookup.rank_unavailable:
             rank_label = "-"
         else:
             rank_label = rank_text(lookup.rank, with_winrate=True) or "Unranked"
+
+        if show_rank_names:
+            label = rank_label
+        elif name_style is NameStyle.CHAMPION:
+            label = champion_name
+        else:
+            label = _summoner_label(lookup.riot_id or "-", all_riot_ids)
+        label = emoji_lookup.prefixed(icon, label)
+        if participant.get("puuid") in highlighted:
+            label = f"**{label}**"
 
         rows.append(
             _Row(
@@ -460,7 +564,12 @@ def build_lobby_columns(
             )
         )
 
-    return _columns_from_rows(rows, rank_header=rank_queue_label(rank_queue))
+    return _columns_from_rows(
+        rows,
+        rank_header=rank_queue_label(rank_queue),
+        arena=arena,
+        arena_team_size=ARENA_TEAM_SIZES.get(lobby_queue_id),
+    )
 
 
 def profile_author_icon(puuid: str, server: str) -> str | None:

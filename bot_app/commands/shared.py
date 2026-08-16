@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +15,7 @@ from ..config import ConfigError, get_settings
 from ..render import make_embed, profile_author_icon
 from ..services.riot_api import get_client
 from ..routing import DEFAULT_PLATFORM, SERVERS, opgg_url, split_riot_id
-from ..store import load_accounts
+from ..store import load_accounts, remember_embed_button_state
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,17 +26,73 @@ except ConfigError:
 
 
 def log_command(ctx: Any, **fields: Any) -> None:
-    """Record who ran what, with the options they passed."""
+    """Record a slash-command invocation once with consistent context."""
+    if getattr(ctx, "_debug_command_logged", False):
+        return
     supplied = " | ".join(
         f"{key}={value}" for key, value in fields.items() if value is not None
     )
+    command = getattr(ctx, "command", "unknown")
+    author = getattr(ctx, "author", "unknown")
+    channel = getattr(ctx, "channel", "unknown")
     LOGGER.info(
         "/%s by %s in %s%s",
-        ctx.command,
-        ctx.author,
-        ctx.channel,
+        command,
+        author,
+        channel,
         f" | {supplied}" if supplied else "",
     )
+    setattr(ctx, "_debug_command_logged", True)
+    setattr(ctx, "_debug_command_started_at", time.perf_counter())
+
+
+def command_option_fields(ctx: Any) -> dict[str, Any]:
+    """Extract supplied slash-command option values for the global logger."""
+    selected = getattr(ctx, "selected_options", None) or ()
+    return {
+        option["name"]: option["value"]
+        for option in selected
+        if isinstance(option, dict) and "name" in option and "value" in option
+    }
+
+
+def log_command_completion(ctx: Any) -> None:
+    """Write a DEBUG completion line for every successfully parsed command."""
+    started = getattr(ctx, "_debug_command_started_at", None)
+    elapsed_ms = (time.perf_counter() - started) * 1000 if started else 0
+    LOGGER.debug("/%s completed in %.0fms", getattr(ctx, "command", "unknown"), elapsed_ms)
+
+
+def log_command_error(ctx: Any, error: Exception) -> None:
+    """Write an exception with the same invocation context as normal commands."""
+    LOGGER.error(
+        "/%s by %s in %s failed: %s",
+        getattr(ctx, "command", "unknown"),
+        getattr(ctx, "author", "unknown"),
+        getattr(ctx, "channel", "unknown"),
+        error,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+
+
+async def remember_view_state(message: Any, kind: str, payload: dict[str, Any]) -> None:
+    """Persist one message's component-view state, if the message id is usable.
+
+    Discord's REST-fallback responses can hand back a message with a
+    non-integer/placeholder id; those aren't safe to key persistence on.
+    """
+    if message is not None and isinstance(message.id, int) and isinstance(message.channel.id, int):
+        await asyncio.to_thread(
+            remember_embed_button_state, message.id, message.channel.id, kind, payload
+        )
+
+
+def match_reference_index(reference: str | None) -> int | None:
+    """Return the zero-based recent-match index for numeric references."""
+    if reference is None or not reference.isdigit():
+        return None
+    number = int(reference)
+    return number - 1 if 1 <= number <= 20 else None
 
 
 @dataclass(frozen=True)
@@ -71,7 +128,6 @@ def resolve_target(
     ctx: Any,
     server: str | None,
     summoner: str | None,
-    tag: str | None,
     user: str | None = None,
     *,
     include_icon: bool = True,
@@ -80,10 +136,11 @@ def resolve_target(
 
     With no lookup options given at all, this falls back to the mentioned
     user's tracked account, or the caller's own. Otherwise the riot id is
-    resolved directly. A tracked account's stored server always wins over the
+    resolved directly, with a ``Name#Tag`` combined summoner splitting into
+    its own tagline. A tracked account's stored server always wins over the
     supplied one, since that's the server the account actually lives on.
     """
-    summoner, tag = split_riot_id(summoner, tag)
+    summoner, tag = split_riot_id(summoner, None)
 
     if server is None and tag and tag.upper() in SERVERS:
         server, tag = tag.upper(), None
@@ -144,7 +201,6 @@ async def target_for(
     ctx: Any,
     server: str | None,
     summoner: str | None,
-    tag: str | None,
     user: str | None = None,
     *,
     include_icon: bool = True,
@@ -155,7 +211,6 @@ async def target_for(
         ctx,
         server,
         summoner,
-        tag,
         user,
         include_icon=include_icon,
     )
@@ -163,7 +218,6 @@ async def target_for(
 
 def not_found_embed(
     summoner: str | None,
-    tag: str | None,
     server: str | None,
     *,
     user: Any = None,
@@ -171,9 +225,10 @@ def not_found_embed(
     """Handle found embed."""
     if summoner is None and user is not None:
         return make_embed("That Discord user has no tracked Riot account.")
-    who = f"{summoner}#{tag}" if summoner else "That account"
+    name, tag = split_riot_id(summoner, None)
     if server is None and tag and tag.upper() in SERVERS:
         server, tag = tag.upper(), None
+    who = f"{name}#{tag}" if name and tag else (name or "That account")
     servers = server or f"{DEFAULT_PLATFORM}, EUW1, and KR"
     return make_embed(f"{who} could not be found on {servers}.")
 

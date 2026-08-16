@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -26,6 +27,8 @@ try:
     matplotlib.use("Agg")
     import matplotlib.patheffects as path_effects
     import matplotlib.pyplot as plt
+    from matplotlib.colors import PowerNorm
+    from matplotlib.lines import Line2D
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
@@ -60,6 +63,14 @@ _MAP_BOUNDS: dict[int, tuple[int, int, int, int]] = {
     12: (-28, -19, 12849, 12858),
 }
 _DEFAULT_MAP_ID = 11
+_FOUNTAINS: dict[int, tuple[tuple[int, int], ...]] = {
+    11: ((400, 400), (14_400, 14_400)),
+}
+_FOUNTAIN_RADIUS = 2_200
+_LANE_SIGMA = 2_000.0
+_HEATMAP_LANE_COLORS = {"Top": "#5383E8", "Mid": "#F5C542", "Bottom": "#E84057"}
+_HEATMAP_KILL_WEIGHT = 5
+_HEATMAP_POINT_LIMIT = 5
 
 
 def _build_damage_chart(
@@ -468,6 +479,646 @@ def build_team_gold_difference_chart(
     """Thread-safe wrapper for the timeline gold-difference chart."""
     with _chart_lock:
         return _build_team_gold_difference_chart(timeline, filename=filename)
+
+
+def _in_base(x: float, y: float, map_id: int = _DEFAULT_MAP_ID) -> bool:
+    """Return whether a position is inside either team's fountain/shop area."""
+    return any(
+        (x - fountain_x) ** 2 + (y - fountain_y) ** 2 <= _FOUNTAIN_RADIUS ** 2
+        for fountain_x, fountain_y in _FOUNTAINS.get(map_id, ())
+    )
+
+
+def _lane_distances(x: float, y: float) -> dict[str, float]:
+    """Return squared distances from a position to each lane segment."""
+    def distance(ax: int, ay: int, bx: int, by: int) -> float:
+        dx, dy = bx - ax, by - ay
+        scale = max(dx * dx + dy * dy, 1)
+        t = max(0, min(1, ((x - ax) * dx + (y - ay) * dy) / scale))
+        return (x - (ax + t * dx)) ** 2 + (y - (ay + t * dy)) ** 2
+
+    return {
+        "Top": distance(0, 14500, 7000, 7000),
+        "Mid": distance(0, 0, 14500, 14500),
+        "Bottom": distance(7000, 7000, 14500, 0),
+    }
+
+
+def _lane_weights(x: float, y: float) -> dict[str, float]:
+    """Return distance-weighted lane membership normalized to sum to one."""
+    raw = {
+        lane: math.exp(-distance / (2 * _LANE_SIGMA ** 2))
+        for lane, distance in _lane_distances(x, y).items()
+    }
+    total = sum(raw.values())
+    return {
+        lane: weight / total if total else 0.0
+        for lane, weight in raw.items()
+    }
+
+
+def _lane_from_position(position: dict[str, Any] | None) -> str:
+    """Return the nearest lane for a Summoner's Rift map position."""
+    if not position or position.get("x") is None or position.get("y") is None:
+        return "Mid"
+    distances = _lane_distances(position["x"], position["y"])
+    return min(distances, key=distances.get)
+
+
+def _lane_for_jungle_involvement(
+    event: dict[str, Any], jungler_id: int, participants: dict[int, dict[str, Any]],
+) -> str:
+    """Choose a lane from the fight location, falling back to participant roles."""
+    position = event.get("position") or {}
+    if position.get("x") is not None and position.get("y") is not None:
+        return _lane_from_position(position)
+    lane_by_role = {"TOP": "Top", "MIDDLE": "Mid", "BOTTOM": "Bottom", "UTILITY": "Bottom"}
+    victim = participants.get(event.get("victimId")) or {}
+    victim_role = (victim.get("teamPosition") or "").upper()
+    if victim_role in lane_by_role:
+        return lane_by_role[victim_role]
+    if victim_role == "JUNGLE":
+        involved_ids = [event.get("killerId"), *(event.get("assistingParticipantIds") or [])]
+        if event.get("killerId") == jungler_id:
+            involved_ids = involved_ids[1:]
+        for participant_id in involved_ids:
+            if participant_id == jungler_id:
+                continue
+            role = ((participants.get(participant_id) or {}).get("teamPosition") or "").upper()
+            if role in lane_by_role:
+                return lane_by_role[role]
+    return _lane_from_position(event.get("position"))
+
+
+def jungle_checkpoint_minutes(game_duration: int | float) -> tuple[int, ...]:
+    """Return every completed five-minute checkpoint through match end."""
+    duration_seconds = float(game_duration or 0)
+    if duration_seconds > 100_000:
+        duration_seconds /= 1000
+    final_checkpoint = int(duration_seconds // 300) * 5
+    return tuple(range(5, final_checkpoint + 1, 5)) or (5,)
+
+
+def jungle_proximity_percentages(
+    timeline: dict[str, Any], jungler_id: int, participants: list[dict[str, Any]] | None = None,
+    max_minutes: int = 15,
+) -> dict[str, float]:
+    """Return the sampling-invariant blended proximity score for each lane."""
+    breakdown = jungle_proximity_breakdown(
+        timeline, jungler_id, participants, max_minutes
+    )
+    return {lane: values["score"] for lane, values in breakdown.items()}
+
+
+def jungle_proximity_breakdown(
+    timeline: dict[str, Any], jungler_id: int,
+    participants: list[dict[str, Any]] | None = None,
+    max_minutes: int = 15, *, alpha: float = 0.65,
+) -> dict[str, dict[str, float]]:
+    """Return presence, involvement, camp-hover, and blended lane percentages.
+
+    Presence measures on-map dwell time plus lightly weighted camp locations;
+    involvement counts kills, assists, and deaths. Each channel is normalized
+    before blending so timelines sampled at different rates remain comparable.
+    Hover is the camp-derived portion of the reported presence percentage.
+    """
+    lanes = ("Top", "Mid", "Bottom")
+    presence = dict.fromkeys(lanes, 0.0)
+    involvement = dict.fromkeys(lanes, 0.0)
+    hover = dict.fromkeys(lanes, 0.0)
+    cutoff = max_minutes * 60 * 1000
+    info = timeline.get("info", {}) or {}
+    frames = sorted(
+        (
+            frame for frame in (info.get("frames", []) or [])
+            if frame.get("timestamp", 0) <= cutoff
+        ),
+        key=lambda frame: frame.get("timestamp", 0),
+    )
+    frame_interval = float(info.get("frameInterval", 60_000) or 60_000)
+    map_id = int(info.get("mapId", _DEFAULT_MAP_ID) or _DEFAULT_MAP_ID)
+
+    for index, frame in enumerate(frames):
+        timestamp = frame.get("timestamp", 0)
+        next_timestamp = (
+            frames[index + 1].get("timestamp", timestamp)
+            if index + 1 < len(frames)
+            else min(timestamp + frame_interval, cutoff)
+        )
+        duration_minutes = max(min(next_timestamp, cutoff) - timestamp, 0) / 60_000
+        position = (frame.get("participantFrames", {}) or {}).get(
+            str(jungler_id), {}
+        ).get("position") or {}
+        x, y = position.get("x"), position.get("y")
+        if (
+            duration_minutes
+            and x is not None
+            and y is not None
+            and not _in_base(x, y, map_id)
+        ):
+            for lane, weight in _lane_weights(x, y).items():
+                presence[lane] += duration_minutes * weight
+
+    participant_by_id = {
+        p.get("participantId"): p for p in (participants or [])
+    }
+    for frame in frames:
+        for event in frame.get("events", []) or []:
+            if event.get("timestamp", frame.get("timestamp", 0)) > cutoff:
+                continue
+            if event.get("type") == "CHAMPION_KILL":
+                involved = (
+                    event.get("killerId") == jungler_id
+                    or event.get("victimId") == jungler_id
+                    or jungler_id in (event.get("assistingParticipantIds") or [])
+                )
+                if not involved:
+                    continue
+                position = event.get("position") or {}
+                if position.get("x") is not None and position.get("y") is not None:
+                    weights = _lane_weights(position["x"], position["y"])
+                else:
+                    lane = _lane_for_jungle_involvement(
+                        event, jungler_id, participant_by_id
+                    )
+                    weights = {candidate: float(candidate == lane) for candidate in lanes}
+                for lane, weight in weights.items():
+                    involvement[lane] += weight
+                continue
+            if (
+                event.get("type") not in {"MONSTER_KILL", "ELITE_MONSTER_KILL"}
+                or event.get("killerId") != jungler_id
+            ):
+                continue
+            position = event.get("position") or {}
+            if position.get("x") is None or position.get("y") is None:
+                continue
+            for lane, weight in _lane_weights(position["x"], position["y"]).items():
+                camp_weight = 0.4 * weight
+                presence[lane] += camp_weight
+                hover[lane] += camp_weight
+
+    presence_total = sum(presence.values())
+    involvement_total = sum(involvement.values())
+    presence_share = {
+        lane: presence[lane] / presence_total * 100 if presence_total else 0.0
+        for lane in lanes
+    }
+    involvement_share = {
+        lane: involvement[lane] / involvement_total * 100 if involvement_total else 0.0
+        for lane in lanes
+    }
+    hover_share = {
+        lane: hover[lane] / presence_total * 100 if presence_total else 0.0
+        for lane in lanes
+    }
+    if not presence_total:
+        blend_alpha = 0.0
+    elif not involvement_total:
+        blend_alpha = 1.0
+    else:
+        blend_alpha = alpha
+    return {
+        lane: {
+            "presence": presence_share[lane],
+            "involvement": involvement_share[lane],
+            "hover": hover_share[lane],
+            "score": (
+                blend_alpha * presence_share[lane]
+                + (1 - blend_alpha) * involvement_share[lane]
+            )
+        }
+        for lane in lanes
+    }
+
+
+def jungle_lane_involvement(
+    timeline: dict[str, Any], jungler_id: int, participants: list[dict[str, Any]],
+    max_minutes: int = 15,
+) -> dict[str, dict[str, int]]:
+    """Count every jungler kill, assist, and death once by lane."""
+    result = {
+        lane: {"kills": 0, "assists": 0, "deaths": 0}
+        for lane in ("Top", "Mid", "Bottom")
+    }
+    by_id = {p.get("participantId"): p for p in participants}
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        for event in frame.get("events", []) or []:
+            if event.get("type") != "CHAMPION_KILL":
+                continue
+            if event.get("timestamp", frame.get("timestamp", 0)) > max_minutes * 60 * 1000:
+                continue
+            killer_id = event.get("killerId")
+            assistants = event.get("assistingParticipantIds") or []
+            lane = _lane_for_jungle_involvement(event, jungler_id, by_id)
+            if killer_id == jungler_id:
+                result[lane]["kills"] += 1
+            if jungler_id in assistants:
+                result[lane]["assists"] += 1
+            if event.get("victimId") == jungler_id:
+                result[lane]["deaths"] += 1
+    return result
+
+
+def jungle_kda_at(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int
+) -> tuple[int, int, int]:
+    """Return cumulative jungler KDA using each kill event's timestamp cutoff."""
+    kills = deaths = assists = 0
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        for event in frame.get("events", []) or []:
+            if event.get("type") != "CHAMPION_KILL":
+                continue
+            if event.get("timestamp", frame.get("timestamp", 0)) > max_minutes * 60 * 1000:
+                continue
+            if event.get("killerId") == jungler_id:
+                kills += 1
+            if event.get("victimId") == jungler_id:
+                deaths += 1
+            if jungler_id in (event.get("assistingParticipantIds") or []):
+                assists += 1
+    return kills, deaths, assists
+
+
+def jungle_kill_positions(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+) -> list[tuple[int, int]]:
+    """Return the jungler's valid kill positions in chronological order before a cutoff."""
+    kills: list[tuple[int, int, int]] = []
+    cutoff = max_minutes * 60 * 1000
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        for event in frame.get("events", []) or []:
+            timestamp = event.get("timestamp", frame.get("timestamp", 0))
+            position = event.get("position") or {}
+            if (
+                event.get("type") == "CHAMPION_KILL"
+                and event.get("killerId") == jungler_id
+                and timestamp <= cutoff
+                and position.get("x") is not None
+                and position.get("y") is not None
+            ):
+                kills.append((timestamp, position["x"], position["y"]))
+    kills.sort(key=lambda kill: kill[0])
+    return [(x, y) for _, x, y in kills]
+
+
+def jungle_position_samples(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+    *, limit: int | None = _HEATMAP_POINT_LIMIT, include_initial: bool = False,
+) -> list[tuple[int, float, float, str]]:
+    """Return numbered, non-base position samples after the ignored first sample.
+
+    The initial valid position is commonly the spawn location, so it is omitted
+    by default. Fountain/shop samples are then removed without consuming the
+    marker limit; ``include_initial`` can retain an initial on-map sample.
+    """
+    samples = _jungle_position_records(
+        timeline, jungler_id, max_minutes, include_initial=include_initial
+    )
+    retained = samples if limit is None else samples[:max(limit, 0)]
+    return [
+        (number, x, y, lane)
+        for number, (_, x, y, lane) in enumerate(retained, start=1)
+    ]
+
+
+def jungle_position_sample_timestamps(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+    *, limit: int | None = _HEATMAP_POINT_LIMIT,
+) -> list[tuple[int, int]]:
+    """Return retained non-base hexagon numbers and timeline timestamps."""
+    timestamps = [
+        timestamp
+        for timestamp, _, _, _ in _jungle_position_records(
+            timeline, jungler_id, max_minutes
+        )
+    ]
+    retained = timestamps if limit is None else timestamps[:max(limit, 0)]
+    return list(enumerate(retained, start=1))
+
+
+def _jungle_position_records(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int,
+    *, include_initial: bool = False,
+) -> list[tuple[int, float, float, str]]:
+    """Return chronological on-map records, optionally retaining the spawn sample."""
+    cutoff = max_minutes * 60 * 1000
+    info = timeline.get("info", {}) or {}
+    map_id = int(info.get("mapId", _DEFAULT_MAP_ID) or _DEFAULT_MAP_ID)
+    records: list[tuple[int, float, float, dict[str, Any]]] = []
+    for frame in info.get("frames", []) or []:
+        timestamp = frame.get("timestamp", 0)
+        position = (frame.get("participantFrames", {}) or {}).get(
+            str(jungler_id), {}
+        ).get("position") or {}
+        x, y = position.get("x"), position.get("y")
+        if (
+            timestamp <= cutoff
+            and x is not None
+            and y is not None
+        ):
+            records.append((timestamp, x, y, position))
+    records.sort(key=lambda record: record[0])
+    if not include_initial:
+        records = records[1:]
+    return [
+        (timestamp, x, y, _lane_from_position(position))
+        for timestamp, x, y, position in records
+        if not _in_base(x, y, map_id)
+    ]
+
+
+def _jungle_heatmap_end_timestamp(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int,
+) -> int:
+    """Timestamp of the last available jungler position in the heatmap window."""
+    cutoff = max_minutes * 60 * 1000
+    timestamps = []
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        position = (frame.get("participantFrames", {}) or {}).get(
+            str(jungler_id), {}
+        ).get("position") or {}
+        if (
+            frame.get("timestamp", 0) <= cutoff
+            and position.get("x") is not None
+            and position.get("y") is not None
+        ):
+            timestamps.append(frame.get("timestamp", 0))
+    return max(timestamps) if timestamps else -1
+
+
+def jungle_heatmap_takedowns(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+    participants: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, str, int, int, int]]:
+    """Return positioned jungler kills, assists, deaths, and camps through 15 minutes."""
+    end_timestamp = _jungle_heatmap_end_timestamp(timeline, jungler_id, max_minutes)
+    if end_timestamp < 0:
+        return []
+    cutoff = min(end_timestamp + 1, max_minutes * 60 * 1000)
+    participant_by_id = {
+        participant.get("participantId"): participant
+        for participant in (participants or [])
+    }
+    takedowns: list[tuple[str, str, int, int, int]] = []
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        for event in frame.get("events", []) or []:
+            timestamp = event.get("timestamp", frame.get("timestamp", 0))
+            position = event.get("position") or {}
+            is_kill = event.get("killerId") == jungler_id
+            is_assist = jungler_id in (event.get("assistingParticipantIds") or [])
+            is_death = event.get("victimId") == jungler_id
+            is_camp = (
+                event.get("type") in {"MONSTER_KILL", "ELITE_MONSTER_KILL"}
+                and event.get("killerId") == jungler_id
+            )
+            if (
+                event.get("type") == "CHAMPION_KILL"
+                and (is_kill or is_assist or is_death)
+                and timestamp < cutoff
+                and position.get("x") is not None
+                and position.get("y") is not None
+            ):
+                takedowns.append(
+                    (
+                        "kill" if is_kill else "assist" if is_assist else "death",
+                        (_lane_from_position(position) if is_death else
+                         _lane_for_jungle_involvement(event, jungler_id, participant_by_id)),
+                        timestamp, position["x"], position["y"],
+                    )
+                )
+            elif is_camp and timestamp < cutoff and position.get("x") is not None and position.get("y") is not None:
+                takedowns.append(("camp", _lane_from_position(position), timestamp, position["x"], position["y"]))
+    takedowns.sort(key=lambda takedown: takedown[2])
+    return takedowns
+
+
+def jungle_heatmap_kill_positions(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+) -> list[tuple[int, int]]:
+    """Return jungler kill positions in the heatmap window."""
+    return [
+        (x, y)
+        for kind, _, _, x, y in jungle_heatmap_takedowns(
+            timeline, jungler_id, max_minutes
+        )
+        if kind == "kill"
+    ]
+
+
+def jungle_heatmap_density_points(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+    participants: list[dict[str, Any]] | None = None,
+) -> list[tuple[float, float]]:
+    """Return movement and combat points used to calculate heatmap density.
+
+    The ignored initial movement sample stays excluded. Each jungler kill,
+    assist, death, or camp is repeated five times as a rendering choice so
+    activity locations contribute heat; this is separate from proximity scoring.
+    """
+    movement = [
+        (x, y)
+        for _, x, y, _ in jungle_position_samples(timeline, jungler_id, max_minutes)
+    ]
+    takedowns = [
+        (x, y)
+        for _, _, _, x, y in jungle_heatmap_takedowns(
+            timeline, jungler_id, max_minutes, participants
+        )
+    ]
+    return movement + takedowns * _HEATMAP_KILL_WEIGHT
+
+
+def jungle_path_points(
+    timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
+    participants: list[dict[str, Any]] | None = None,
+) -> list[tuple[float, float]]:
+    """Interleave movement samples and jungler takedowns into one timed path.
+
+    The first valid movement sample remains ignored. A kill between two sampled
+    positions is inserted between those positions, so the rendered route visits
+    the combat location at the correct point in time.
+    """
+    cutoff = _jungle_heatmap_end_timestamp(timeline, jungler_id, max_minutes)
+    if cutoff < 0:
+        return []
+    map_id = int((timeline.get("info", {}) or {}).get("mapId", _DEFAULT_MAP_ID) or _DEFAULT_MAP_ID)
+    timed_points: list[tuple[int, int, float, float]] = []
+    movement: list[tuple[int, float, float]] = []
+    for frame in timeline.get("info", {}).get("frames", []) or []:
+        timestamp = frame.get("timestamp", 0)
+        position = (frame.get("participantFrames", {}) or {}).get(
+            str(jungler_id), {}
+        ).get("position")
+        if (
+            timestamp <= cutoff
+            and position
+            and position.get("x") is not None
+            and position.get("y") is not None
+        ):
+            movement.append((timestamp, position["x"], position["y"]))
+    timed_points.extend(
+        (timestamp, 1, x, y)
+        for _, _, timestamp, x, y in jungle_heatmap_takedowns(
+            timeline, jungler_id, max_minutes, participants
+        )
+    )
+    movement.sort(key=lambda point: point[0])
+    timed_points.extend(
+        (timestamp, 0, x, y)
+        for timestamp, x, y in movement[1:1 + _HEATMAP_POINT_LIMIT]
+        if not _in_base(x, y, map_id)
+    )
+    timed_points.sort(key=lambda point: (point[0], point[1]))
+    return [(x, y) for _, _, x, y in timed_points]
+
+
+def build_jungle_heatmap(
+    match: dict[str, Any], timeline: dict[str, Any], jungler_id: int,
+    *, filename: str = "jungle-heatmap.png", max_minutes: int = 20
+) -> discord.File | None:
+    """Render a 15-minute jungler density heatmap with a legend and decluttered markers.
+
+    Overlapping position/takedown markers are spread apart in a spiral, and their
+    labels are staggered outward, so tightly clustered events stay legible.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        return None
+    points = jungle_position_samples(timeline, jungler_id, max_minutes)
+    participants = match.get("info", {}).get("participants", []) or []
+    point_timestamps = dict(
+        jungle_position_sample_timestamps(timeline, jungler_id, max_minutes)
+    )
+    density_points = jungle_heatmap_density_points(
+        timeline, jungler_id, max_minutes, participants
+    )
+    path_points = jungle_path_points(
+        timeline, jungler_id, max_minutes, participants
+    )
+    if not density_points:
+        return None
+    takedowns = jungle_heatmap_takedowns(
+        timeline, jungler_id, max_minutes, participants
+    )
+    with _chart_lock:
+        figure = plt.figure(figsize=(7.4, 8.8), dpi=_FIGURE_DPI)
+        try:
+            figure.patch.set_facecolor(_BACKGROUND)
+            axes = figure.add_axes((0.03, 0.15, 0.94, 0.76))
+            axes.set_facecolor(_BACKGROUND)
+            map_id = match.get("info", {}).get("mapId", _DEFAULT_MAP_ID)
+            bounds = _MAP_BOUNDS.get(map_id, _MAP_BOUNDS[_DEFAULT_MAP_ID])
+            _draw_map_background(axes, map_id, bounds)
+            heat_xs, heat_ys = zip(*density_points)
+            axes.hexbin(
+                heat_xs, heat_ys, gridsize=30,
+                extent=(bounds[0], bounds[2], bounds[1], bounds[3]),
+                cmap="magma", mincnt=1, alpha=0.7, linewidths=0,
+                norm=PowerNorm(gamma=0.55),
+            )
+            if path_points:
+                path_xs, path_ys = zip(*path_points)
+                axes.plot(
+                    path_xs, path_ys, color="#f5c542", alpha=0.28,
+                    linewidth=1, zorder=4,
+                )
+
+            span_x = bounds[2] - bounds[0]
+            span_y = bounds[3] - bounds[1]
+            label_bucket_counts: dict[tuple[int, int], int] = {}
+
+            def _stagger(x: float, y: float, base_dy: float) -> tuple[float, float]:
+                """Push a label's offset further from its marker each time another lands nearby."""
+                key = (int(x / max(span_x / 24, 1)), int(y / max(span_y / 24, 1)))
+                count = label_bucket_counts.get(key, 0)
+                label_bucket_counts[key] = count + 1
+                if count == 0:
+                    return 0.0, base_dy
+                direction = 1 if base_dy >= 0 else -1
+                dy = base_dy + (count // 2 + 1) * 15 * direction
+                dx = 22 * (count % 2 * 2 - 1) if count else 0
+                return dx, dy
+
+            def _spread_markers(cell: float, radius: float):
+                """Nudge markers that land in the same small cell apart in a spiral."""
+                bucket_counts: dict[tuple[int, int], int] = {}
+
+                def jitter(x: float, y: float) -> tuple[float, float]:
+                    key = (round(x / cell), round(y / cell))
+                    count = bucket_counts.get(key, 0)
+                    bucket_counts[key] = count + 1
+                    if count == 0:
+                        return x, y
+                    angle = count * 2.399963229728653
+                    r = radius * math.sqrt(count)
+                    return x + r * math.cos(angle), y + r * math.sin(angle)
+
+                return jitter
+
+            text_outline = [
+                path_effects.Stroke(linewidth=2.2, foreground=_BACKGROUND),
+                path_effects.Normal(),
+            ]
+
+            marker_jitter = _spread_markers(span_x / 90, span_x / 26)
+            events: list[tuple[int, float, float, float, str, str]] = [
+                (point_timestamps[number], x, y, 130, "h", lane)
+                for number, x, y, lane in points
+            ]
+            events.extend(
+                (
+                    timestamp, takedown_x, takedown_y, 220,
+                    {"kill": "o", "assist": "D", "death": "X", "camp": "s"}[kind],
+                    lane,
+                )
+                for kind, lane, timestamp, takedown_x, takedown_y in takedowns
+            )
+            events.sort(key=lambda event: event[0])
+            for order, (_, x, y, size, marker, lane) in enumerate(events, start=1):
+                jx, jy = marker_jitter(x, y)
+                axes.scatter(
+                    [jx], [jy], marker=marker, s=size,
+                    color=_HEATMAP_LANE_COLORS.get(lane, _MUTED),
+                    edgecolors="#ffffff", linewidths=1.2, alpha=0.95, zorder=6,
+                )
+                axes.annotate(
+                    str(order),
+                    (jx, jy), xytext=_stagger(jx, jy, 15), textcoords="offset points",
+                    color="#ffffff", fontsize=8, fontweight="bold",
+                    ha="center", va="center", zorder=8, path_effects=text_outline,
+                    arrowprops={
+                        "arrowstyle": "-", "color": "#ffffff", "alpha": 0.5, "linewidth": 0.9,
+                    },
+                )
+            axes.set_xlim(bounds[0], bounds[2])
+            axes.set_ylim(bounds[1], bounds[3])
+            axes.set_title(
+                f"Jungle Proximity Heatmap — First {max_minutes} Minutes",
+                color=_TEXT, fontweight="bold", fontsize=13, pad=8,
+            )
+            axes.set_axis_off()
+
+            legend_handles = [
+                Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Top"], markeredgecolor="#ffffff", markersize=10, label="Near Top"),
+                Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Mid"], markeredgecolor="#ffffff", markersize=10, label="Near Mid"),
+                Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Bottom"], markeredgecolor="#ffffff", markersize=10, label="Near Bot"),
+                Line2D([0], [0], color="#f5c542", alpha=0.6, linewidth=2, label="Movement path"),
+                Line2D([0], [0], marker="o", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=9, label="Kill"),
+                Line2D([0], [0], marker="D", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=8, label="Assist"),
+                Line2D([0], [0], marker="X", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=9, label="Death"),
+                Line2D([0], [0], marker="s", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=8, label="Camp (through 15:00)"),
+            ]
+            figure.legend(
+                handles=legend_handles, loc="lower center", ncol=4,
+                bbox_to_anchor=(0.5, 0.005), frameon=True, fontsize=8.5,
+                labelcolor=_TEXT, facecolor=_BACKGROUND, edgecolor=_GRID,
+            )
+            buffer = io.BytesIO()
+            figure.savefig(buffer, format="png", facecolor=figure.get_facecolor())
+        finally:
+            plt.close(figure)
+        buffer.seek(0)
+        return discord.File(buffer, filename=filename)
 
 
 def build_kill_map(

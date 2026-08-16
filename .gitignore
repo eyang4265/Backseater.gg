@@ -6,11 +6,14 @@ __pycache__/
 json/secrets.json
 
 # Runtime state, rewritten by the pollers.
-json/data.json
-json/int_subscriptions.json
-json/*_state.json
 json/*.tmp
 json/*.sqlite
+
+# Bot logs.
+*.log
+
+# Single-instance lock.
+bot.lock
 
 # Local Claude Code permissions are machine-specific.
 .claude/settings.local.json

@@ -9,8 +9,18 @@ import discord
 from discord.ext import commands
 
 from ... import ddragon
-from ...charts import KILL_MAP_FILENAME, build_kill_map
+from ...charts import (
+    KILL_MAP_FILENAME,
+    build_jungle_heatmap,
+    build_kill_map,
+    jungle_checkpoint_minutes,
+    jungle_lane_involvement,
+    jungle_kda_at,
+    jungle_proximity_breakdown,
+)
+from ...emoji import champion_emoji, prefixed
 from ...render import make_embed, outcome_color
+from ...queues import queue_name
 from ...services.riot_api import RiotAPIError, get_client
 from ...timeline import (
     MatchTimeline,
@@ -24,6 +34,7 @@ from ..shared import (
     SERVERS,
     Target,
     log_command,
+    match_reference_index,
     not_found_embed,
     set_player_author,
     target_for,
@@ -54,11 +65,10 @@ class MatchCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
     @discord.option(
         "match_id",
-        description="Match ID (e.g. NA1_5619445010); leave blank for the most recent game",
+        description="Match ID or recent-game number (1=latest); leave blank for the most recent game",
         required=False,
     )
     @discord.option(
@@ -69,25 +79,31 @@ class MatchCommands(commands.Cog):
         max_value=10,
         required=False,
     )
-    async def timeline(self, ctx, server, summoner, tag, user, match_id, position):
+    async def timeline(self, ctx, server, summoner, user, match_id, position):
         """One player's box score for a match, plus timeline-derived stats."""
         log_command(
             ctx,
             server=server,
             summoner=summoner,
-            tag=tag,
             user=user,
             match_id=match_id,
             position=position,
         )
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            return
+        if match_id and match_id.isdigit() and match_reference_index(match_id) is None:
+            await ctx.respond(embed=make_embed("Recent-game numbers must be between 1 and 20."))
             return
 
-        selected_id = match_id or await self._latest_match_id(ctx, target)
+        reference_index = match_reference_index(match_id)
+        if reference_index is not None:
+            selected_id = await self._recent_match_id(target, reference_index)
+        else:
+            selected_id = match_id or await self._latest_match_id(ctx, target)
         if selected_id is None:
             return
 
@@ -160,6 +176,123 @@ class MatchCommands(commands.Cog):
         embed.set_image(url=f"attachment://{KILL_MAP_FILENAME}")
         await ctx.respond(embed=embed, file=kill_map)
 
+    @discord.slash_command(
+        guild_ids=GUILD_IDS,
+        description="Show which lane the jungler played toward in a match",
+    )
+    @discord.option("server", description="Server", choices=SERVERS, required=False)
+    @discord.option("summoner", description="Game Name", required=False)
+    @discord.option("user", description="User (defaults to you)", required=False)
+    @discord.option(
+        "match_id", description="Match ID or recent-game number (1=latest); blank uses latest", required=False
+    )
+    @discord.option(
+        "team", description="Which jungler to analyze", choices=["own", "enemy"], required=False
+    )
+    async def jungleproximity(self, ctx, server, summoner, user, match_id, team="own"):
+        """Summarize which lane the own or enemy jungler stayed closest to."""
+        log_command(ctx, server=server, summoner=summoner, user=user, match_id=match_id, team=team)
+        await ctx.defer()
+        target = await target_for(ctx, server, summoner, user)
+        if target is None:
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            return
+        if match_id and match_id.isdigit() and match_reference_index(match_id) is None:
+            await ctx.respond(embed=make_embed("Recent-game numbers must be between 1 and 20."))
+            return
+        try:
+            index = match_reference_index(match_id)
+            if index is not None:
+                ids = await asyncio.to_thread(get_client().match_ids, target.puuid, target.server, count=index + 1)
+                selected_id = ids[index] if index < len(ids) else None
+            else:
+                ids = [match_id] if match_id else await asyncio.to_thread(get_client().match_ids, target.puuid, target.server, count=1)
+                selected_id = ids[0] if ids else None
+            if selected_id is None:
+                await ctx.respond(embed=make_embed("No matching game found."))
+                return
+            match = await asyncio.to_thread(get_client().match, selected_id, target.server)
+            timeline = await asyncio.to_thread(
+                get_client().match_timeline, selected_id, target.server
+            )
+        except RiotAPIError as error:
+            await ctx.respond(embed=make_embed(f"Could not fetch jungle proximity data: {error}"))
+            return
+
+        participants = match.get("info", {}).get("participants", []) or []
+        target_participant = next((p for p in participants if p.get("puuid") == target.puuid), None)
+        if target_participant is None:
+            await ctx.respond(embed=make_embed("That player was not in this match."))
+            return
+        selected_team_id = target_participant.get("teamId")
+        if team == "enemy":
+            selected_team_id = 200 if selected_team_id == 100 else 100
+        jungler = next(
+            (p for p in participants if p.get("teamId") == selected_team_id and (p.get("teamPosition") or "").upper() == "JUNGLE"),
+            None,
+        )
+        if jungler is None:
+            await ctx.respond(embed=make_embed("No jungler could be identified for that team."))
+            return
+        jungler_id = jungler.get("participantId")
+        heatmap = await asyncio.to_thread(
+            build_jungle_heatmap, match, timeline, jungler_id, max_minutes=15
+        )
+        checkpoints = []
+        game_duration = match.get("info", {}).get("gameDuration", 0)
+        for minutes in jungle_checkpoint_minutes(game_duration):
+            if minutes > 15:
+                break
+            breakdown = await asyncio.to_thread(
+                jungle_proximity_breakdown, timeline, jungler_id, participants, minutes
+            )
+            involvement = await asyncio.to_thread(
+                jungle_lane_involvement, timeline, jungler_id, participants, minutes
+            )
+            kda = await asyncio.to_thread(jungle_kda_at, timeline, jungler_id, minutes)
+            checkpoints.append((minutes, breakdown, involvement, kda))
+
+        catalog = await asyncio.to_thread(ddragon.catalog)
+        champion = catalog.by_key(jungler.get("championId")) if catalog else None
+        champion_name = champion.name if champion else jungler.get("championName", "Unknown champion")
+        champion_label = prefixed(champion_emoji(champion, name=champion_name), champion_name)
+        jungler_name = jungler.get('riotIdGameName') or jungler.get('summonerName', 'Unknown')
+        jungler_tag = jungler.get('riotIdTagline')
+        if jungler_tag:
+            jungler_name = f"{jungler_name}#{jungler_tag}"
+        final_kda = f"{jungler.get('kills', 0)}/{jungler.get('deaths', 0)}/{jungler.get('assists', 0)}"
+        embed = make_embed(
+            f"Jungler: {jungler_name} — {champion_label} ({final_kda})",
+            title=f"Jungle Proximity — {queue_name(match.get('info', {}).get('queueId'))}",
+        )
+        for minutes, breakdown, involvement, kda in checkpoints:
+            lanes = list(breakdown)
+            embed.add_field(
+                name=f"{minutes}m · KDA {kda[0]}/{kda[1]}/{kda[2]}",
+                value="\n".join({"Bottom": "Bot"}.get(lane, lane) for lane in lanes),
+                inline=True,
+            )
+            embed.add_field(
+                name="Score",
+                value="\n".join(f"{breakdown[lane]['score']:.1f}%" for lane in lanes),
+                inline=True,
+            )
+            embed.add_field(
+                name="K/D/A",
+                value="\n".join(
+                    f"{involvement[lane]['kills']}/"
+                    f"{involvement[lane]['deaths']}/"
+                    f"{involvement[lane]['assists']}"
+                    for lane in lanes
+                ),
+                inline=True,
+            )
+        if heatmap is None:
+            await ctx.respond(embed=make_embed("No jungler position data was found."))
+            return
+        embed.set_image(url="attachment://jungle-heatmap.png")
+        await ctx.respond(embed=embed, file=heatmap)
+
     @staticmethod
     async def _latest_match_id(ctx, target: Target) -> str | None:
         """Handle match id."""
@@ -176,6 +309,14 @@ class MatchCommands(commands.Cog):
             )
             return None
         return match_ids[0]
+
+    @staticmethod
+    async def _recent_match_id(target: Target, index: int) -> str | None:
+        """Resolve a 1-based user reference to a recent match ID."""
+        match_ids = await asyncio.to_thread(
+            get_client().match_ids, target.puuid, target.server, count=index + 1
+        )
+        return match_ids[index] if index < len(match_ids) else None
 
     @staticmethod
     def _build_embed(
@@ -217,7 +358,7 @@ class MatchCommands(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"Match Stats — {match_id}",
+            title=f"Match Stats — {queue_name(match.get('info', {}).get('queueId'))} — {match_id}",
             description=(
                 f"**{champion_name(participant)}** · {outcome} · "
                 f"{participant.get('kills', 0)}/{participant.get('deaths', 0)}/"

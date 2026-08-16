@@ -4,8 +4,9 @@ A Discord bot that tracks League of Legends accounts: it announces ranked
 matches with LP changes and a damage chart, renders live lobbies with each
 player's rank, and answers profile/mastery/timeline lookups — `/timeline`
 plots that player's kills and deaths on the minimap and tracks their gold lead
-over the lane opponent at every five-minute mark. `/matchhistory` shows a
-player's ten latest games with their result, champion, KDA, CS, queue, and duration.
+over the lane opponent at every five-minute mark. `/matchhistory` shows up to
+ten recent games with their result, champion, KDA, CS, queue, duration, and a
+W/L score; mode and champion filters search recent games for up to ten matches.
 
 ## Running it
 

@@ -16,8 +16,8 @@ from ...announce import (
     format_live_game,
 )
 from ...emoji import champion_emoji, prefixed
-from ...history import format_match_history_line
-from ...queues import FLEX_QUEUE_ID, QUEUE_NAMES, SOLO_QUEUE_ID, queue_name
+from ...history import format_match_history_line, match_history_score
+from ...queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID, current_queue_names, queue_name
 from ...ranks import RankSnapshot, fetch_ranks
 from ...render import (
     make_embed,
@@ -39,7 +39,13 @@ LOGGER = logging.getLogger(__name__)
 
 _TOP_MASTERY_COUNT = 3
 _MATCH_HISTORY_COUNT = 10
-_GAME_MODE_CHOICES = tuple(sorted(set(QUEUE_NAMES.values())))
+_MATCH_HISTORY_FILTER_LOOKBACK = 100
+_MATCH_HISTORY_FETCH_BATCH = 10
+
+
+def _game_mode_choices(_ctx: discord.AutocompleteContext) -> tuple[str, ...]:
+    """Game mode suggestions, refreshed at bot startup to drop retired modes."""
+    return current_queue_names()
 
 
 def _record_text(snapshot: RankSnapshot | None) -> str | None:
@@ -90,7 +96,7 @@ def _matches_history_filters(
 ) -> bool:
     """Return whether a match contains the requested mode and champion."""
     info = match.get("info", {})
-    if game_mode and queue_name(info.get("queueId")).casefold() != game_mode.casefold():
+    if game_mode and game_mode.casefold() not in queue_name(info.get("queueId")).casefold():
         return False
     if not champion:
         return True
@@ -115,14 +121,13 @@ class PlayerCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
-    async def opgg(self, ctx, server, summoner, tag, user):
+    async def opgg(self, ctx, server, summoner, user):
         """Return an OP.GG profile link for a tracked or looked-up player."""
-        log_command(ctx, server=server, summoner=summoner, tag=tag, user=user)
-        target = await target_for(ctx, server, summoner, tag, user)
+        log_command(ctx, server=server, summoner=summoner, user=user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         url = target.opgg_url
@@ -145,16 +150,15 @@ class PlayerCommands(commands.Cog):
     @discord.slash_command(guild_ids=GUILD_IDS, description="Player Profile")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User", required=False)
-    async def profile(self, ctx, server, summoner, tag, user):
+    async def profile(self, ctx, server, summoner, user):
         """Level, server, ranked standing in both queues, and top champion masteries."""
-        log_command(ctx, server=server, summoner=summoner, tag=tag, user=user)
+        log_command(ctx, server=server, summoner=summoner, user=user)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         client = get_client()
@@ -215,16 +219,15 @@ class PlayerCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User", required=False)
-    async def livegame(self, ctx, server, summoner, tag, user):
+    async def livegame(self, ctx, server, summoner, user):
         """The target's current lobby: names, ranks, and win rates per team."""
-        log_command(ctx, server=server, summoner=summoner, tag=tag, user=user)
+        log_command(ctx, server=server, summoner=summoner, user=user)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         try:
@@ -284,28 +287,29 @@ class PlayerCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
     @discord.option(
-        "game_mode", description="Filter by game mode", choices=_GAME_MODE_CHOICES, required=False
+        "game_mode",
+        description="Filter by game mode, such as Ranked Solo/Duo or ARAM",
+        autocomplete=discord.utils.basic_autocomplete(_game_mode_choices),
+        required=False,
     )
     @discord.option("champion", description="Filter by champion", required=False)
-    async def matchhistory(self, ctx, server, summoner, tag, user, game_mode, champion):
-        """Recent games with optional game-mode and champion filters."""
+    async def matchhistory(self, ctx, server, summoner, user, game_mode, champion):
+        """Show up to ten recent games, optionally filtered by mode or champion."""
         log_command(
             ctx,
             server=server,
             summoner=summoner,
-            tag=tag,
             user=user,
             game_mode=game_mode,
             champion=champion,
         )
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         client = get_client()
@@ -314,7 +318,11 @@ class PlayerCommands(commands.Cog):
                 client.match_ids,
                 target.puuid,
                 target.server,
-                count=_MATCH_HISTORY_COUNT,
+                count=(
+                    _MATCH_HISTORY_FILTER_LOOKBACK
+                    if game_mode or champion
+                    else _MATCH_HISTORY_COUNT
+                ),
             )
         except RiotAPIError as error:
             await ctx.respond(
@@ -327,37 +335,51 @@ class PlayerCommands(commands.Cog):
             )
             return
 
-        fetched = await asyncio.gather(
-            *(
-                asyncio.to_thread(client.match, match_id, target.server)
-                for match_id in match_ids
-            ),
-            return_exceptions=True,
-        )
-        matches = []
-        for match_id, result in zip(match_ids, fetched):
-            if isinstance(result, Exception):
-                LOGGER.warning(
-                    "Could not fetch match %s for history: %s", match_id, result
-                )
-            else:
-                matches.append(result)
-
         catalog = await asyncio.to_thread(ddragon.catalog)
-        lines = [
-            line
-            for match in matches
-            if _matches_history_filters(match, target.puuid, catalog, game_mode, champion)
-            if (line := _match_history_line(match, target.puuid, catalog)) is not None
-        ]
+        displayed_matches = []
+        lines = []
+        # Fetch in small batches and stop as soon as enough matches pass the
+        # filter, instead of always fetching all `count` matches up front —
+        # a full 100-match fan-out would monopolize the shared Riot API rate
+        # limiter that the background match/live-game poller also relies on.
+        for batch_start in range(0, len(match_ids), _MATCH_HISTORY_FETCH_BATCH):
+            if len(lines) == _MATCH_HISTORY_COUNT:
+                break
+            batch_ids = match_ids[batch_start : batch_start + _MATCH_HISTORY_FETCH_BATCH]
+            fetched = await asyncio.gather(
+                *(
+                    asyncio.to_thread(client.match, match_id, target.server)
+                    for match_id in batch_ids
+                ),
+                return_exceptions=True,
+            )
+            for match_id, result in zip(batch_ids, fetched):
+                if isinstance(result, Exception):
+                    LOGGER.warning(
+                        "Could not fetch match %s for history: %s", match_id, result
+                    )
+                    continue
+                if not _matches_history_filters(
+                    result, target.puuid, catalog, game_mode, champion
+                ):
+                    continue
+                line = _match_history_line(result, target.puuid, catalog)
+                if line is None:
+                    continue
+                displayed_matches.append(result)
+                lines.append(line)
+                if len(lines) == _MATCH_HISTORY_COUNT:
+                    break
         if not lines:
             await ctx.respond(
                 embed=make_embed("Could not load any match details. Please try again.")
             )
             return
 
+        wins, losses = match_history_score(displayed_matches, target.puuid)
         embed = make_embed(
-            "\n\n".join(lines), title=f"Match History — {target.riot_id}"
+            "\n\n".join(lines),
+            title=f"Match History — {target.riot_id} ({wins}W {losses}L)",
         )
         set_player_author(embed, target)
         await ctx.respond(embed=embed)
@@ -367,16 +389,15 @@ class PlayerCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
-    async def matchlist(self, ctx, server, summoner, tag, user):
+    async def matchlist(self, ctx, server, summoner, user):
         """The player's most recent match ids."""
-        log_command(ctx, server=server, summoner=summoner, tag=tag, user=user)
+        log_command(ctx, server=server, summoner=summoner, user=user)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, tag, server, user=user))
+            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
             return
 
         try:
@@ -403,20 +424,19 @@ class PlayerCommands(commands.Cog):
     @commands.is_owner()
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("tag", description="Tagline", required=False)
     @discord.option("user", description="User (defaults to you)", required=False)
-    async def puuid(self, ctx, server, summoner, tag, user):
+    async def puuid(self, ctx, server, summoner, user):
         """Resolve a player's PUUID.
 
         Owner-only and ephemeral: a PUUID can be used to look someone up
         through the Riot API directly, without going through this bot.
         """
-        log_command(ctx, server=server, summoner=summoner, tag=tag, user=user)
+        log_command(ctx, server=server, summoner=summoner, user=user)
 
-        target = await target_for(ctx, server, summoner, tag, user)
+        target = await target_for(ctx, server, summoner, user)
         if target is None:
             await ctx.respond(
-                embed=not_found_embed(summoner, tag, server, user=user), ephemeral=True
+                embed=not_found_embed(summoner, server, user=user), ephemeral=True
             )
             return
 

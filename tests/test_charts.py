@@ -3,7 +3,22 @@
 import unittest
 from unittest.mock import patch
 
-from bot_app.charts import build_lp_chart
+from bot_app.charts import (
+    _in_base,
+    _lane_weights,
+    build_lp_chart,
+    jungle_checkpoint_minutes,
+    jungle_heatmap_density_points,
+    jungle_heatmap_takedowns,
+    jungle_kda_at,
+    jungle_kill_positions,
+    jungle_lane_involvement,
+    jungle_path_points,
+    jungle_proximity_breakdown,
+    jungle_proximity_percentages,
+    jungle_position_sample_timestamps,
+    jungle_position_samples,
+)
 
 
 class LpChartTests(unittest.TestCase):
@@ -11,3 +26,387 @@ class LpChartTests(unittest.TestCase):
         """Verify that missing matplotlib returns none."""
         with patch("bot_app.charts.MATPLOTLIB_AVAILABLE", False):
             self.assertIsNone(build_lp_chart([{"t": 1, "v": 100}], days=30))
+
+
+class JungleInvolvementTests(unittest.TestCase):
+    def test_fountain_samples_are_excluded_and_marker_timestamps_stay_aligned(self) -> None:
+        """Drop base time without desynchronizing heatmap marker timestamps."""
+        timeline = {"info": {"mapId": 11, "frames": [
+            {"timestamp": 0, "participantFrames": {
+                "1": {"position": {"x": 400, "y": 400}}
+            }},
+            {"timestamp": 60_000, "participantFrames": {
+                "1": {"position": {"x": 1_000, "y": 13_000}}
+            }},
+            {"timestamp": 120_000, "participantFrames": {
+                "1": {"position": {"x": 14_400, "y": 14_400}}
+            }},
+            {"timestamp": 180_000, "participantFrames": {
+                "1": {"position": {"x": 13_000, "y": 1_000}}
+            }},
+        ]}}
+
+        samples = jungle_position_samples(timeline, 1)
+        timestamps = jungle_position_sample_timestamps(timeline, 1)
+
+        self.assertTrue(_in_base(400, 400))
+        self.assertFalse(_in_base(1_000, 13_000))
+        self.assertEqual([1, 2], [number for number, *_ in samples])
+        self.assertEqual([(1, 60_000), (2, 180_000)], timestamps)
+        self.assertEqual(set(dict(timestamps)), {number for number, *_ in samples})
+
+    def test_soft_lane_weights_are_normalized_near_gromp(self) -> None:
+        """Spread jungle positions across lanes while favoring nearby Top."""
+        weights = _lane_weights(2_100, 8_400)
+
+        self.assertAlmostEqual(1.0, sum(weights.values()))
+        self.assertGreater(weights["Top"], weights["Mid"])
+        self.assertGreater(weights["Mid"], weights["Bottom"])
+
+    def test_proximity_is_invariant_to_position_sampling_rate(self) -> None:
+        """Represent the same route at one-minute and one-second resolution."""
+        def make_timeline(interval: int) -> dict:
+            frames = []
+            for timestamp in range(0, 120_001, interval):
+                position = (
+                    {"x": 1_000, "y": 13_000}
+                    if timestamp < 60_000
+                    else {"x": 13_000, "y": 1_000}
+                )
+                frames.append({
+                    "timestamp": timestamp,
+                    "participantFrames": {"1": {"position": position}},
+                })
+            return {"info": {"frameInterval": interval, "frames": frames}}
+
+        coarse = jungle_proximity_percentages(make_timeline(60_000), 1, max_minutes=2)
+        fine = jungle_proximity_percentages(make_timeline(1_000), 1, max_minutes=2)
+
+        for lane in coarse:
+            self.assertAlmostEqual(coarse[lane], fine[lane], delta=1.0)
+
+    def test_empty_involvement_renormalizes_scores_to_one_hundred(self) -> None:
+        """Use the full presence channel when no fights occurred."""
+        timeline = {"info": {"frameInterval": 60_000, "frames": [{
+            "timestamp": 0,
+            "participantFrames": {"1": {"position": {"x": 1_000, "y": 13_000}}},
+        }]}}
+
+        scores = jungle_proximity_percentages(timeline, 1, max_minutes=1)
+
+        self.assertAlmostEqual(100.0, sum(scores.values()))
+
+    def test_empty_presence_renormalizes_scores_to_one_hundred(self) -> None:
+        """Use the full involvement channel when every sample is in base."""
+        timeline = {"info": {"frameInterval": 60_000, "frames": [{
+            "timestamp": 0,
+            "participantFrames": {"1": {"position": {"x": 400, "y": 400}}},
+            "events": [{
+                "type": "CHAMPION_KILL", "timestamp": 30_000,
+                "killerId": 1, "victimId": 2,
+                "position": {"x": 1_000, "y": 13_000},
+            }],
+        }]}}
+
+        breakdown = jungle_proximity_breakdown(timeline, 1, max_minutes=1)
+
+        self.assertEqual(0.0, sum(lane["presence"] for lane in breakdown.values()))
+        self.assertAlmostEqual(100.0, sum(lane["score"] for lane in breakdown.values()))
+
+    def test_death_contributes_to_lane_involvement(self) -> None:
+        """Treat a jungler death as fight involvement where it occurred."""
+        timeline = {"info": {"frames": [{
+            "timestamp": 60_000,
+            "events": [{
+                "type": "CHAMPION_KILL", "killerId": 2, "victimId": 1,
+                "position": {"x": 1_000, "y": 13_000},
+            }],
+        }]}}
+
+        breakdown = jungle_proximity_breakdown(timeline, 1, max_minutes=5)
+        counts = jungle_lane_involvement(timeline, 1, [], max_minutes=5)
+
+        self.assertGreater(breakdown["Top"]["involvement"], 99.0)
+        self.assertEqual(1, counts["Top"]["deaths"])
+
+    def test_camp_only_activity_reports_hover_as_presence(self) -> None:
+        """Expose camp-derived proximity without inventing fight involvement."""
+        timeline = {"info": {"frames": [{
+            "timestamp": 60_000,
+            "events": [{
+                "type": "MONSTER_KILL", "killerId": 1,
+                "position": {"x": 2_100, "y": 8_400},
+            }],
+        }]}}
+
+        breakdown = jungle_proximity_breakdown(timeline, 1, max_minutes=5)
+
+        for lane in breakdown.values():
+            self.assertAlmostEqual(lane["presence"], lane["hover"])
+            self.assertEqual(0.0, lane["involvement"])
+
+    def test_position_samples_skip_first_then_number_by_timestamp(self) -> None:
+        """Ignore the first sample and number remaining hexagons chronologically."""
+        timeline = {
+            "info": {
+                "frames": [
+                    {"timestamp": 120_000, "participantFrames": {
+                        "1": {"position": {"x": 14_000, "y": 1_000}}
+                    }},
+                    {"timestamp": 0, "participantFrames": {
+                        "1": {"position": {"x": 500, "y": 500}}
+                    }},
+                    {"timestamp": 60_000, "participantFrames": {
+                        "1": {"position": {"x": 6_000, "y": 6_000}}
+                    }},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            [(1, 6_000, 6_000, "Mid"), (2, 14_000, 1_000, "Bottom")],
+            jungle_position_samples(timeline, 1),
+        )
+
+    def test_heatmap_stops_after_five_numbered_points(self) -> None:
+        """Limit heatmap movement markers to five points after the ignored start."""
+        timeline = {"info": {"frames": [
+            {"timestamp": minute * 60_000, "participantFrames": {
+                "1": {"position": {"x": 6_000 + minute * 100, "y": 6_000 + minute * 100}}
+            }}
+            for minute in range(8)
+        ]}}
+
+        samples = jungle_position_samples(timeline, 1)
+
+        self.assertEqual([1, 2, 3, 4, 5], [number for number, *_ in samples])
+        self.assertEqual((6_500, 6_500), samples[-1][1:3])
+
+    def test_sample_timeline_hexagon_timestamps(self) -> None:
+        """Read the first five post-spawn timestamps from the sample timeline."""
+        import json
+        from pathlib import Path
+
+        timeline = json.loads(
+            (Path(__file__).parents[1] / "json/samples/sample_timeline.json").read_text()
+        )
+
+        self.assertEqual(
+            [(1, 60_026), (2, 120_046), (3, 180_109), (4, 240_125), (5, 300_145)],
+            jungle_position_sample_timestamps(timeline, 2),
+        )
+
+    def test_kill_positions_are_cut_off_and_numbered_chronologically(self) -> None:
+        """Return only valid jungler kill positions in chronological order."""
+        timeline = {
+            "info": {
+                "frames": [{
+                    "timestamp": 1_200_100,
+                    "events": [
+                        {"type": "CHAMPION_KILL", "timestamp": 900_000, "killerId": 1,
+                         "position": {"x": 900, "y": 901}},
+                        {"type": "CHAMPION_KILL", "timestamp": 600_000, "killerId": 1,
+                         "position": {"x": 600, "y": 601}},
+                        {"type": "CHAMPION_KILL", "timestamp": 1_200_001, "killerId": 1,
+                         "position": {"x": 1200, "y": 1201}},
+                        {"type": "CHAMPION_KILL", "timestamp": 500_000, "killerId": 2,
+                         "position": {"x": 500, "y": 501}},
+                    ],
+                }]
+            }
+        }
+
+        self.assertEqual([(600, 601), (900, 901)], jungle_kill_positions(timeline, 1, 20))
+
+    def test_kills_contribute_to_heatmap_density(self) -> None:
+        """Weight kill locations as part of the heatmap density."""
+        timeline = {
+            "info": {
+                "frames": [
+                    {"timestamp": 0, "participantFrames": {
+                        "1": {"position": {"x": 6_000, "y": 6_000}}
+                    }},
+                    {"timestamp": 60_000, "participantFrames": {
+                        "1": {"position": {"x": 6_100, "y": 6_100}}
+                    }, "events": [{
+                        "type": "CHAMPION_KILL", "timestamp": 60_000,
+                        "killerId": 1, "position": {"x": 6_200, "y": 6_200},
+                    }]},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            [(6_100, 6_100), *((6_200, 6_200),) * 5],
+            jungle_heatmap_density_points(timeline, 1),
+        )
+
+    def test_heatmap_marks_kills_and_assists_through_fifteen_minutes(self) -> None:
+        """Include positioned kills and assists through the 15-minute window."""
+        timeline = {"info": {"frames": [
+            {"timestamp": minute * 60_000, "participantFrames": {
+                "1": {"position": {"x": minute * 100, "y": minute * 100}}
+            }, "events": ([{
+                "type": "CHAMPION_KILL", "timestamp": 90_000,
+                "killerId": 1, "position": {"x": 900, "y": 901},
+            }] if minute == 2 else [{
+                "type": "CHAMPION_KILL", "timestamp": 210_000,
+                "killerId": 2, "assistingParticipantIds": [1],
+                "position": {"x": 2_100, "y": 2_101},
+            }] if minute == 4 else [{
+                "type": "CHAMPION_KILL", "timestamp": 300_000,
+                "killerId": 1, "position": {"x": 3_000, "y": 3_001},
+            }] if minute == 5 else [])}
+            for minute in range(6)
+        ]}}
+
+        self.assertEqual(
+            [
+                ("kill", "Mid", 90_000, 900, 901),
+                ("assist", "Mid", 210_000, 2_100, 2_101),
+                ("kill", "Mid", 300_000, 3_000, 3_001),
+            ],
+            jungle_heatmap_takedowns(timeline, 1),
+        )
+
+    def test_heatmap_includes_jungler_deaths_through_fifteen_minutes(self) -> None:
+        """Include a jungler death and retain events through the 15-minute window."""
+        timeline = {"info": {"frames": [
+            {"timestamp": minute * 60_000, "participantFrames": {
+                "1": {"position": {"x": minute * 100, "y": minute * 100}}
+            }, "events": ([{
+                "type": "CHAMPION_KILL", "timestamp": 14 * 60_000,
+                "killerId": 2, "victimId": 1,
+                "position": {"x": 1_400, "y": 1_401},
+            }] if minute == 14 else [])}
+            for minute in range(16)
+        ]}}
+
+        self.assertEqual(
+            [("death", "Mid", 14 * 60_000, 1_400, 1_401)],
+            jungle_heatmap_takedowns(timeline, 1, max_minutes=15),
+        )
+
+    def test_path_interleaves_kills_between_position_samples(self) -> None:
+        """Route position two through a kill before continuing to position three."""
+        # Coordinates are offset well outside the fountain radius around
+        # (400, 400) so this test isn't incidentally exercising base filtering.
+        timeline = {
+            "info": {
+                "frames": [
+                    {"timestamp": 0, "participantFrames": {
+                        "1": {"position": {"x": 5100, "y": 5100}}
+                    }},
+                    {"timestamp": 60_000, "participantFrames": {
+                        "1": {"position": {"x": 5200, "y": 5200}}
+                    }},
+                    {"timestamp": 120_000, "participantFrames": {
+                        "1": {"position": {"x": 5400, "y": 5400}}
+                    }, "events": [{
+                        "type": "CHAMPION_KILL", "timestamp": 90_000,
+                        "killerId": 1, "position": {"x": 5300, "y": 5300},
+                    }]},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            [(5200, 5200), (5300, 5300), (5400, 5400)],
+            jungle_path_points(timeline, 1),
+        )
+
+    def test_path_excludes_base_positions_like_position_samples_does(self) -> None:
+        """A recall back to base shouldn't route the path through the fountain."""
+        timeline = {
+            "info": {
+                "frames": [
+                    {"timestamp": 0, "participantFrames": {
+                        "1": {"position": {"x": 5100, "y": 5100}}
+                    }},
+                    {"timestamp": 60_000, "participantFrames": {
+                        "1": {"position": {"x": 400, "y": 400}}
+                    }},
+                    {"timestamp": 120_000, "participantFrames": {
+                        "1": {"position": {"x": 5400, "y": 5400}}
+                    }},
+                ]
+            }
+        }
+
+        self.assertTrue(_in_base(400, 400))
+        self.assertEqual(
+            [(5400, 5400)],
+            jungle_path_points(timeline, 1),
+        )
+
+    def test_checkpoints_continue_through_match(self) -> None:
+        """Generate every completed five-minute checkpoint through match end."""
+        self.assertEqual(
+            (5, 10, 15, 20, 25, 30, 35),
+            jungle_checkpoint_minutes(37 * 60 + 42),
+        )
+
+    def test_kda_uses_event_timestamp_inside_later_frame(self) -> None:
+        """Include pre-cutoff events stored in a frame whose timestamp is later."""
+        timeline = {
+            "info": {
+                "frames": [{
+                    "timestamp": 900_296,
+                    "events": [
+                        {"type": "CHAMPION_KILL", "timestamp": 899_000, "killerId": 1, "victimId": 6},
+                        {"type": "CHAMPION_KILL", "timestamp": 901_000, "killerId": 1, "victimId": 6},
+                    ],
+                }]
+            }
+        }
+
+        self.assertEqual((1, 0, 0), jungle_kda_at(timeline, 1, max_minutes=15))
+
+    def test_assigns_enemy_jungler_fights_to_joining_lane(self) -> None:
+        """Assign enemy-jungle takedowns to the allied lane that joined them."""
+        timeline = {
+            "info": {
+                "frames": [{
+                    "timestamp": 300_000,
+                    "events": [{
+                        "type": "CHAMPION_KILL", "killerId": 1, "victimId": 6,
+                        "assistingParticipantIds": [2],
+                    }, {
+                        "type": "CHAMPION_KILL", "killerId": 2, "victimId": 6,
+                        "assistingParticipantIds": [1],
+                    }],
+                }]
+            }
+        }
+        participants = [
+            {"participantId": 1, "teamPosition": "JUNGLE"},
+            {"participantId": 2, "teamPosition": "TOP"},
+            {"participantId": 6, "teamPosition": "JUNGLE"},
+        ]
+
+        involvement = jungle_lane_involvement(timeline, 1, participants, max_minutes=5)
+
+        self.assertEqual(
+            {"kills": 1, "assists": 1, "deaths": 0}, involvement["Top"]
+        )
+        self.assertEqual(1, sum(lane["kills"] for lane in involvement.values()))
+        self.assertEqual(1, sum(lane["assists"] for lane in involvement.values()))
+
+    def test_prefers_fight_location_over_participant_role(self) -> None:
+        """Use the map location when it disagrees with the victim's lane role."""
+        timeline = {"info": {"frames": [{
+            "timestamp": 300_000,
+            "events": [{
+                "type": "CHAMPION_KILL", "killerId": 1, "victimId": 6,
+                "position": {"x": 1_000, "y": 13_000},
+            }],
+        }]}}
+        participants = [
+            {"participantId": 1, "teamPosition": "JUNGLE"},
+            {"participantId": 6, "teamPosition": "BOTTOM"},
+        ]
+
+        involvement = jungle_lane_involvement(timeline, 1, participants, max_minutes=5)
+
+        self.assertEqual(1, involvement["Top"]["kills"])
+        self.assertEqual(0, involvement["Bottom"]["kills"])
