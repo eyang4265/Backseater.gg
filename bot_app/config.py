@@ -55,10 +55,12 @@ def _load_secrets_file() -> dict[str, object]:
         with SECRETS_PATH.open(encoding="utf-8") as secrets_file:
             data = json.load(secrets_file)
     except FileNotFoundError:
+        LOGGER.debug("No secrets file found at %s; using environment only", SECRETS_PATH)
         return {}
     except (json.JSONDecodeError, OSError) as error:
         LOGGER.warning("Ignoring unreadable %s: %s", SECRETS_PATH, error)
         return {}
+    LOGGER.debug("Loaded %d secret keys from %s", len(data) if isinstance(data, dict) else 0, SECRETS_PATH)
     return data if isinstance(data, dict) else {}
 
 
@@ -148,8 +150,9 @@ def _timezone(file_values: dict[str, object]) -> str:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Resolve settings once per process."""
+    LOGGER.debug("Resolving process settings")
     file_values = _load_secrets_file()
-    return Settings(
+    settings = Settings(
         discord_token=_require(file_values, "discord_token"),
         riot_api_key=_require(file_values, "riot_api_key"),
         tft_api_key=str(_get(file_values, "tft_api_key", "") or ""),
@@ -172,3 +175,8 @@ def get_settings() -> Settings:
         log_level=str(_get(file_values, "log_level", "INFO")),
         _source="env+file" if file_values else "env",
     )
+    LOGGER.info(
+        "Loaded settings from %s (poll_interval=%ss, log_level=%s)",
+        settings._source, settings.poll_interval_seconds, settings.log_level,
+    )
+    return settings

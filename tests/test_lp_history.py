@@ -4,13 +4,18 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from bot_app.lp_history import since_local_midnight, summarize
+from bot_app.lp_history import since_local_midnight, summarize, summary_text
 from bot_app.queues import SOLO_QUEUE_ID
 from bot_app.ranks import RankSnapshot
 from bot_app.store import PlayerState
 
 
 class LpHistoryTests(unittest.TestCase):
+    def test_summary_omits_unattributed_count(self) -> None:
+        """Keep resync bookkeeping out of the user-facing LP summary."""
+        summary = summarize([{"t": 1, "d": None}])
+        self.assertNotIn("Unattributed games/resyncs", summary_text(summary))
+
     def test_promotion_delta_and_resync(self) -> None:
         """Verify that promotion delta and resync."""
         state = PlayerState(ranks={SOLO_QUEUE_ID: RankSnapshot("GOLD", "I", 90, 10, 8)})

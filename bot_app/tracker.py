@@ -131,7 +131,12 @@ def _poll_accounts(
     if not accounts:
         return []
     with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(accounts))) as pool:
-        return list(pool.map(fetch, accounts.values()))
+        polls = list(pool.map(fetch, accounts.values()))
+    total_new = sum(len(poll.new_match_ids) for poll in polls)
+    LOGGER.debug(
+        "Polled %d accounts; %d unseen match ids found", len(accounts), total_new
+    )
+    return polls
 
 
 def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
@@ -155,7 +160,9 @@ def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
 
     with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(servers))) as pool:
         results = pool.map(fetch, servers.items())
-        return {match_id: match for match_id, match in results if match is not None}
+        fetched = {match_id: match for match_id, match in results if match is not None}
+    LOGGER.debug("Fetched %d/%d new matches", len(fetched), len(servers))
+    return fetched
 
 
 def _ranked_matches_per_player(
@@ -217,10 +224,16 @@ def collect_new_matches() -> list[MatchAnnouncement]:
 
     for match_id in match_order:
         match = matches[match_id]
-        queue_id = match.get("info", {}).get("queueId")
+        match_info = match.get("info", {})
+        queue_id = match_info.get("queueId")
         players: list[TrackedPlayer] = []
         pending_ranks: list[_PendingRank] = []
-        match_participants = match.get("info", {}).get("participants", []) or []
+        match_participants = match_info.get("participants", []) or []
+        participants_by_puuid = {
+            item.get("puuid"): item
+            for item in match_participants
+            if item.get("puuid") is not None
+        }
         guest_can_be_announced = guest_is_in_game_with_crispy(match_participants)
 
         for poll in participants[match_id]:
@@ -242,14 +255,7 @@ def collect_new_matches() -> list[MatchAnnouncement]:
             in_queue = ranked_by_player.get((account.discord_id, queue_id), [])
             is_only_game = len(in_queue) == 1
             is_last_game = bool(in_queue) and in_queue[-1] == match_id
-            participant = next(
-                (
-                    item
-                    for item in match_participants
-                    if item.get("puuid") == account.puuid
-                ),
-                None,
-            )
+            participant = participants_by_puuid.get(account.puuid)
             if participant is None:
                 continue
 
@@ -287,7 +293,8 @@ def collect_new_matches() -> list[MatchAnnouncement]:
 
         announcement = format_match(match, players)
 
-        finished = bool(match.get("info", {}).get("gameEndTimestamp"))
+        game_end_timestamp = match_info.get("gameEndTimestamp")
+        finished = bool(game_end_timestamp)
         for pending in pending_ranks:
             if not finished or (announcement is None and pending.attributable):
                 continue
@@ -297,8 +304,7 @@ def collect_new_matches() -> list[MatchAnnouncement]:
                 match_id=match_id,
                 won=pending.participant.get("win"),
                 attributable=pending.attributable,
-                timestamp=int(match.get("info", {}).get("gameEndTimestamp", 0) / 1000)
-                or None,
+                timestamp=int((game_end_timestamp or 0) / 1000) or None,
             )
             dirty = dirty or changed
         if announcement is None:
@@ -325,6 +331,8 @@ def collect_new_matches() -> list[MatchAnnouncement]:
     if dirty:
         save_tracker_state(state)
 
+    if announcements:
+        LOGGER.info("Collected %d new match announcement(s)", len(announcements))
     return announcements
 
 
@@ -354,7 +362,10 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
         for discord_id in accounts
         if discord_id in previous
     }
-    grouped: dict[str, tuple[dict[str, Any], list[TrackedPlayer]]] = {}
+    grouped: dict[
+        str, tuple[dict[str, Any], list[TrackedPlayer], str, int]
+    ] = {}
+    previous_keys = set(previous.values())
 
     def fetch(account: Account) -> tuple[Account, dict[str, Any] | None]:
         """Fetch one item for the enclosing operation."""
@@ -369,56 +380,58 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
     if not accounts:
         return []
     with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(accounts))) as pool:
-        games = pool.map(fetch, accounts.values())
-        for account, game in games:
-            if not game:
-                continue
-            if account.puuid == GUEST_PUUID and not guest_is_in_game_with_crispy(
-                game.get("participants", []) or []
-            ):
-                continue
-            game_id = game.get("gameId")
-            if game_id is None:
-                LOGGER.warning("Active game for %s had no gameId", account.riot_id)
-                continue
-            key = f"{account.server}:{game_id}"
-            current[account.discord_id] = key
+        games = list(pool.map(fetch, accounts.values()))
 
-            if key in previous.values():
-                continue
+    for account, game in games:
+        if not game:
+            continue
+        if account.puuid == GUEST_PUUID and not guest_is_in_game_with_crispy(
+            game.get("participants", []) or []
+        ):
+            continue
+        game_id = game.get("gameId")
+        if game_id is None:
+            LOGGER.warning("Active game for %s had no gameId", account.riot_id)
+            continue
+        game_id = int(game_id)
+        key = f"{account.server}:{game_id}"
+        current[account.discord_id] = key
 
-            # The spectator endpoint can briefly return a lobby after the
-            # game has ended.  If the bot was offline during that window,
-            # posting this as a live game would duplicate the match update.
-            # Let the match poll announce the completed game instead.
-            try:
-                match = get_client().match(f"{account.server}_{game_id}", account.server)
-            except RiotAPIError as error:
-                LOGGER.debug(
-                    "Could not verify whether live game %s has finished: %s", key, error
-                )
-                match = None
-            if isinstance(match, dict) and match.get("info", {}).get("gameEndTimestamp"):
-                continue
-
-            if key not in grouped:
-                grouped[key] = (game, [])
-            grouped[key][1].append(
-                TrackedPlayer(
-                    puuid=account.puuid,
-                    riot_id=account.riot_id,
-                    server=account.server,
-                )
+        if key in previous_keys:
+            continue
+        if key not in grouped:
+            grouped[key] = (game, [], account.server, game_id)
+        grouped[key][1].append(
+            TrackedPlayer(
+                puuid=account.puuid,
+                riot_id=account.riot_id,
+                server=account.server,
             )
+        )
 
     if current != previous:
         save_live_game_state(current)
 
-    return [
-        announcement
-        for game, players in grouped.values()
-        if (announcement := format_live_game(game, players)) is not None
-    ]
+    LOGGER.debug("%d new live-game lobbies to verify", len(grouped))
+    announcements: list[LiveGameAnnouncement] = []
+    for key, (game, players, server, game_id) in grouped.items():
+        # Verify each distinct lobby once even when several tracked accounts
+        # share it. Ongoing games are deliberately not stored in MatchCache.
+        try:
+            match = get_client().match(f"{server}_{game_id}", server)
+        except RiotAPIError as error:
+            LOGGER.debug(
+                "Could not verify whether live game %s has finished: %s", key, error
+            )
+            match = None
+        if isinstance(match, dict) and match.get("info", {}).get("gameEndTimestamp"):
+            continue
+        announcement = format_live_game(game, players)
+        if announcement is not None:
+            announcements.append(announcement)
+    if announcements:
+        LOGGER.info("Collected %d new live-game announcement(s)", len(announcements))
+    return announcements
 
 
 async def poll_live_games_and_announce(bot: Any) -> None:

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .store import PlayerState
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,22 +38,31 @@ def since_local_midnight(
     zone = ZoneInfo(timezone_name)
     current = now.astimezone(zone) if now else datetime.now(zone)
     cutoff = current.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    return [
+    entries = [
         entry
         for entry in state.history.get(queue_id, [])
         if entry.get("t", 0) >= cutoff
     ]
+    LOGGER.debug(
+        "LP history since local midnight (%s, queue_id=%s): %s entries", timezone_name, queue_id, len(entries)
+    )
+    return entries
 
 
 def summarize(entries: list[dict]) -> LpSummary:
     """Summarize summarize."""
-    attributed = [entry for entry in entries if entry.get("d") is not None]
-    gains = [int(entry["d"]) for entry in attributed if int(entry["d"]) > 0]
-    losses = [int(entry["d"]) for entry in attributed if int(entry["d"]) < 0]
+    attributed_deltas = [
+        (entry, int(entry["d"])) for entry in entries if entry.get("d") is not None
+    ]
+    gains = [delta for _, delta in attributed_deltas if delta > 0]
+    losses = [delta for _, delta in attributed_deltas if delta < 0]
+    LOGGER.debug(
+        "Summarizing %s LP entries (%s attributed)", len(entries), len(attributed_deltas)
+    )
     return LpSummary(
-        net=sum(int(entry["d"]) for entry in attributed),
-        wins=sum(entry.get("w") is True for entry in attributed),
-        losses=sum(entry.get("w") is False for entry in attributed),
+        net=sum(delta for _, delta in attributed_deltas),
+        wins=sum(entry.get("w") is True for entry, _ in attributed_deltas),
+        losses=sum(entry.get("w") is False for entry, _ in attributed_deltas),
         unattributed=sum(entry.get("d") is None for entry in entries),
         biggest_gain=max(gains, default=None),
         biggest_loss=min(losses, default=None),
@@ -68,6 +80,4 @@ def summary_text(summary: LpSummary) -> str:
         lines.append(f"**Biggest gain:** +{summary.biggest_gain} LP")
     if summary.biggest_loss is not None:
         lines.append(f"**Biggest loss:** {summary.biggest_loss} LP")
-    if summary.unattributed:
-        lines.append(f"**Unattributed games/resyncs:** {summary.unattributed}")
     return "\n".join(lines)

@@ -24,7 +24,7 @@ import random
 import threading
 import time
 from collections import deque
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 from urllib.parse import quote
 
 import requests
@@ -97,27 +97,43 @@ class TTLCache:
         self._max_entries = max_entries
         self._entries: dict[Any, tuple[float, Any]] = {}
         self._lock = threading.Lock()
+        self._pending: dict[Any, threading.Event] = {}
 
     def get_or_set(
         self, key: Any, produce: Callable[[], T], *, cache_none: bool = False
     ) -> T:
         """Return or set."""
-        now = time.monotonic()
-        with self._lock:
-            hit = self._entries.get(key)
-            if hit is not None and hit[0] > now:
-                return hit[1]
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                hit = self._entries.get(key)
+                if hit is not None and hit[0] > now:
+                    return hit[1]
+                pending = self._pending.get(key)
+                if pending is None:
+                    pending = threading.Event()
+                    self._pending[key] = pending
+                    producer = True
+                else:
+                    producer = False
 
-        value = produce()
+            if not producer:
+                pending.wait()
+                continue
 
-        if value is None and not cache_none:
-            return value
-
-        with self._lock:
-            if len(self._entries) >= self._max_entries:
-                self._evict_expired(now)
-            self._entries[key] = (now + self._ttl, value)
-        return value
+            try:
+                value = produce()
+                if value is not None or cache_none:
+                    with self._lock:
+                        if len(self._entries) >= self._max_entries:
+                            self._evict_expired(now)
+                        self._entries[key] = (time.monotonic() + self._ttl, value)
+                return value
+            finally:
+                with self._lock:
+                    completed = self._pending.pop(key, None)
+                    if completed is not None:
+                        completed.set()
 
     def _evict_expired(self, now: float) -> None:
         """Handle expired."""
@@ -177,6 +193,7 @@ class RiotClient:
         self._riot_id_cache = TTLCache(ttl_seconds=6 * 3600)
         self._summoner_cache = TTLCache(ttl_seconds=600)
         self._league_cache = TTLCache(ttl_seconds=60)
+        self._timeline_cache = TTLCache(ttl_seconds=6 * 3600, max_entries=256)
 
     def _get(
         self,
@@ -194,6 +211,8 @@ class RiotClient:
         url = f"https://{host}.api.riotgames.com{path}"
         last_error: str = "no attempt made"
 
+        LOGGER.debug("GET %s params=%s", path, params)
+        start = time.monotonic()
         for attempt in range(self._max_retries):
             self._limiter.acquire()
             try:
@@ -215,6 +234,9 @@ class RiotClient:
 
             if response.status_code >= 500:
                 last_error = f"HTTP {response.status_code}"
+                LOGGER.debug(
+                    "GET %s got %s (attempt %d); retrying", path, last_error, attempt + 1
+                )
                 time.sleep(self._backoff(attempt))
                 continue
 
@@ -225,11 +247,19 @@ class RiotClient:
                 )
 
             try:
-                return response.json()
+                payload = response.json()
             except ValueError as error:
                 raise RiotAPIError(
                     f"GET {path} returned malformed JSON: {error}"
                 ) from error
+            LOGGER.debug(
+                "GET %s -> %d in %.2fs (attempt %d)",
+                path,
+                response.status_code,
+                time.monotonic() - start,
+                attempt + 1,
+            )
+            return payload
 
         raise RiotAPIError(
             f"GET {path} failed after {self._max_retries} attempts: {last_error}"
@@ -294,6 +324,21 @@ class RiotClient:
             return None
         return account.get("puuid")
 
+    def home_platform(self, puuid: str, candidates: Sequence[str]) -> str | None:
+        """First candidate platform that actually hosts ``puuid``.
+
+        ``puuid`` alone can't say where an account lives: account-v1 is routed
+        regionally but answers for every region, so a riot-id lookup resolves
+        even against the wrong route. Summoner-v4 *is* per-platform, so probing
+        it is what distinguishes an NA account from an EUW or KR one.
+        """
+        for candidate in candidates:
+            if self.summoner(puuid, candidate):
+                LOGGER.debug("Home platform for %s resolved to %s", puuid, candidate)
+                return candidate
+        LOGGER.debug("Home platform for %s not found among %s", puuid, candidates)
+        return None
+
     def summoner(self, puuid: str, server: str) -> dict[str, Any] | None:
         """Summoner record (level, profile icon). Cached briefly."""
         if not puuid:
@@ -340,8 +385,20 @@ class RiotClient:
 
         return self._league_cache.get_or_set(("league", server, puuid), fetch)
 
-    def match_ids(self, puuid: str, server: str, *, count: int = 20) -> list[str]:
-        """Handle ids."""
+    def apex_league(self, tier: str, queue_type: str, server: str) -> dict[str, Any]:
+        """One apex league's entries: ``tier`` is challenger/grandmaster/master.
+
+        Used only by the offline laning-phase-counter-pick harvester
+        (:mod:`bot_app.lane_matchups.collect`) to seed its snowball crawl from
+        a known skill tier, per PLAN.md §7. Not called from any live-tracking
+        path.
+        """
+        return self._get(server, f"/lol/league/v4/{tier}leagues/by-queue/{queue_type}")
+
+    def match_ids(
+        self, puuid: str, server: str, *, start: int = 0, count: int = 20
+    ) -> list[str]:
+        """Return one paginated Match-V5 history page for an account."""
         route = match_route(server)
         if route is None:
             LOGGER.warning("Unknown platform %r; cannot list matches", server)
@@ -349,7 +406,7 @@ class RiotClient:
         return self._get(
             route,
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids",
-            params={"start": 0, "count": count},
+            params={"start": start, "count": count},
         )
 
     def match(self, match_id: str, server: str) -> dict[str, Any]:
@@ -357,21 +414,35 @@ class RiotClient:
         if self._match_cache is not None:
             cached = self._match_cache.get(match_id)
             if cached is not None:
+                LOGGER.debug("Match cache hit for %s", match_id)
                 return cached
         route = match_route(server) or match_route(DEFAULT_PLATFORM)
         if route is None:
             raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
+        LOGGER.info("Fetching match %s from Riot API", match_id)
         payload = self._get(route, f"/lol/match/v5/matches/{match_id}")
         if self._match_cache is not None:
             self._match_cache.put(match_id, server, payload)
         return payload
 
     def match_timeline(self, match_id: str, server: str) -> dict[str, Any]:
-        """Handle timeline."""
-        route = match_route(server) or match_route(DEFAULT_PLATFORM)
-        if route is None:
-            raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
-        return self._get(route, f"/lol/match/v5/matches/{match_id}/timeline")
+        """Return an immutable Match-V5 timeline, backed by SQLite caching."""
+        def fetch() -> dict[str, Any]:
+            if self._match_cache is not None:
+                cached = self._match_cache.get_timeline(match_id)
+                if cached is not None:
+                    LOGGER.debug("Timeline cache hit for %s", match_id)
+                    return cached
+            route = match_route(server) or match_route(DEFAULT_PLATFORM)
+            if route is None:
+                raise RiotAPIError(f"No match-v5 route is configured for {server!r}.")
+            LOGGER.info("Fetching timeline %s from Riot API", match_id)
+            payload = self._get(route, f"/lol/match/v5/matches/{match_id}/timeline")
+            if self._match_cache is not None:
+                self._match_cache.put_timeline(match_id, payload)
+            return payload
+
+        return self._timeline_cache.get_or_set(("timeline", match_id), fetch)
 
     def match_replays(self, puuid: str, server: str) -> Any:
         """Return replay metadata for a player from Match-V5."""
@@ -419,7 +490,7 @@ class RiotClient:
     def champion_rotation(self, server: str = DEFAULT_PLATFORM) -> list[int]:
         """Handle rotation."""
         payload = self._get(server, "/lol/platform/v3/champion-rotations")
-        return payload.get("freeChampionIds", [])
+        return payload.get("sr", payload.get("freeChampionIds", []))
 
     def platform_status(self, server: str) -> dict[str, Any]:
         """Handle status."""
@@ -436,5 +507,6 @@ def get_client() -> RiotClient:
     if _client is None:
         with _client_lock:
             if _client is None:
+                LOGGER.info("Creating process-wide Riot API client")
                 _client = RiotClient()
     return _client

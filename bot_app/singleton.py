@@ -25,6 +25,7 @@ def acquire_singleton_lock() -> None:
     _lock_file = _LOCK_PATH.open("w")
     try:
         fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        LOGGER.debug("Acquired singleton lock at %s", _LOCK_PATH)
     except OSError:
         LOGGER.error(
             "Another bot instance is already running (lock held on %s)."

@@ -10,6 +10,7 @@ from bot_app.timeline import (
     TOP_LANE_MAX_LEVEL,
     LaneDiff,
     MatchTimeline,
+    death_time_factor,
     format_diff,
     format_lane_lines,
     format_levels,
@@ -17,6 +18,14 @@ from bot_app.timeline import (
     max_level_for_position,
     participant_at_slot,
 )
+
+
+SAMPLES = pathlib.Path(__file__).resolve().parents[1] / "json" / "samples"
+
+
+def _sample_timeline():
+    """Handle sample timeline."""
+    return json.loads((SAMPLES / "sample_timeline.json").read_text(encoding="utf-8"))
 
 
 def _frame(timestamp, positions, stats=None, events=()):
@@ -517,6 +526,240 @@ class LaneLineTests(unittest.TestCase):
     def test_an_empty_series_leaves_the_wording_to_the_caller(self) -> None:
         """Verify that an empty series leaves the wording to the caller."""
         self.assertEqual(format_lane_lines([]), "")
+
+
+class BountyLedgerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Handle set up."""
+        self.timeline = MatchTimeline(_sample_timeline())
+
+    def test_death_cost_is_weighted_towards_the_end_of_the_game(self) -> None:
+        """Verify that death cost is weighted towards the end of the game."""
+        self.assertAlmostEqual(death_time_factor(0, 1_000), 0.3)
+        self.assertAlmostEqual(death_time_factor(500, 1_000), 0.65)
+        self.assertAlmostEqual(death_time_factor(1_000, 1_000), 1.0)
+        self.assertAlmostEqual(death_time_factor(5_000, 0), 1.0)
+
+    def test_assists_split_a_bounty_rather_than_each_taking_it_whole(self) -> None:
+        """Verify that assists split a bounty rather than each taking it whole.
+
+        Crediting every assister with the full bounty would let a five-man
+        collapse pay out five times what the kill was worth.
+        """
+        payload = {
+            "info": {
+                "frames": [
+                    {"timestamp": 0, "participantFrames": {}, "events": []},
+                    {
+                        "timestamp": 60_000,
+                        "participantFrames": {},
+                        "events": [
+                            {
+                                "type": "CHAMPION_KILL",
+                                "timestamp": 60_000,
+                                "killerId": 1,
+                                "victimId": 6,
+                                "assistingParticipantIds": [2, 3],
+                                "bounty": 300,
+                                "shutdownBounty": 0,
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        self.assertAlmostEqual(timeline.bounty_ledger(1).earned, 100.0)
+        self.assertAlmostEqual(timeline.bounty_ledger(2).earned, 100.0)
+        self.assertAlmostEqual(timeline.bounty_ledger(4).earned, 0.0)
+        self.assertAlmostEqual(timeline.bounty_ledger(6).given, 300.0)
+
+    def test_repeated_cheap_deaths_cost_less_than_one_late_shutdown(self) -> None:
+        """Verify that repeated cheap deaths cost less than one late shutdown.
+
+        This is the property that separates gold-denominated death cost from a
+        death count: Riot already shrinks the bounty on a player who keeps
+        dying, so the ledger reads those deaths as cheap without the model
+        needing to know why.
+        """
+        events = [
+            {
+                "type": "CHAMPION_KILL",
+                "timestamp": 60_000 * minute,
+                "killerId": 6,
+                "victimId": 1,
+                "bounty": 20,
+                "shutdownBounty": 0,
+            }
+            for minute in range(1, 9)
+        ]
+        events.append(
+            {
+                "type": "CHAMPION_KILL",
+                "timestamp": 1_700_000,
+                "killerId": 6,
+                "victimId": 2,
+                "bounty": 300,
+                "shutdownBounty": 600,
+            }
+        )
+        payload = {
+            "info": {
+                "frames": [
+                    {"timestamp": 0, "participantFrames": {}, "events": events},
+                    {"timestamp": 1_800_000, "participantFrames": {}, "events": []},
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        self.assertLess(
+            timeline.bounty_ledger(1).given, timeline.bounty_ledger(2).given
+        )
+
+    def test_objective_presence_counts_only_nearby_or_credited_players(self) -> None:
+        """Verify that objective presence counts only nearby or credited players."""
+        payload = {
+            "info": {
+                "frames": [
+                    {
+                        "timestamp": 0,
+                        "participantFrames": {
+                            "1": {"position": {"x": 5000, "y": 5000}},
+                            "2": {"position": {"x": 5300, "y": 5100}},
+                            "3": {"position": {"x": 13000, "y": 1000}},
+                        },
+                        "events": [],
+                    },
+                    {
+                        "timestamp": 60_000,
+                        "participantFrames": {
+                            "1": {"position": {"x": 5000, "y": 5000}},
+                            "2": {"position": {"x": 5300, "y": 5100}},
+                            "3": {"position": {"x": 13000, "y": 1000}},
+                        },
+                        "events": [
+                            {
+                                "type": "ELITE_MONSTER_KILL",
+                                "timestamp": 60_000,
+                                "killerId": 1,
+                                "position": {"x": 5000, "y": 5000},
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        team = frozenset({1, 2, 3})
+        self.assertEqual(timeline.objective_presence(1, team), 1)
+        self.assertEqual(timeline.objective_presence(2, team), 1)
+        self.assertEqual(timeline.objective_presence(3, team), 0)
+
+    def test_objective_presence_ignores_the_other_team(self) -> None:
+        """Verify that objective presence ignores the other team."""
+        presence = self.timeline.objective_presence(1, frozenset({6, 7, 8, 9, 10}))
+        credited = self.timeline.objective_presence(1, frozenset({1, 2, 3, 4, 5}))
+        self.assertGreaterEqual(credited, 0)
+        self.assertGreaterEqual(presence, 0)
+        self.assertNotEqual((credited, presence), (0, 0))
+
+    def test_objective_presence_ignores_building_kills(self) -> None:
+        """Verify that turret participation does not inflate epic presence."""
+        payload = {
+            "info": {
+                "frames": [
+                    {
+                        "timestamp": 60_000,
+                        "participantFrames": {"1": {"position": {"x": 5000, "y": 5000}}},
+                        "events": [
+                            {
+                                "type": "BUILDING_KILL",
+                                "timestamp": 60_000,
+                                "killerId": 1,
+                                "position": {"x": 5000, "y": 5000},
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        self.assertEqual(MatchTimeline(payload).objective_presence(1, frozenset({1})), 0)
+
+
+class EventParticipationTests(unittest.TestCase):
+    def test_epic_participation_credits_killer_and_assistants_only(self) -> None:
+        """Verify epic participation counts explicit credit, not nearby players."""
+        payload = {
+            "info": {
+                "frames": [
+                    {
+                        "timestamp": 0,
+                        "participantFrames": {},
+                        "events": [
+                            {
+                                "type": "ELITE_MONSTER_KILL",
+                                "timestamp": 0,
+                                "killerId": 1,
+                                "assistingParticipantIds": [2],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        self.assertEqual(timeline.epic_event_participation(1), 1)
+        self.assertEqual(timeline.epic_event_participation(2), 1)
+        self.assertEqual(timeline.epic_event_participation(3), 0)
+
+    def test_building_participation_credits_killer_and_assistants_only(self) -> None:
+        """Verify building participation counts explicit credit, not nearby players."""
+        payload = {
+            "info": {
+                "frames": [
+                    {
+                        "timestamp": 0,
+                        "participantFrames": {},
+                        "events": [
+                            {
+                                "type": "BUILDING_KILL",
+                                "timestamp": 0,
+                                "killerId": 1,
+                                "assistingParticipantIds": [2, 3],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        self.assertEqual(timeline.building_event_participation(1), 1)
+        self.assertEqual(timeline.building_event_participation(2), 1)
+        self.assertEqual(timeline.building_event_participation(3), 1)
+        self.assertEqual(timeline.building_event_participation(4), 0)
+
+    def test_building_participation_ignores_epic_events(self) -> None:
+        """Verify the two participation counts do not leak into each other."""
+        payload = {
+            "info": {
+                "frames": [
+                    {
+                        "timestamp": 0,
+                        "participantFrames": {},
+                        "events": [
+                            {
+                                "type": "ELITE_MONSTER_KILL",
+                                "timestamp": 0,
+                                "killerId": 1,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        timeline = MatchTimeline(payload)
+        self.assertEqual(timeline.building_event_participation(1), 0)
+        self.assertEqual(timeline.epic_event_participation(1), 1)
 
 
 if __name__ == "__main__":

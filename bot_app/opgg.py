@@ -68,6 +68,13 @@ class ChampionStats:
 
 _cache: dict[str, tuple[float, ChampionStats]] = {}
 _cache_lock = threading.Lock()
+_fetch_locks: dict[str, threading.Lock] = {}
+
+
+def _fetch_lock(key: str) -> threading.Lock:
+    """Per-URL lock that coalesces concurrent cache misses."""
+    with _cache_lock:
+        return _fetch_locks.setdefault(key, threading.Lock())
 
 
 def _row_item_details(html: str, row: str) -> tuple[
@@ -282,22 +289,35 @@ def fetch_champion_stats(
     with _cache_lock:
         cached = _cache.get(cache_key)
         if cached and now - cached[0] < _CACHE_SECONDS:
+            LOGGER.debug("OP.GG cache hit for %s", cache_key)
             return cached[1]
 
-    try:
-        response = requests.get(
-            url,
-            timeout=_TIMEOUT_SECONDS,
-            headers={"User-Agent": "VibeCode Bot/1.0"},
-        )
-        response.raise_for_status()
-        stats = parse_champion_stats(response.text, position or "all")
-    except (requests.RequestException, OPGGError, ValueError) as error:
-        LOGGER.warning("Could not fetch OP.GG champion stats from %s: %s", url, error)
-        if isinstance(error, OPGGError):
-            raise
-        raise OPGGError("OP.GG did not respond with usable champion statistics") from error
+    with _fetch_lock(cache_key):
+        now = time.monotonic()
+        with _cache_lock:
+            cached = _cache.get(cache_key)
+            if cached and now - cached[0] < _CACHE_SECONDS:
+                LOGGER.debug("OP.GG cache hit for %s (after lock)", cache_key)
+                return cached[1]
+        LOGGER.info("Fetching OP.GG champion stats from %s", url)
+        try:
+            response = requests.get(
+                url,
+                timeout=_TIMEOUT_SECONDS,
+                headers={"User-Agent": "VibeCode Bot/1.0"},
+            )
+            response.raise_for_status()
+            stats = parse_champion_stats(response.text, position or "all")
+        except (requests.RequestException, OPGGError, ValueError) as error:
+            LOGGER.warning("Could not fetch OP.GG champion stats from %s: %s", url, error)
+            if isinstance(error, OPGGError):
+                raise
+            raise OPGGError("OP.GG did not respond with usable champion statistics") from error
 
-    with _cache_lock:
-        _cache[cache_key] = (now, stats)
-    return stats
+        LOGGER.debug(
+            "Parsed OP.GG stats for %s: win_rate=%s tier=%s patch=%s",
+            url, stats.win_rate, stats.tier, stats.patch,
+        )
+        with _cache_lock:
+            _cache[cache_key] = (now, stats)
+        return stats

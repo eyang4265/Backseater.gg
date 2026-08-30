@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .ranks import RankSnapshot
 from .store import Account, PlayerState
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -22,15 +25,20 @@ def leaderboard_rows(
     rank_overrides: dict[str, dict[int, RankSnapshot]] | None = None,
 ) -> list[LeaderboardRow]:
     """Handle rows."""
+    LOGGER.debug(
+        "Building leaderboard rows: %s accounts, queue_id=%s", len(accounts), queue_id
+    )
+    overrides = rank_overrides or {}
+    empty_state = PlayerState()
     rows = [
         LeaderboardRow(
             account,
-            (rank_overrides or {}).get(discord_id, {}).get(queue_id)
-            or state.get(discord_id, PlayerState()).ranks.get(queue_id),
+            overrides.get(discord_id, {}).get(queue_id)
+            or state.get(discord_id, empty_state).ranks.get(queue_id),
         )
         for discord_id, account in accounts.items()
     ]
-    return sorted(
+    sorted_rows = sorted(
         rows,
         key=lambda row: (
             row.rank.value is not None if row.rank else False,
@@ -40,3 +48,5 @@ def leaderboard_rows(
         ),
         reverse=True,
     )
+    LOGGER.info("Built leaderboard with %s row(s) for queue_id=%s", len(sorted_rows), queue_id)
+    return sorted_rows

@@ -56,7 +56,7 @@ def build_guest_players(match: dict[str, Any]) -> list[TrackedPlayer] | None:
     selection logic rather than a copy of it.
     """
     participants = match.get("info", {}).get("participants", []) or []
-    guest = _find_guest(match)
+    guest = find_guest(participants)
     if guest is None or not guest_is_in_game_with_crispy(participants):
         return None
 
@@ -75,6 +75,7 @@ def build_guest_players(match: dict[str, Any]) -> list[TrackedPlayer] | None:
 
 def collect_new_guest_matches() -> list[MatchAnnouncement]:
     """Check the target's newest matches for the guest. Blocking; call in a thread."""
+    LOGGER.info("Checking for new guest-tracker matches")
     client = get_client()
     known = load_guest_matches()
     known_ids = set(known)
@@ -88,6 +89,9 @@ def collect_new_guest_matches() -> list[MatchAnnouncement]:
     new_match_ids = [
         match_id for match_id in reversed(match_ids) if match_id not in known_ids
     ]
+    LOGGER.debug(
+        "Guest tracker: fetched %s match ids, %s new", len(match_ids), len(new_match_ids)
+    )
     if not new_match_ids:
         return []
 
@@ -107,6 +111,7 @@ def collect_new_guest_matches() -> list[MatchAnnouncement]:
 
         players = build_guest_players(match)
         if players is None:
+            LOGGER.debug("Guest tracker: match %s skipped (guest not with target)", match_id)
             continue
 
         announcement = format_match(
@@ -122,6 +127,8 @@ def collect_new_guest_matches() -> list[MatchAnnouncement]:
     if seen:
         save_guest_matches([*known, *seen])
 
+    if announcements:
+        LOGGER.info("Guest tracker: built %s new announcement(s)", len(announcements))
     return announcements
 
 
@@ -133,6 +140,7 @@ async def guest_poll_and_announce(bot: Any) -> None:
             "Skipping guest-match collection until the fallback channel is available"
         )
         return
+    LOGGER.debug("Guest poll cycle starting")
     await publish(
         bot,
         await asyncio.to_thread(collect_new_guest_matches),

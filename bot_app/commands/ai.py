@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import requests
 
 import discord
@@ -10,6 +11,8 @@ from discord.ext import commands
 
 from ..config import get_settings
 from .shared import GUILD_IDS, log_command
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AICommands(commands.Cog):
@@ -23,12 +26,13 @@ class AICommands(commands.Cog):
         description="Ask the AI a question (owner only)",
     )
     @commands.is_owner()
-    @discord.option("prompt", description="What should I ask the AI?", max_length=4000)
+    @discord.option("prompt", str, description="What should I ask the AI?", max_length=4000)
     async def ask(self, ctx: discord.ApplicationContext, prompt: str) -> None:
         """Handle ask."""
         log_command(ctx, prompt_length=len(prompt))
         settings = get_settings()
         if not settings.openai_api_key:
+            LOGGER.info("/ask rejected: openai_api_key not configured")
             await ctx.respond(
                 "OpenAI is not configured. Add `openai_api_key` to `json/secrets.json`.",
                 ephemeral=True,
@@ -61,11 +65,13 @@ class AICommands(commands.Cog):
                 or "The AI returned an empty response."
             )
         except Exception:
+            LOGGER.warning("/ask request to %s failed", settings.openai_model, exc_info=True)
             await ctx.followup.send(
                 "I couldn't reach the AI right now. Check the bot logs.", ephemeral=True
             )
             return
 
+        LOGGER.info("/ask answered using %s (%d chars)", settings.openai_model, len(answer))
         for start in range(0, len(answer), 2000):
             await ctx.followup.send(answer[start : start + 2000])
 

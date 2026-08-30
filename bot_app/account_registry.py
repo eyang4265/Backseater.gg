@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 from .ranks import fetch_ranks
+from .routing import lookup_platforms
 from .riot import RiotAPIError, get_client
 from .store import (
     Account,
@@ -14,6 +17,8 @@ from .store import (
     update_accounts,
 )
 from .tracker import MATCH_LOOKBACK
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RegistryError(RuntimeError):
@@ -42,16 +47,36 @@ def track_account(
     allow_reassign: bool = False,
     max_accounts: int = 25,
 ) -> Account:
-    """Resolve, seed, and link an account without backfilling announcements."""
+    """Resolve, seed, and link an account without backfilling announcements.
+
+    ``server`` only picks which platform is checked first; NA, EUW, and KR are
+    always swept afterwards, and the account is stored on whichever platform
+    summoner-v4 says actually hosts it rather than on whichever regional
+    account-v1 route happened to answer first.
+    """
+    LOGGER.info("Tracking account request: discord_id=%s summoner=%s#%s", discord_id, summoner, tag)
     client = get_client()
-    puuid = client.puuid(summoner, tag, server)
+    candidates = lookup_platforms(server)
+    LOGGER.debug("Sweeping candidate platforms=%s", candidates)
+    puuid = None
+    for candidate in candidates:
+        puuid = client.puuid(summoner, tag, candidate)
+        if puuid:
+            LOGGER.debug("Resolved puuid on platform=%s", candidate)
+            break
     if not puuid:
-        raise RegistryError(f"{summoner}#{tag} could not be found on {server}.")
+        searched = ", ".join(candidates[:-1]) + f", or {candidates[-1]}"
+        LOGGER.info("Account lookup failed for %s#%s across %s", summoner, tag, searched)
+        raise RegistryError(f"{summoner}#{tag} could not be found on {searched}.")
+    server = client.home_platform(puuid, candidates) or candidates[0]
     riot_id = client.riot_id(puuid, server) or f"{summoner}#{tag}"
+    LOGGER.debug("Resolved home platform=%s riot_id=%s", server, riot_id)
     try:
         match_ids = client.match_ids(puuid, server, count=MATCH_LOOKBACK)
     except RiotAPIError as error:
+        LOGGER.info("Failed to seed recent matches for %s: %s", riot_id, error)
         raise RegistryError(f"Could not seed recent matches: {error}") from error
+    LOGGER.debug("Seeded %d recent match ids for %s", len(match_ids), riot_id)
     ranks = fetch_ranks(puuid, server)
     target_id = str(discord_id)
     account = Account(target_id, puuid, server, riot_id)
@@ -90,6 +115,7 @@ def track_account(
         accounts[target_id] = account
 
     update_accounts(mutate)
+    LOGGER.info("Tracked account %s for discord_id=%s on %s", riot_id, target_id, server)
     return account
 
 
@@ -113,4 +139,8 @@ def untrack_account(discord_id: int | str) -> Account | None:
         accounts.pop(target_id, None)
 
     update_accounts(mutate)
+    if removed is not None:
+        LOGGER.info("Untracked account %s for discord_id=%s", removed.riot_id, target_id)
+    else:
+        LOGGER.debug("Untrack requested for discord_id=%s but no account was tracked", target_id)
     return removed

@@ -70,11 +70,13 @@ class MasteryPaginator(Paginator):
         entries: list[MasteryEntry],
         author_id: int,
         profile_icon_url: str | None = None,
+        server: str = "Unknown",
     ) -> None:
         """Initialize the instance."""
         self.riot_id = riot_id
         self.entries = entries
         self.profile_icon_url = profile_icon_url
+        self.server = server
         super().__init__(
             entries,
             author_id=author_id,
@@ -82,6 +84,10 @@ class MasteryPaginator(Paginator):
             page_size=PAGE_SIZE,
             timeout=_VIEW_TIMEOUT_SECONDS,
         )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow anyone to page through mastery results, not just the invoker."""
+        return True
 
     @property
     def _totals_text(self) -> str:
@@ -134,19 +140,18 @@ class MasteryCommands(commands.Cog):
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Player's Champion Mastery")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option("champion", description="Champion", required=False)
-    @discord.option("user", description="User", required=False)
-    async def mastery(self, ctx, server, summoner, champion, user):
+    async def mastery(self, ctx, server, username, champion):
         """Every champion's mastery, or one champion's detail when named."""
         log_command(
-            ctx, server=server, summoner=summoner, champion=champion, user=user
+            ctx, server=server, username=username, champion=champion
         )
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         if champion:
@@ -171,10 +176,12 @@ class MasteryCommands(commands.Cog):
             return
 
         if not masteries:
+            LOGGER.info("/mastery: %s has no champion mastery data", target.riot_id)
             await ctx.respond(
                 embed=make_embed(f"{target.riot_id} has no champion mastery data!")
             )
             return
+        LOGGER.debug("/mastery: %d champion entries for %s", len(masteries), target.riot_id)
 
         catalog = await asyncio.to_thread(ddragon.catalog)
         entries = [
@@ -189,6 +196,7 @@ class MasteryCommands(commands.Cog):
             entries,
             ctx.author.id,
             target.icon_url,
+            target.server,
         )
         paginator.message = await ctx.respond(embed=paginator.render(), view=paginator)
 
@@ -200,6 +208,7 @@ class MasteryCommands(commands.Cog):
         catalog = await asyncio.to_thread(ddragon.catalog)
         found = catalog.by_query(champion_query) if catalog else None
         if found is None:
+            LOGGER.info("/mastery could not resolve champion query %r", champion_query)
             await ctx.respond(
                 embed=make_embed(
                     f"{champion_query} is not a champion or is misspelled!"
@@ -226,6 +235,7 @@ class MasteryCommands(commands.Cog):
             return
 
         if entry is None:
+            LOGGER.info("/mastery: %s has never played %s", target.riot_id, found.name)
             await ctx.respond(
                 embed=make_embed(f"{target.riot_id} has never played {found.name}!")
             )

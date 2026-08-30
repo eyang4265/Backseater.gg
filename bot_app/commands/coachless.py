@@ -70,14 +70,14 @@ def _brave_pick(entries: tuple[CoachlessEntry, ...], *, exclude: frozenset[str] 
     return picks[0] if picks else None
 
 
-def _stage_embed(champion_name: str, role: str, stage: str, entries: tuple[CoachlessEntry, ...]) -> discord.Embed:
+def _stage_embed(champion_name: str, champion_slug: str, role: str, stage: str, entries: tuple[CoachlessEntry, ...]) -> discord.Embed:
     """Render one Coachless stage as three aligned columns: name, WPA, and picks/buys."""
     label = _STAGE_LABELS[stage]
     rows = entries[:10]
     if not rows:
         embed = make_embed("Coachless has no results for this champion and role.", title=f"{champion_name} — Coachless ({role.title()})")
         embed.set_author(name=f"{label} · Coachless.gg")
-        embed.url = f"https://coachless.gg/builds/{champion_name.lower()}?role={role}"
+        embed.url = f"https://coachless.gg/builds/{champion_slug.lower()}?role={role}"
         return embed
     name_noun, count_noun = _COLUMN_NOUNS.get(stage, ("Item", "Buys"))
     # Coachless's own site hides picks below ~1% of a category's total sample;
@@ -87,7 +87,7 @@ def _stage_embed(champion_name: str, role: str, stage: str, entries: tuple[Coach
 
     embed = make_embed("", title=f"{champion_name} — Coachless ({role.title()})")
     embed.set_author(name=f"{label} · Coachless.gg")
-    embed.url = f"https://coachless.gg/builds/{champion_name.lower()}?role={role}"
+    embed.url = f"https://coachless.gg/builds/{champion_slug.lower()}?role={role}"
     embed.add_field(
         name=name_noun,
         value="\n".join(f"{_emoji_for(stage, entry) or '▫️'} {bold(entry.name, entry)}" for entry in rows),
@@ -98,7 +98,7 @@ def _stage_embed(champion_name: str, role: str, stage: str, entries: tuple[Coach
     return embed
 
 
-def _bravery_embed(champion_name: str, role: str, picks: dict[str, tuple[CoachlessEntry, ...]]) -> discord.Embed:
+def _bravery_embed(champion_name: str, champion_slug: str, role: str, picks: dict[str, tuple[CoachlessEntry, ...]]) -> discord.Embed:
     """Render high-WPA options per category as three aligned columns: category, WPA, and picks."""
     rows: list[tuple[str, CoachlessEntry | None]] = []
     for stage in _STAGES:
@@ -110,7 +110,7 @@ def _bravery_embed(champion_name: str, role: str, picks: dict[str, tuple[Coachle
 
     embed = make_embed("", title=f"{champion_name} — Bravery Build ({role.title()})")
     embed.set_author(name="High-WPA, low-pick-rate picks · Coachless.gg")
-    embed.url = f"https://coachless.gg/builds/{champion_name.lower()}?role={role}"
+    embed.url = f"https://coachless.gg/builds/{champion_slug.lower()}?role={role}"
     embed.add_field(
         name="Category",
         value="\n".join(
@@ -141,6 +141,7 @@ class CoachlessView(discord.ui.View):
             async def switch(interaction: discord.Interaction, chosen: str = stage) -> None:
                 """Load and display the chosen Coachless build stage."""
                 await interaction.response.defer()
+                LOGGER.debug("/coachless view switching to stage %s for %s", chosen, self.champion_name)
                 try:
                     if chosen == "bravery":
                         picks: dict[str, tuple[CoachlessEntry, ...]] = {}
@@ -164,7 +165,7 @@ class CoachlessView(discord.ui.View):
                             picks[other_stage] = chosen_entries
                             if is_item_stage:
                                 used_item_ids.update(entry.identifier for entry in chosen_entries)
-                        embed = _bravery_embed(self.champion_name, self.role, picks)
+                        embed = _bravery_embed(self.champion_name, self.champion_slug, self.role, picks)
                     else:
                         entries = await asyncio.to_thread(
                             fetch_build_stage,
@@ -173,7 +174,7 @@ class CoachlessView(discord.ui.View):
                             chosen,
                             champion_slug=self.champion_slug,
                         )
-                        embed = _stage_embed(self.champion_name, self.role, chosen, entries)
+                        embed = _stage_embed(self.champion_name, self.champion_slug, self.role, chosen, entries)
                 except CoachlessError as error:
                     await interaction.edit_original_response(embed=make_embed(f"Could not fetch Coachless data: {error}"), view=self)
                     return
@@ -218,8 +219,10 @@ class CoachlessCommands(commands.Cog):
         catalog = await asyncio.to_thread(ddragon.catalog)
         found = catalog.by_query(champion) if catalog else None
         if found is None:
+            LOGGER.info("/coachless could not resolve champion query %r", champion)
             await ctx.respond(embed=make_embed(f"Unknown champion: **{champion}**."))
             return
+        LOGGER.debug("/coachless resolved %r to %s (key=%s)", champion, found.name, found.key)
         try:
             entries = await asyncio.to_thread(
                 fetch_build_stage,
@@ -232,8 +235,9 @@ class CoachlessCommands(commands.Cog):
             LOGGER.warning("/coachless failed: champion=%s role=%s error=%s", found.name, role, error)
             await ctx.respond(embed=make_embed(f"Could not fetch Coachless data: {error}"))
             return
+        LOGGER.info("/coachless showing %s (%s) requested by %s", found.name, role, ctx.author)
         message = await ctx.respond(
-            embed=_stage_embed(found.name, role, "runes", entries),
+            embed=_stage_embed(found.name, found.internal_id, role, "runes", entries),
             view=CoachlessView(found.name, found.key, found.internal_id, role),
         )
         await remember_view_state(

@@ -164,6 +164,30 @@ class MatchPollTests(unittest.TestCase):
 
 
 class LivePollTests(unittest.TestCase):
+    def test_shared_new_lobby_is_verified_only_once(self) -> None:
+        """Several tracked players in one lobby share one completion check."""
+        accounts = {
+            "1": Account("1", "p1", "NA1", "One#NA1"),
+            "2": Account("2", "p2", "NA1", "Two#NA1"),
+        }
+        game = {
+            "gameId": 123,
+            "participants": [{"puuid": "p1"}, {"puuid": "p2"}],
+        }
+        client = Mock()
+        client.active_game.return_value = game
+        client.match.return_value = None
+        announcement = Mock()
+        with (
+            patch("bot_app.tracker.load_accounts", return_value=accounts),
+            patch("bot_app.tracker.load_live_game_state", return_value={}),
+            patch("bot_app.tracker.get_client", return_value=client),
+            patch("bot_app.tracker.save_live_game_state"),
+            patch("bot_app.tracker.format_live_game", return_value=announcement),
+        ):
+            self.assertEqual(collect_new_live_games(), [announcement])
+        client.match.assert_called_once_with("NA1_123", "NA1")
+
     def test_finished_game_seen_on_startup_is_not_announced_as_live(self) -> None:
         """Verify that a completed game discovered after downtime skips live post."""
         account = Account("1", "p1", "NA1", "Player#NA1")

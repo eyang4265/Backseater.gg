@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 CRISPY_PUUID = (
     "Ov_bKZJlUPt2r10tgceplYDLGkkJHrFSwny2bvxWAKObeWfXldPiUB4-32V1obEnf6OBPLVrAUXK0g"
@@ -44,4 +47,11 @@ def guest_is_in_game_with_crispy(participants: Iterable[dict[str, Any]]) -> bool
         ),
         None,
     )
-    return guest is not None and crispy is not None
+    together = guest is not None and crispy is not None
+    LOGGER.debug(
+        "Guest/Crispy lobby check: guest_found=%s crispy_found=%s -> %s",
+        guest is not None,
+        crispy is not None,
+        together,
+    )
+    return together

@@ -1,14 +1,36 @@
 """Poller state: match-id retention and the legacy on-disk formats."""
 
 import unittest
+from unittest.mock import Mock, patch
 
 from bot_app.ranks import RankSnapshot
 from bot_app.store import (
     PlayerState,
     dedupe_tail,
+    load_embed_button_states,
     load_live_game_state,
     save_live_game_state,
 )
+
+
+class ComponentStateMigrationTests(unittest.TestCase):
+    def test_legacy_json_is_imported_when_sqlite_is_empty(self) -> None:
+        """Existing persistent views migrate without being discarded."""
+        state = {
+            "message_id": 1,
+            "channel_id": 2,
+            "kind": "match",
+            "payload": {"match": {}},
+        }
+        cache = Mock()
+        cache.load_embed_button_states.side_effect = [[], [state]]
+        cache.import_embed_button_states.return_value = 1
+        with (
+            patch("bot_app.match_cache.get_match_cache", return_value=cache),
+            patch("bot_app.store.read_json", return_value=[state]),
+        ):
+            self.assertEqual(load_embed_button_states(), [state])
+        cache.import_embed_button_states.assert_called_once_with([state])
 
 
 class DedupeTailTests(unittest.TestCase):

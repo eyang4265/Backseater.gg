@@ -73,5 +73,5 @@ class MentionReplyTests(unittest.TestCase):
         """Verify that mention replies include latency and command guidance."""
         self.assertEqual(
             mention_reply_content(0.123),
-            "🏓 Pong! **123 ms**\nDo `/commands` for the list of commands.",
+            "🏓 Pong! **123 ms**\nDo `/help` for the list of commands.",
         )

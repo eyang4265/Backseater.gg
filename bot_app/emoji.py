@@ -8,15 +8,52 @@ rebuilt only when the client's emoji cache changes size.
 
 from __future__ import annotations
 
+import logging
 import threading
 import re
 from typing import Any
 
 from .ddragon import Champion
 
+LOGGER = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 _index: dict[str, Any] = {}
 _indexed_count = -1
+
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_NON_ALNUM_RUN_RE = re.compile(r"[^a-z0-9]+")
+
+_RUNE_ALIASES = {
+    "adaptive force": "AdaptiveForce",
+    "adaptive force scaling": "AdaptiveForceScaling",
+    "attack speed": "AttackSpeed",
+    "armor": "Armor",
+    "ability haste": "CDRScaling",
+    "cooldown reduction": "CDRScaling",
+    "health": "HealthPlus",
+    "health scaling": "HealthScaling",
+    "magic resist": "MagicRes",
+    "move speed": "MovementSpeed",
+    "movement speed": "MovementSpeed",
+    "tenacity": "Tenacity",
+    "nimbus cloak": "NimbusCloak",
+}
+
+_SUMMONER_SPELL_NAMES = {
+    "1": "SummonerBoost",  # Cleanse
+    "3": "SummonerExhaust",
+    "4": "SummonerFlash",
+    "6": "SummonerHaste",  # Ghost
+    "7": "SummonerHeal",
+    "11": "SummonerSmite",
+    "12": "SummonerTeleport",
+    "13": "SummonerMana",  # Clarity
+    "14": "SummonerDot",  # Ignite
+    "21": "SummonerBarrier",
+    "32": "SummonerSnowball",
+    "39": "SummonerSnowURFSnowball_Mark",
+}
 
 
 def _emoji_index() -> dict[str, Any]:
@@ -31,6 +68,9 @@ def _emoji_index() -> dict[str, Any]:
     global _index, _indexed_count
     with _lock:
         if len(emojis) != _indexed_count:
+            LOGGER.debug(
+                "Rebuilding emoji index: %s -> %s emojis", _indexed_count, len(emojis)
+            )
             _index = {emoji.name.lower(): emoji for emoji in emojis}
             _indexed_count = len(emojis)
         return _index
@@ -60,6 +100,7 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
         found = index.get(candidate.lower())
         if found is not None:
             return found
+    LOGGER.debug("No champion emoji found for candidates=%s", candidates)
     return None
 
 
@@ -70,8 +111,9 @@ def named_emoji(name: str | None, *, prefixes: tuple[str, ...] = ()) -> Any | No
     index = _emoji_index()
     if not index:
         return None
-    compact = re.sub(r"[^a-z0-9]", "", name.lower())
-    underscored = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    lowered = name.lower()
+    compact = _NON_ALNUM_RE.sub("", lowered)
+    underscored = _NON_ALNUM_RUN_RE.sub("_", lowered).strip("_")
     candidates = [name.lower(), compact, underscored]
     candidates.extend(
         f"{prefix}{candidate}"
@@ -101,7 +143,7 @@ def item_emoji(name: str | None, *, item_id: str | int | None = None) -> Any | N
                 return found
     # OP.GG's core-build payload can omit the ID for Muramana while still
     # returning its display name. Prefer the standard item asset explicitly.
-    if name and re.sub(r"[^a-z0-9]", "", name.lower()) == "muramana":
+    if name and _NON_ALNUM_RE.sub("", name.lower()) == "muramana":
         for candidate_id in ("3004", "323004"):
             found = named_emoji(candidate_id)
             if found is not None:
@@ -115,29 +157,14 @@ def rune_emoji(name: str | None) -> Any | None:
     if found is not None:
         return found
     # OP.GG has used both its display labels and the in-game stat names here.
-    aliases = {
-        "adaptive force": "AdaptiveForce",
-        "adaptive force scaling": "AdaptiveForceScaling",
-        "attack speed": "AttackSpeed",
-        "armor": "Armor",
-        "ability haste": "CDRScaling",
-        "cooldown reduction": "CDRScaling",
-        "health": "HealthPlus",
-        "health scaling": "HealthScaling",
-        "magic resist": "MagicRes",
-        "move speed": "MovementSpeed",
-        "movement speed": "MovementSpeed",
-        "tenacity": "Tenacity",
-        "nimbus cloak": "NimbusCloak",
-    }
-    alias = aliases.get(name.casefold()) if name else None
+    alias = _RUNE_ALIASES.get(name.casefold()) if name else None
     if alias:
         found = named_emoji(alias)
         if found is not None:
             return found
     # OP.GG reports shard names as human-readable stats while the supplied
     # shard assets use Riot's StatMods*Icon names.
-    compact = re.sub(r"[^a-z0-9]", "", name.lower()) if name else ""
+    compact = _NON_ALNUM_RE.sub("", name.lower()) if name else ""
     for candidate in (
         f"StatMods{compact}Icon",
         f"StatMods{compact}ScalingIcon",
@@ -154,24 +181,12 @@ def rune_emoji(name: str | None) -> Any | None:
 
 def summoner_spell_emoji(spell_id: str | int | None) -> Any | None:
     """Find a summoner-spell emoji using the supplied Riot asset filenames."""
-    names = {
-        "1": "SummonerBoost",  # Cleanse
-        "3": "SummonerExhaust",
-        "4": "SummonerFlash",
-        "6": "SummonerHaste",  # Ghost
-        "7": "SummonerHeal",
-        "11": "SummonerSmite",
-        "12": "SummonerTeleport",
-        "13": "SummonerMana",  # Clarity
-        "14": "SummonerDot",  # Ignite
-        "21": "SummonerBarrier",
-        "32": "SummonerSnowball",
-        "39": "SummonerSnowURFSnowball_Mark",
-    }
     if spell_id is None:
         return None
     name = str(spell_id)
-    return named_emoji(name if name.startswith("Summoner") else names.get(name))
+    return named_emoji(
+        name if name.startswith("Summoner") else _SUMMONER_SPELL_NAMES.get(name)
+    )
 
 
 def rank_emoji(tier: str | None) -> Any | None:

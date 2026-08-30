@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from . import admin, ai, champ, coachless, duo, guilds, info, mastery, player, rankings, registry
-from .match import setup_recap, setup_timeline
+from . import add, admin, ai, champ, champstats, coachless, counterstats, duo, guilds, info, mastery, msg, player, rankings, registry
+from .match import setup_jungleproximity, setup_laning, setup_match, setup_timeline
 
 if TYPE_CHECKING:
     import discord
@@ -21,17 +21,23 @@ LOGGER = logging.getLogger(__name__)
 _SETUPS = (
     player.setup,
     registry.setup,
+    add.setup,
     rankings.setup,
     guilds.setup,
     champ.setup,
+    champstats.setup,
+    counterstats.setup,
     coachless.setup,
     duo.setup,
     mastery.setup,
     setup_timeline,
-    setup_recap,
+    setup_jungleproximity,
+    setup_laning,
+    setup_match,
     info.setup,
     admin.setup,
     ai.setup,
+    msg.setup,
 )
 
 

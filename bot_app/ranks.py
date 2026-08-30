@@ -170,9 +170,11 @@ def fetch_ranks(puuid: str, server: str) -> dict[int, RankSnapshot] | None:
     """
     entries = get_client().league_entries(puuid, server)
     if entries is None:
+        LOGGER.debug("No league entries returned for puuid=%s server=%s", puuid, server)
         return None
 
     by_type = {entry.get("queueType"): entry for entry in entries}
+    LOGGER.debug("Fetched %d rank entries for puuid=%s server=%s", len(entries), puuid, server)
     return {
         queue_id: (
             RankSnapshot.from_entry(by_type[queue_type])

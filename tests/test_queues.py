@@ -24,6 +24,13 @@ class CurrentQueueNamesTests(unittest.TestCase):
         self.assertNotIn("Nexus Blitz", current_queue_names())
         self.assertIn("Ranked Solo/Duo", current_queue_names())
 
+    def test_game_mode_choices_are_limited_to_supported_modes(self) -> None:
+        """Verify only the requested modes are offered by the shared filter."""
+        self.assertEqual(
+            current_queue_names(),
+            ("ARAM", "Arena", "Normal (Draft)", "Ranked Flex", "Ranked Solo/Duo"),
+        )
+
     def test_shared_name_survives_if_either_id_is_current(self) -> None:
         """Verify a name mapped from multiple ids appears if any one of them is current."""
         # "Arena" is shared by 1700 and 1710; only 1700 needs to stay current.

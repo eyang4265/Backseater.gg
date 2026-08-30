@@ -17,6 +17,7 @@ from typing import Any, Sequence
 import discord
 
 from . import ddragon
+from .ranks import TIER_LABELS, value_to_rank
 from .timeline import KillEvent, MatchTimeline
 
 LOGGER = logging.getLogger(__name__)
@@ -27,12 +28,14 @@ try:
     matplotlib.use("Agg")
     import matplotlib.patheffects as path_effects
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
     from matplotlib.colors import PowerNorm
     from matplotlib.lines import Line2D
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+    LOGGER.warning("matplotlib is unavailable; chart rendering is disabled")
 
 
 _BACKGROUND = "#2b2d31"
@@ -68,9 +71,11 @@ _FOUNTAINS: dict[int, tuple[tuple[int, int], ...]] = {
 }
 _FOUNTAIN_RADIUS = 2_200
 _LANE_SIGMA = 2_000.0
+_BOUNDARY_BLEND_RADIUS = 1_500.0
 _HEATMAP_LANE_COLORS = {"Top": "#5383E8", "Mid": "#F5C542", "Bottom": "#E84057"}
+_TOP_MID_BOUNDARY_COLOR = "#36D17C"
+_MID_BOTTOM_BOUNDARY_COLOR = "#FF9F1C"
 _HEATMAP_KILL_WEIGHT = 5
-_HEATMAP_POINT_LIMIT = 5
 
 
 def _build_damage_chart(
@@ -401,6 +406,7 @@ def build_damage_chart(
     filename: str = DAMAGE_CHART_FILENAME,
 ) -> discord.File | None:
     """Thread-safe wrapper around matplotlib's process-global pyplot state."""
+    LOGGER.debug("Building damage chart: metric_field=%s title=%s", metric_field, chart_title)
     with _chart_lock:
         return _build_damage_chart(
             match,
@@ -477,6 +483,7 @@ def build_team_gold_difference_chart(
     timeline: dict[str, Any], *, filename: str = "team-gold-difference.png"
 ) -> discord.File | None:
     """Thread-safe wrapper for the timeline gold-difference chart."""
+    LOGGER.debug("Building team gold-difference chart")
     with _chart_lock:
         return _build_team_gold_difference_chart(timeline, filename=filename)
 
@@ -489,6 +496,53 @@ def _in_base(x: float, y: float, map_id: int = _DEFAULT_MAP_ID) -> bool:
     )
 
 
+# The initial Scuttler shrines are the fixed river anchors for these routes.
+# Do not use a later Crab kill position: Scuttler patrols before it is killed.
+_BOT_SCUTTLE_SPAWN = (10_000, 5_000)
+_TOP_SCUTTLE_SPAWN = (5_000, 10_000)
+
+_BOT_SIDE_BOUNDARY = (
+    (0, 0),          # blue nexus
+    (7050, 4000),    # blue-side red buff
+    _BOT_SCUTTLE_SPAWN,
+    (10600, 6400),   # red-side blue buff
+    (14500, 14500),  # red nexus
+)
+_TOP_SIDE_BOUNDARY = (
+    (0, 0),          # blue nexus
+    (3870, 7900),    # blue-side blue buff
+    _TOP_SCUTTLE_SPAWN,
+    (7450, 10500),   # red-side red buff
+    (14500, 14500),  # red nexus
+)
+_MID_CORRIDOR = _BOT_SIDE_BOUNDARY + _TOP_SIDE_BOUNDARY[-2:0:-1]
+
+
+def _in_mid_corridor(x: float, y: float) -> bool:
+    """Return whether a point lies between the two requested jungle routes.
+
+    The bottom boundary runs blue Nexus → blue-side red buff → bot Scuttle →
+    red-side blue buff → red Nexus.  The top boundary runs blue Nexus →
+    blue-side blue buff → top Scuttle → red-side red buff → red Nexus.
+    The top route is reversed only while joining the two routes into a polygon.
+    """
+    inside = False
+    points = _MID_CORRIDOR
+    previous_x, previous_y = points[-1]
+    for current_x, current_y in points:
+        crosses = (current_y > y) != (previous_y > y)
+        if crosses:
+            intersection_x = (
+                (previous_x - current_x) * (y - current_y)
+                / (previous_y - current_y)
+                + current_x
+            )
+            if x < intersection_x:
+                inside = not inside
+        previous_x, previous_y = current_x, current_y
+    return inside
+
+
 def _lane_distances(x: float, y: float) -> dict[str, float]:
     """Return squared distances from a position to each lane segment."""
     def distance(ax: int, ay: int, bx: int, by: int) -> float:
@@ -497,32 +551,95 @@ def _lane_distances(x: float, y: float) -> dict[str, float]:
         t = max(0, min(1, ((x - ax) * dx + (y - ay) * dy) / scale))
         return (x - (ax + t * dx)) ** 2 + (y - (ay + t * dy)) ** 2
 
-    return {
+    distances = {
         "Top": distance(0, 14500, 7000, 7000),
         "Mid": distance(0, 0, 14500, 14500),
         "Bottom": distance(7000, 7000, 14500, 0),
     }
+    if _in_mid_corridor(x, y):
+        # The area bounded by the two requested nexus→buff→scuttle→buff→nexus
+        # routes is Mid, even when it is closer to a side lane's centerline.
+        distances["Mid"] = 0.0
+    return distances
+
+
+def _boundary_y_at_x(route: tuple[tuple[int, int], ...], x: float) -> float:
+    """Interpolate a left-to-right boundary route at a map X coordinate."""
+    for (left_x, left_y), (right_x, right_y) in zip(route, route[1:]):
+        if left_x <= x <= right_x:
+            fraction = (x - left_x) / max(right_x - left_x, 1)
+            return left_y + fraction * (right_y - left_y)
+    return route[0][1] if x < route[0][0] else route[-1][1]
+
+
+def _lane_region(x: float, y: float) -> str:
+    """Classify a position as Top, Mid, or Bottom from the route boundaries."""
+    if _in_mid_corridor(x, y):
+        return "Mid"
+    top_boundary_y = _boundary_y_at_x(_TOP_SIDE_BOUNDARY, x)
+    bottom_boundary_y = _boundary_y_at_x(_BOT_SIDE_BOUNDARY, x)
+    if y >= top_boundary_y:
+        return "Top"
+    if y <= bottom_boundary_y:
+        return "Bottom"
+    # This covers a point on a boundary and any numerical edge case in the
+    # polygon test. The region between the two routes is always Mid.
+    return "Mid"
+
+
+def _distance_to_route(x: float, y: float, route: tuple[tuple[int, int], ...]) -> float:
+    """Return the shortest distance from a position to a boundary route."""
+    nearest = math.inf
+    for (start_x, start_y), (end_x, end_y) in zip(route, route[1:]):
+        delta_x, delta_y = end_x - start_x, end_y - start_y
+        length_squared = max(delta_x * delta_x + delta_y * delta_y, 1)
+        progress = max(
+            0.0,
+            min(1.0, ((x - start_x) * delta_x + (y - start_y) * delta_y) / length_squared),
+        )
+        nearest = min(
+            nearest,
+            math.hypot(x - (start_x + progress * delta_x), y - (start_y + progress * delta_y)),
+        )
+    return nearest
 
 
 def _lane_weights(x: float, y: float) -> dict[str, float]:
-    """Return distance-weighted lane membership normalized to sum to one."""
-    raw = {
-        lane: math.exp(-distance / (2 * _LANE_SIGMA ** 2))
-        for lane, distance in _lane_distances(x, y).items()
-    }
-    total = sum(raw.values())
-    return {
-        lane: weight / total if total else 0.0
-        for lane, weight in raw.items()
-    }
+    """Return lane membership, blending the two lanes around route boundaries."""
+    lane = _lane_region(x, y)
+    weights = {candidate: float(candidate == lane) for candidate in ("Top", "Mid", "Bottom")}
+    top_distance = _distance_to_route(x, y, _TOP_SIDE_BOUNDARY)
+    bottom_distance = _distance_to_route(x, y, _BOT_SIDE_BOUNDARY)
+    if top_distance <= _BOUNDARY_BLEND_RADIUS and top_distance <= bottom_distance:
+        blend = top_distance / _BOUNDARY_BLEND_RADIUS
+        if lane == "Top":
+            weights["Top"], weights["Mid"] = 0.5 + blend / 2, 0.5 - blend / 2
+        else:
+            weights["Top"], weights["Mid"] = 0.5 - blend / 2, 0.5 + blend / 2
+    elif bottom_distance <= _BOUNDARY_BLEND_RADIUS:
+        blend = bottom_distance / _BOUNDARY_BLEND_RADIUS
+        if lane == "Bottom":
+            weights["Bottom"], weights["Mid"] = 0.5 + blend / 2, 0.5 - blend / 2
+        else:
+            weights["Bottom"], weights["Mid"] = 0.5 - blend / 2, 0.5 + blend / 2
+    return weights
+
+
+def _heatmap_event_color(x: float, y: float, lane: str) -> str:
+    """Return a shared-region color for events within a boundary blend band."""
+    weights = _lane_weights(x, y)
+    if weights["Top"] and weights["Mid"]:
+        return _TOP_MID_BOUNDARY_COLOR
+    if weights["Mid"] and weights["Bottom"]:
+        return _MID_BOTTOM_BOUNDARY_COLOR
+    return _HEATMAP_LANE_COLORS.get(lane, _MUTED)
 
 
 def _lane_from_position(position: dict[str, Any] | None) -> str:
-    """Return the nearest lane for a Summoner's Rift map position."""
+    """Return the boundary-defined lane for a Summoner's Rift map position."""
     if not position or position.get("x") is None or position.get("y") is None:
         return "Mid"
-    distances = _lane_distances(position["x"], position["y"])
-    return min(distances, key=distances.get)
+    return _lane_region(position["x"], position["y"])
 
 
 def _lane_for_jungle_involvement(
@@ -764,13 +881,14 @@ def jungle_kill_positions(
 
 def jungle_position_samples(
     timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
-    *, limit: int | None = _HEATMAP_POINT_LIMIT, include_initial: bool = False,
+    *, limit: int | None = None, include_initial: bool = False,
 ) -> list[tuple[int, float, float, str]]:
     """Return numbered, non-base position samples after the ignored first sample.
 
     The initial valid position is commonly the spawn location, so it is omitted
     by default. Fountain/shop samples are then removed without consuming the
-    marker limit; ``include_initial`` can retain an initial on-map sample.
+    marker limit; ``include_initial`` can retain an initial on-map sample. Every
+    remaining sample is numbered and rendered by default (``limit=None``).
     """
     samples = _jungle_position_records(
         timeline, jungler_id, max_minutes, include_initial=include_initial
@@ -784,7 +902,7 @@ def jungle_position_samples(
 
 def jungle_position_sample_timestamps(
     timeline: dict[str, Any], jungler_id: int, max_minutes: int = 20,
-    *, limit: int | None = _HEATMAP_POINT_LIMIT,
+    *, limit: int | None = None,
 ) -> list[tuple[int, int]]:
     """Return retained non-base hexagon numbers and timeline timestamps."""
     timestamps = [
@@ -966,7 +1084,7 @@ def jungle_path_points(
     movement.sort(key=lambda point: point[0])
     timed_points.extend(
         (timestamp, 0, x, y)
-        for timestamp, x, y in movement[1:1 + _HEATMAP_POINT_LIMIT]
+        for timestamp, x, y in movement[1:]
         if not _in_base(x, y, map_id)
     )
     timed_points.sort(key=lambda point: (point[0], point[1]))
@@ -975,15 +1093,17 @@ def jungle_path_points(
 
 def build_jungle_heatmap(
     match: dict[str, Any], timeline: dict[str, Any], jungler_id: int,
-    *, filename: str = "jungle-heatmap.png", max_minutes: int = 20
+    *, filename: str = "jungle-heatmap.png", max_minutes: int = 20,
+    show_boundaries: bool = False,
 ) -> discord.File | None:
-    """Render a 15-minute jungler density heatmap with a legend and decluttered markers.
+    """Render a jungler density heatmap showing every recorded position and takedown.
 
     Overlapping position/takedown markers are spread apart in a spiral, and their
     labels are staggered outward, so tightly clustered events stay legible.
     """
     if not MATPLOTLIB_AVAILABLE:
         return None
+    LOGGER.debug("Building jungle heatmap: jungler_id=%s max_minutes=%s", jungler_id, max_minutes)
     points = jungle_position_samples(timeline, jungler_id, max_minutes)
     participants = match.get("info", {}).get("participants", []) or []
     point_timestamps = dict(
@@ -1022,6 +1142,45 @@ def build_jungle_heatmap(
                     path_xs, path_ys, color="#f5c542", alpha=0.28,
                     linewidth=1, zorder=4,
                 )
+            if show_boundaries:
+                grid_step = 2500
+                axes.set_xticks(range(bounds[0], bounds[2] + 1, grid_step))
+                axes.set_yticks(range(bounds[1], bounds[3] + 1, grid_step))
+                axes.grid(
+                    True, color="#ffffff", alpha=0.22, linewidth=0.7,
+                    linestyle=":", zorder=3,
+                )
+                axes.set_xlabel("World X", color="white", labelpad=8)
+                axes.set_ylabel("World Y", color="white", labelpad=8)
+                axes.tick_params(colors="white", labelsize=7)
+                for route, band_color, line_color, label in (
+                    (_TOP_SIDE_BOUNDARY, _TOP_MID_BOUNDARY_COLOR, "#00e5ff", "Top-side boundary"),
+                    (_BOT_SIDE_BOUNDARY, _MID_BOTTOM_BOUNDARY_COLOR, "#ff334f", "Bot-side boundary"),
+                ):
+                    route_xs = [point[0] for point in route]
+                    route_ys = [point[1] for point in route]
+                    axes.plot(
+                        route_xs, route_ys, color=band_color, linewidth=52,
+                        alpha=0.22, solid_capstyle="round", zorder=4.5,
+                    )
+                    axes.plot(
+                        route_xs, route_ys, color=line_color, linestyle="--", linewidth=1.8,
+                        alpha=0.95, label=label, zorder=5,
+                    )
+                for x, y, label, color in (
+                    (*_TOP_SCUTTLE_SPAWN, "Top Scuttler spawn", "#00e5ff"),
+                    (*_BOT_SCUTTLE_SPAWN, "Bot Scuttler spawn", "#ff334f"),
+                ):
+                    axes.scatter(
+                        [x], [y], s=72, marker="o", facecolor=color,
+                        edgecolor="white", linewidth=1.2, zorder=7,
+                        label=label,
+                    )
+                    axes.annotate(
+                        label, (x, y), xytext=(6, 6),
+                        textcoords="offset points", color="white",
+                        fontsize=8, fontweight="bold", zorder=8,
+                    )
 
             span_x = bounds[2] - bounds[0]
             span_y = bounds[3] - bounds[1]
@@ -1078,7 +1237,7 @@ def build_jungle_heatmap(
                 jx, jy = marker_jitter(x, y)
                 axes.scatter(
                     [jx], [jy], marker=marker, s=size,
-                    color=_HEATMAP_LANE_COLORS.get(lane, _MUTED),
+                    color=_heatmap_event_color(x, y, lane),
                     edgecolors="#ffffff", linewidths=1.2, alpha=0.95, zorder=6,
                 )
                 axes.annotate(
@@ -1102,6 +1261,8 @@ def build_jungle_heatmap(
                 Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Top"], markeredgecolor="#ffffff", markersize=10, label="Near Top"),
                 Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Mid"], markeredgecolor="#ffffff", markersize=10, label="Near Mid"),
                 Line2D([0], [0], marker="h", linestyle="", markerfacecolor=_HEATMAP_LANE_COLORS["Bottom"], markeredgecolor="#ffffff", markersize=10, label="Near Bot"),
+                Line2D([0], [0], marker="o", linestyle="", markerfacecolor=_TOP_MID_BOUNDARY_COLOR, markeredgecolor="#ffffff", markersize=8, label="Top + Mid"),
+                Line2D([0], [0], marker="o", linestyle="", markerfacecolor=_MID_BOTTOM_BOUNDARY_COLOR, markeredgecolor="#ffffff", markersize=8, label="Mid + Bot"),
                 Line2D([0], [0], color="#f5c542", alpha=0.6, linewidth=2, label="Movement path"),
                 Line2D([0], [0], marker="o", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=9, label="Kill"),
                 Line2D([0], [0], marker="D", linestyle="", markerfacecolor=_MUTED, markeredgecolor="#ffffff", markersize=8, label="Assist"),
@@ -1121,10 +1282,224 @@ def build_jungle_heatmap(
         return discord.File(buffer, filename=filename)
 
 
+def build_jungle_proximity_comparison_chart(
+    checkpoints: Sequence[tuple[int, dict[int, dict[str, dict[str, float]] | None]]],
+    *, filename: str = "jungle-proximity.png",
+) -> discord.File | None:
+    """Grouped bar chart comparing both team junglers' lane proximity at each checkpoint.
+
+    `checkpoints` is a sequence of (minutes, breakdowns) pairs, where
+    breakdowns maps team id (100/200) to that team's
+    `jungle_proximity_breakdown` result, or None if no jungler was
+    identified for that team. Checkpoints sit side by side on one axes, each
+    with a Top/Mid/Bottom bar pair colored by team (blue vs red) only.
+    """
+    if not MATPLOTLIB_AVAILABLE or not checkpoints:
+        LOGGER.debug("Skipping jungle proximity chart: matplotlib=%s checkpoints=%d", MATPLOTLIB_AVAILABLE, len(checkpoints))
+        return None
+    LOGGER.debug("Building jungle proximity comparison chart: checkpoints=%d", len(checkpoints))
+
+    lanes = ("Top", "Mid", "Bottom")
+    teams = (100, 200)
+    team_colors = {100: _TEAM_BLUE, 200: _TEAM_RED}
+    team_labels = {100: "Blue Jungler", 200: "Red Jungler"}
+    lane_labels = {"Bottom": "Bot"}
+    bar_width = 0.34
+    lane_gap = 0.18
+    slots = [lane_index * (2 * bar_width + lane_gap) for lane_index in range(len(lanes))]
+    group_span = slots[-1] + 2 * bar_width
+    group_centers = [
+        group_index * (group_span + 0.5)
+        for group_index in range(len(checkpoints))
+    ]
+
+    with _chart_lock:
+        figure, axes = plt.subplots(figsize=_FIGURE_SIZE, dpi=_FIGURE_DPI)
+        try:
+            figure.patch.set_facecolor(_BACKGROUND)
+            axes.set_facecolor(_BACKGROUND)
+
+            for group_center, (minutes, breakdowns) in zip(group_centers, checkpoints):
+                for lane_index, lane in enumerate(lanes):
+                    for team_index, team_id in enumerate(teams):
+                        breakdown = breakdowns.get(team_id)
+                        value = breakdown[lane]["score"] if breakdown else 0.0
+                        x = group_center - group_span / 2 + slots[lane_index] + team_index * bar_width + bar_width / 2
+                        bars = axes.bar(
+                            [x], [value], width=bar_width * 0.94,
+                            color=team_colors[team_id],
+                            edgecolor=_BACKGROUND, linewidth=0.8, zorder=3,
+                        )
+                        axes.bar_label(
+                            bars, labels=[f"{value:.0f}"], padding=2,
+                            color=_TEXT, fontsize=8, fontweight="medium",
+                        )
+                    lane_center = group_center - group_span / 2 + slots[lane_index] + bar_width
+                    axes.text(
+                        lane_center, -4, lane_labels.get(lane, lane), ha="center", va="top",
+                        color=_TEXT, fontsize=9.5,
+                    )
+                axes.text(
+                    group_center, -13, f"{minutes}m", ha="center", va="top",
+                    color=_TEXT, fontsize=12, fontweight="bold",
+                )
+
+            axes.set_xlim(group_centers[0] - group_span / 2 - 0.25, group_centers[-1] + group_span / 2 + 0.25)
+            axes.set_xticks([])
+            axes.set_ylim(0, 108)
+            axes.tick_params(axis="y", colors=_MUTED, labelsize=9, length=0)
+            axes.grid(axis="y", color=_GRID, linewidth=0.8, alpha=0.5, zorder=0)
+            axes.set_axisbelow(True)
+            for side in ("top", "right", "left"):
+                axes.spines[side].set_visible(False)
+            axes.spines["bottom"].set_visible(False)
+            for group_center in group_centers[:-1]:
+                axes.axvline(
+                    group_center + group_span / 2 + 0.25, color=_GRID,
+                    linewidth=0.8, alpha=0.5, zorder=1,
+                )
+
+            figure.suptitle(
+                "Jungle Proximity by Checkpoint (%)",
+                color=_TEXT, fontsize=15, fontweight="bold", y=0.99,
+            )
+            legend_handles = [
+                plt.Rectangle((0, 0), 1, 1, facecolor=team_colors[team_id], edgecolor="none", label=team_labels[team_id])
+                for team_id in teams
+            ]
+            figure.legend(
+                handles=legend_handles, loc="upper center", ncol=2,
+                bbox_to_anchor=(0.5, 0.93), frameon=False,
+                fontsize=9.5, labelcolor=_TEXT, handlelength=1.3, handleheight=1.3,
+                columnspacing=1.6,
+            )
+            figure.tight_layout(pad=1.4, rect=(0, 0.05, 1, 0.86))
+
+            buffer = io.BytesIO()
+            figure.savefig(buffer, format="png", facecolor=figure.get_facecolor())
+        finally:
+            plt.close(figure)
+        buffer.seek(0)
+        return discord.File(buffer, filename=filename)
+
+
+_LANING_SIDES = ("you", "opponent")
+_LANING_SIDE_LABELS = {"you": "You", "opponent": "Opponent"}
+
+
+def build_laning_comparison_chart(
+    checkpoints: Sequence[tuple[int, dict[str, dict[str, float] | None]]],
+    *, filename: str = "laning.png",
+) -> discord.File | None:
+    """Grouped bar chart comparing a player's Gold/XP against their lane opponent by checkpoint.
+
+    `checkpoints` is a sequence of (minutes, stats) pairs, where stats maps
+    "you"/"opponent" to that side's raw ``MatchTimeline.stats_at`` result
+    (``{"Gold": ..., "XP": ...}``), or None if that minute never happened.
+    Checkpoints sit side by side on one axes, each with a Gold/XP bar pair
+    colored by side (you vs opponent) only — the same shape as
+    :func:`build_jungle_proximity_comparison_chart`, with metrics standing
+    in for lanes and sides standing in for teams.
+    """
+    if not MATPLOTLIB_AVAILABLE or not checkpoints:
+        LOGGER.debug("Skipping laning comparison chart: matplotlib=%s checkpoints=%d", MATPLOTLIB_AVAILABLE, len(checkpoints))
+        return None
+    LOGGER.debug("Building laning comparison chart: checkpoints=%d", len(checkpoints))
+
+    metrics = ("Gold", "XP")
+    side_colors = {"you": _TEAM_BLUE, "opponent": _TEAM_RED}
+    bar_width = 0.34
+    metric_gap = 0.18
+    slots = [metric_index * (2 * bar_width + metric_gap) for metric_index in range(len(metrics))]
+    group_span = slots[-1] + 2 * bar_width
+    group_centers = [
+        group_index * (group_span + 0.5)
+        for group_index in range(len(checkpoints))
+    ]
+
+    all_values = [
+        stats[metric]
+        for _, sides in checkpoints
+        for stats in sides.values() if stats is not None
+        for metric in metrics
+    ]
+    ceiling = max(all_values, default=0) or 1
+
+    with _chart_lock:
+        figure, axes = plt.subplots(figsize=_FIGURE_SIZE, dpi=_FIGURE_DPI)
+        try:
+            figure.patch.set_facecolor(_BACKGROUND)
+            axes.set_facecolor(_BACKGROUND)
+
+            for group_center, (minutes, sides) in zip(group_centers, checkpoints):
+                for metric_index, metric in enumerate(metrics):
+                    for side_index, side in enumerate(_LANING_SIDES):
+                        stats = sides.get(side)
+                        value = stats[metric] if stats else 0.0
+                        x = group_center - group_span / 2 + slots[metric_index] + side_index * bar_width + bar_width / 2
+                        bars = axes.bar(
+                            [x], [value], width=bar_width * 0.94,
+                            color=side_colors[side],
+                            edgecolor=_BACKGROUND, linewidth=0.8, zorder=3,
+                        )
+                        axes.bar_label(
+                            bars, labels=[f"{value:,.0f}"], padding=2,
+                            color=_TEXT, fontsize=8, fontweight="medium",
+                        )
+                    metric_center = group_center - group_span / 2 + slots[metric_index] + bar_width
+                    axes.text(
+                        metric_center, -ceiling * 0.05, metric, ha="center", va="top",
+                        color=_TEXT, fontsize=9.5,
+                    )
+                axes.text(
+                    group_center, -ceiling * 0.14, f"{minutes}m", ha="center", va="top",
+                    color=_TEXT, fontsize=12, fontweight="bold",
+                )
+
+            axes.set_xlim(group_centers[0] - group_span / 2 - 0.25, group_centers[-1] + group_span / 2 + 0.25)
+            axes.set_xticks([])
+            axes.set_ylim(0, ceiling * 1.15)
+            axes.tick_params(axis="y", colors=_MUTED, labelsize=9, length=0)
+            axes.grid(axis="y", color=_GRID, linewidth=0.8, alpha=0.5, zorder=0)
+            axes.set_axisbelow(True)
+            for side in ("top", "right", "left"):
+                axes.spines[side].set_visible(False)
+            axes.spines["bottom"].set_visible(False)
+            for group_center in group_centers[:-1]:
+                axes.axvline(
+                    group_center + group_span / 2 + 0.25, color=_GRID,
+                    linewidth=0.8, alpha=0.5, zorder=1,
+                )
+
+            figure.suptitle(
+                "Laning Comparison by Checkpoint",
+                color=_TEXT, fontsize=15, fontweight="bold", y=0.99,
+            )
+            legend_handles = [
+                plt.Rectangle((0, 0), 1, 1, facecolor=side_colors[side], edgecolor="none", label=_LANING_SIDE_LABELS[side])
+                for side in _LANING_SIDES
+            ]
+            figure.legend(
+                handles=legend_handles, loc="upper center", ncol=2,
+                bbox_to_anchor=(0.5, 0.93), frameon=False,
+                fontsize=9.5, labelcolor=_TEXT, handlelength=1.3, handleheight=1.3,
+                columnspacing=1.6,
+            )
+            figure.tight_layout(pad=1.4, rect=(0, 0.05, 1, 0.86))
+
+            buffer = io.BytesIO()
+            figure.savefig(buffer, format="png", facecolor=figure.get_facecolor())
+        finally:
+            plt.close(figure)
+        buffer.seek(0)
+        return discord.File(buffer, filename=filename)
+
+
 def build_kill_map(
     match: dict[str, Any], timeline: MatchTimeline, participant: dict[str, Any]
 ) -> discord.File | None:
     """Build kill map."""
+    LOGGER.debug("Building kill map")
     with _chart_lock:
         return _build_kill_map(match, timeline, participant)
 
@@ -1132,7 +1507,12 @@ def build_kill_map(
 def build_lp_chart(
     entries: Sequence[dict[str, Any]], *, days: int = 30
 ) -> discord.File | None:
-    """Step plot of persisted rank values, with no network dependency."""
+    """Render a clean annotated line plot of persisted rank values.
+
+    The underlying continuous values are retained so promotions remain plotted
+    correctly. Each point is annotated with a compact rank label and its LP,
+    such as ``G 1`` over ``29LP``.
+    """
     if not MATPLOTLIB_AVAILABLE:
         return None
     cutoff = time.time() - max(days, 1) * 86400
@@ -1142,26 +1522,71 @@ def build_lp_chart(
         if entry.get("v") is not None and entry.get("t", 0) >= cutoff
     ]
     if not points:
+        LOGGER.debug("Skipping LP chart: no points within %d days", days)
         return None
+    LOGGER.debug("Building LP chart: points=%d days=%d", len(points), days)
     with _chart_lock:
-        figure, axes = plt.subplots(figsize=_FIGURE_SIZE, dpi=_FIGURE_DPI)
+        figure, axes = plt.subplots(figsize=(10, 3.2), dpi=_FIGURE_DPI)
         try:
             figure.patch.set_facecolor(_BACKGROUND)
             axes.set_facecolor(_BACKGROUND)
             x_values = [datetime.fromtimestamp(entry["t"]) for entry in points]
             y_values = [entry["v"] for entry in points]
-            axes.step(x_values, y_values, where="post", color=_HIGHLIGHT, linewidth=2)
-            axes.scatter(x_values, y_values, color=_HIGHLIGHT, s=18, zorder=3)
-            axes.set_title("LP History", color=_TEXT, fontsize=15, fontweight="bold")
-            axes.tick_params(colors=_MUTED)
-            axes.grid(color=_GRID, alpha=0.6)
-            for spine in axes.spines.values():
-                spine.set_color(_GRID)
-            figure.autofmt_xdate()
-            figure.tight_layout()
+            line_color = "#00b8ad"
+            axes.plot(x_values, y_values, color=line_color, linewidth=2.2, zorder=2)
+            axes.scatter(x_values, y_values, color=line_color, s=42, zorder=3)
+            axes.margins(x=0.02, y=0.28)
+            axes.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+            axes.get_yaxis().set_visible(False)
+            axes.tick_params(axis="x", colors=_MUTED, labelsize=10, length=0, pad=8)
+            axes.grid(False)
+            for side in ("top", "right", "left"):
+                axes.spines[side].set_visible(False)
+            axes.spines["bottom"].set_color("#17181d")
+            axes.spines["bottom"].set_linewidth(1.2)
+            for x_value, y_value in zip(x_values, y_values):
+                rank_label, lp_label = _lp_point_labels(y_value)
+                axes.annotate(
+                    rank_label, (x_value, y_value), xytext=(0, 13),
+                    textcoords="offset points", ha="center", va="bottom",
+                    color=_MUTED, fontsize=10, fontweight="bold",
+                )
+                axes.annotate(
+                    lp_label, (x_value, y_value), xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom",
+                    color=_MUTED, fontsize=10,
+                )
+            figure.tight_layout(pad=0.7)
             buffer = io.BytesIO()
             figure.savefig(buffer, format="png", facecolor=figure.get_facecolor())
         finally:
             plt.close(figure)
     buffer.seek(0)
     return discord.File(buffer, filename=LP_CHART_FILENAME)
+
+
+_TIER_ABBREVIATIONS = {
+    "Iron": "I",
+    "Bronze": "B",
+    "Silver": "S",
+    "Gold": "G",
+    "Plat": "P",
+    "Emerald": "E",
+    "Diamond": "D",
+    "Master": "M",
+    "Grandmaster": "GM",
+    "Challenger": "C",
+}
+_DIVISION_NUMBERS = {"IV": "4", "III": "3", "II": "2", "I": "1"}
+
+
+def _lp_point_labels(value: float) -> tuple[str, str]:
+    """Return the compact rank and LP labels shown above an LP chart point."""
+    rank = value_to_rank(value)
+    if rank is None:
+        return "", ""
+    tier, division, lp = rank
+    tier_label = TIER_LABELS.get(tier, tier.title())
+    tier_abbreviation = _TIER_ABBREVIATIONS.get(tier_label, tier_label[:1].upper())
+    division_number = _DIVISION_NUMBERS.get(division, "")
+    return f"{tier_abbreviation} {division_number}".strip(), f"{lp}LP"

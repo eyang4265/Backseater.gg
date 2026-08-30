@@ -72,12 +72,14 @@ def _rune_row(runes, *, selected: bool = False) -> str:
     return " ".join(labels)
 
 
-def _champion_stats_embed(champion_name: str, stats: ChampionStats, url: str) -> discord.Embed:
+def _champion_stats_embed(
+    champion_name: str, stats: ChampionStats, url: str, server: str
+) -> discord.Embed:
     """Render a live OP.GG champion panel."""
     role_label = stats.position.title() if stats.position != "all" else "All roles"
     embed = make_embed(
         f"[View source on OP.GG]({url})",
-        title=f"{champion_name} — OP.GG ({role_label})",
+        title=f"{champion_name} — OP.GG ({role_label}) · {server}",
     )
     embed.add_field(name="Tier", value=stats.tier or "Unavailable", inline=True)
     embed.add_field(name="Win rate", value=f"{stats.win_rate:.2f}%", inline=True)
@@ -170,7 +172,7 @@ class ChampionPositionView(discord.ui.View):
                 stats = self.stats_by_position[chosen]
                 url = opgg_champion_url(self.server, self.internal_id, chosen)
                 await interaction.response.edit_message(
-                    embed=_champion_stats_embed(self.champion_name, stats, url),
+                    embed=_champion_stats_embed(self.champion_name, stats, url, self.server),
                     view=ChampionPositionView(
                         self.champion_name,
                         self.server,
@@ -232,8 +234,10 @@ class ChampionCommands(commands.Cog):
         catalog = await asyncio.to_thread(ddragon.catalog)
         found = catalog.by_query(champion) if catalog else None
         if found is None:
+            LOGGER.info("/champ could not resolve champion query %r", champion)
             await ctx.respond(embed=make_embed(f"Unknown champion: **{champion}**."))
             return
+        LOGGER.debug("/champ resolved %r to %s (internal_id=%s)", champion, found.name, found.internal_id)
 
         server = server or "GLOBAL"
         url = opgg_champion_url(server, found.internal_id, position)
@@ -246,6 +250,7 @@ class ChampionCommands(commands.Cog):
         positions = (
             (position,) if position and position != "all" else _CHAMPION_POSITIONS
         )
+        LOGGER.debug("/champ fetching OP.GG stats for %s positions %s on %s", found.name, positions, server)
         fetched = await asyncio.gather(
             *(
                 asyncio.to_thread(fetch_champion_stats, server, found.internal_id, item)
@@ -263,13 +268,18 @@ class ChampionCommands(commands.Cog):
                 (str(result) for result in fetched if isinstance(result, Exception)),
                 "OP.GG returned no usable position data.",
             )
+            LOGGER.warning("/champ found no usable OP.GG data for %s: %s", found.name, message)
             await ctx.respond(embed=make_embed(f"Could not fetch live OP.GG stats: {message}"))
             return
 
         selected = max(stats_by_position.values(), key=lambda item: item.pick_rate)
+        LOGGER.info(
+            "/champ showing %s (%s, %s) requested by %s",
+            found.name, selected.position, server, ctx.author,
+        )
         selected_url = opgg_champion_url(server, found.internal_id, selected.position)
         message = await ctx.respond(
-            embed=_champion_stats_embed(found.name, selected, selected_url),
+            embed=_champion_stats_embed(found.name, selected, selected_url, server),
             view=ChampionPositionView(
                 found.name,
                 server,

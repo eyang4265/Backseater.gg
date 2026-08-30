@@ -50,25 +50,30 @@ class RiotInfoCommands(commands.Cog):
         try:
             champion_ids = await asyncio.to_thread(get_client().champion_rotation)
         except RiotAPIError as error:
+            LOGGER.info("Champion rotation fetch failed: %s", error)
             await ctx.respond(
                 embed=make_embed(f"Could not fetch the rotation: {error}")
             )
             return
+        LOGGER.debug("Fetched %d rotation champion ids", len(champion_ids))
 
         catalog = await asyncio.to_thread(ddragon.catalog)
-        names = sorted(
-            filter(
-                None,
-                (
-                    (
-                        catalog.by_key(champion_id).name
-                        if catalog and catalog.by_key(champion_id)
-                        else None
-                    )
-                    for champion_id in champion_ids
-                ),
+        if catalog is None:
+            await ctx.respond(
+                embed=make_embed(
+                    "Could not fetch champion data from Data Dragon; try again shortly."
+                )
             )
+            return
+
+        names = sorted(
+            {
+                champion.name
+                for champion_id in champion_ids
+                if (champion := catalog.by_key(champion_id)) is not None
+            }
         )
+        LOGGER.info("Sent champion rotation (%d champions)", len(names))
         await ctx.respond(
             embed=make_embed("\n".join(names) or "—", title="Current Champion Rotation")
         )
@@ -84,6 +89,7 @@ class RiotInfoCommands(commands.Cog):
         try:
             status = await asyncio.to_thread(get_client().platform_status, server)
         except RiotAPIError as error:
+            LOGGER.info("Server status fetch failed for %s: %s", server, error)
             await ctx.respond(
                 embed=make_embed(f"Could not fetch server status: {error}")
             )
@@ -97,6 +103,7 @@ class RiotInfoCommands(commands.Cog):
             ]
             if (line := _status_line(record))
         ]
+        LOGGER.info("Sent server status for %s (%d events)", server, len(lines))
         await ctx.respond(
             embed=make_embed(
                 "\n".join(lines)

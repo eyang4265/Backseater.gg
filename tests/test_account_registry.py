@@ -29,6 +29,7 @@ class RegistryTests(unittest.TestCase):
         """Handle client."""
         client = Mock()
         client.puuid.return_value = puuid
+        client.home_platform.side_effect = lambda _puuid, candidates: candidates[0]
         client.riot_id.return_value = "Player#NA1"
         client.match_ids.return_value = ["NA1_2", "NA1_1"]
         return client

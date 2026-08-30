@@ -26,7 +26,9 @@ def _champion_stats(payload: dict[str, Any]) -> ChampionStats:
 def register_persistent_command_views(bot: Any) -> int:
     """Restore persistent ``/champ`` and ``/coachless`` component views."""
     restored = 0
-    for state in load_embed_button_states():
+    states = load_embed_button_states()
+    LOGGER.debug("Restoring persistent command views from %d stored states", len(states))
+    for state in states:
         payload = state.get("payload", {})
         try:
             if state["kind"] == "champ":
@@ -54,4 +56,5 @@ def register_persistent_command_views(bot: Any) -> int:
             restored += 1
         except (KeyError, TypeError, ValueError):
             LOGGER.warning("Skipping malformed persistent command view state")
+    LOGGER.info("Restored %d persistent command views", restored)
     return restored

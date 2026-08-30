@@ -1,6 +1,8 @@
 """Riot client cache policy."""
 
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from unittest.mock import Mock, patch
 
 import requests
@@ -23,6 +25,29 @@ class TTLCacheTests(unittest.TestCase):
         cache.get_or_set("key", produce)
         cache.get_or_set("key", produce)
         self.assertEqual(calls, 2)
+
+    def test_concurrent_misses_are_coalesced(self) -> None:
+        """Only one producer runs while other callers wait for the same key."""
+        calls = 0
+        calls_lock = Lock()
+        started = Event()
+        release = Event()
+
+        def produce():
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            started.set()
+            release.wait(timeout=2)
+            return "value"
+
+        cache = TTLCache(60)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(cache.get_or_set, "key", produce) for _ in range(4)]
+            self.assertTrue(started.wait(timeout=2))
+            release.set()
+            self.assertEqual([future.result() for future in futures], ["value"] * 4)
+        self.assertEqual(calls, 1)
 
 
 class RateLimiterTests(unittest.TestCase):
@@ -48,6 +73,21 @@ class RateLimiterTests(unittest.TestCase):
             limiter.acquire()
             limiter.acquire()
         self.assertGreaterEqual(now, 10.0)
+
+    def test_match_timeline_is_cached_after_the_first_fetch(self) -> None:
+        """Repeated chart/rating views do not re-fetch an immutable timeline."""
+        client = object.__new__(RiotClient)
+        client._timeline_cache = TTLCache(60)
+        client._match_cache = Mock()
+        client._match_cache.get_timeline.return_value = None
+        client._get = Mock(return_value={"info": {"frames": []}})
+
+        first = client.match_timeline("NA1_1", "NA1")
+        second = client.match_timeline("NA1_1", "NA1")
+
+        self.assertEqual(first, second)
+        client._get.assert_called_once()
+        client._match_cache.put_timeline.assert_called_once_with("NA1_1", first)
 
     def test_retry_budget_exhaustion_raises(self) -> None:
         """Verify that retry budget exhaustion raises."""

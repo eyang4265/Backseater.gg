@@ -14,10 +14,11 @@ from ...announce import (
     TrackedPlayer,
     build_live_game_embed,
     format_live_game,
+    remember_live_game_view_state,
 )
 from ...emoji import champion_emoji, prefixed
 from ...history import format_match_history_line, match_history_score
-from ...queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID, current_queue_names, queue_name
+from ...queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID, queue_name
 from ...ranks import RankSnapshot, fetch_ranks
 from ...render import (
     make_embed,
@@ -29,8 +30,10 @@ from ...store import load_accounts
 from ..shared import (
     GUILD_IDS,
     SERVERS,
+    game_mode_choices,
     log_command,
     not_found_embed,
+    riot_to_thread,
     set_player_author,
     target_for,
 )
@@ -40,12 +43,7 @@ LOGGER = logging.getLogger(__name__)
 _TOP_MASTERY_COUNT = 3
 _MATCH_HISTORY_COUNT = 10
 _MATCH_HISTORY_FILTER_LOOKBACK = 100
-_MATCH_HISTORY_FETCH_BATCH = 10
-
-
-def _game_mode_choices(_ctx: discord.AutocompleteContext) -> tuple[str, ...]:
-    """Game mode suggestions, refreshed at bot startup to drop retired modes."""
-    return current_queue_names()
+_MATCH_HISTORY_FETCH_BATCH = 5
 
 
 def _record_text(snapshot: RankSnapshot | None) -> str | None:
@@ -120,24 +118,25 @@ class PlayerCommands(commands.Cog):
         guild_ids=GUILD_IDS, description="Link to a player's OP.GG profile"
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
-    async def opgg(self, ctx, server, summoner, user):
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    async def opgg(self, ctx, server, username):
         """Return an OP.GG profile link for a tracked or looked-up player."""
-        log_command(ctx, server=server, summoner=summoner, user=user)
-        target = await target_for(ctx, server, summoner, user)
+        log_command(ctx, server=server, username=username)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         url = target.opgg_url
         if url is None:
+            LOGGER.debug("No OP.GG profile available for %s on %s", target.riot_id, target.server)
             await ctx.respond(
                 embed=make_embed(
                     f"No OP.GG profile is available for {target.riot_id} on {target.server}."
                 )
             )
             return
+        LOGGER.info("Sent OP.GG link for %s", target.riot_id)
         embed = discord.Embed(
             title=f"OP.GG — {target.riot_id}",
             url=url,
@@ -149,16 +148,15 @@ class PlayerCommands(commands.Cog):
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Player Profile")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User", required=False)
-    async def profile(self, ctx, server, summoner, user):
-        """Level, server, ranked standing in both queues, and top champion masteries."""
-        log_command(ctx, server=server, summoner=summoner, user=user)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    async def profile(self, ctx, server, username):
+        """Level, ranked standing in both queues, and top champion masteries."""
+        log_command(ctx, server=server, username=username)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         client = get_client()
@@ -168,7 +166,6 @@ class PlayerCommands(commands.Cog):
         )
         lines = [
             f"**Level:** {level}",
-            f"**Server:** {target.server}",
         ]
 
         ranks = ranks or {}
@@ -177,7 +174,9 @@ class PlayerCommands(commands.Cog):
             (FLEX_QUEUE_ID, "Ranked Flex"),
         ):
             snapshot = ranks.get(queue_id)
-            lines.append(f"**{label}:** {rank_text(snapshot) or 'Unranked'}")
+            lines.append(
+                f"**{label}:** {rank_text(snapshot, with_winrate=True) or 'Unranked'}"
+            )
             record = _record_text(snapshot)
             if record:
                 lines.append(f"**Record:** {record}")
@@ -188,6 +187,7 @@ class PlayerCommands(commands.Cog):
 
         embed = make_embed("\n".join(lines))
         set_player_author(embed, target)
+        LOGGER.info("Sent profile for %s (level %s)", target.riot_id, level)
         await ctx.respond(embed=embed)
 
     @staticmethod
@@ -218,16 +218,20 @@ class PlayerCommands(commands.Cog):
         description="Show a live game's lobby (champions + ranks). Leave everything blank for your own account.",
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User", required=False)
-    async def livegame(self, ctx, server, summoner, user):
-        """The target's current lobby: names, ranks, and win rates per team."""
-        log_command(ctx, server=server, summoner=summoner, user=user)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    async def livegame(self, ctx, server, username):
+        """The target's current lobby: names, ranks, and win rates per team.
+
+        Renders with the same embed and buttons as automatic live-game
+        announcements, and persists its button state the same way so the
+        buttons survive a bot restart.
+        """
+        log_command(ctx, server=server, username=username)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         try:
@@ -235,6 +239,7 @@ class PlayerCommands(commands.Cog):
                 get_client().active_game, target.puuid, target.server
             )
         except RiotAPIError as error:
+            LOGGER.info("Live game lookup failed for %s: %s", target.riot_id, error)
             await ctx.respond(
                 embed=make_embed(f"Could not check live game status: {error}")
             )
@@ -244,6 +249,7 @@ class PlayerCommands(commands.Cog):
             p.get("puuid") == target.puuid for p in game.get("participants", []) or []
         )
         if not in_game:
+            LOGGER.debug("%s is not currently in a game", target.riot_id)
             await ctx.respond(
                 embed=make_embed(f"**{target.riot_id}** is not currently in a game.")
             )
@@ -264,6 +270,14 @@ class PlayerCommands(commands.Cog):
                         server=account.server,
                     )
                 )
+            if target.puuid not in registered:
+                lobby_players.append(
+                    TrackedPlayer(
+                        puuid=target.puuid,
+                        riot_id=target.riot_id,
+                        server=target.server,
+                    )
+                )
             announcement = await asyncio.to_thread(
                 format_live_game,
                 game,
@@ -273,48 +287,50 @@ class PlayerCommands(commands.Cog):
                 raise RiotAPIError("Could not find the target in the live game")
             embed = await build_live_game_embed(announcement)
         except RiotAPIError as error:
+            LOGGER.info("Could not build live game embed for %s: %s", target.riot_id, error)
             await ctx.respond(
                 embed=make_embed(f"Could not fetch lobby details: {error}")
             )
             return
 
         set_player_author(embed, target, name=f"{target.riot_id}'s Lobby")
-        await ctx.respond(embed=embed, view=LiveGameAnnouncementView(announcement))
+        message = await ctx.respond(embed=embed, view=LiveGameAnnouncementView(announcement))
+        if message is not None:
+            await remember_live_game_view_state(message, message.channel.id, announcement)
+        LOGGER.info("Sent /livegame lobby for %s (%d tracked players)", target.riot_id, len(lobby_players))
 
     @discord.slash_command(
         guild_ids=GUILD_IDS,
         description="Show a player's 10 most recent games",
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option(
         "game_mode",
         description="Filter by game mode, such as Ranked Solo/Duo or ARAM",
-        autocomplete=discord.utils.basic_autocomplete(_game_mode_choices),
+        autocomplete=discord.utils.basic_autocomplete(game_mode_choices),
         required=False,
     )
     @discord.option("champion", description="Filter by champion", required=False)
-    async def matchhistory(self, ctx, server, summoner, user, game_mode, champion):
+    async def matchhistory(self, ctx, server, username, game_mode, champion):
         """Show up to ten recent games, optionally filtered by mode or champion."""
         log_command(
             ctx,
             server=server,
-            summoner=summoner,
-            user=user,
+            username=username,
             game_mode=game_mode,
             champion=champion,
         )
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         client = get_client()
         try:
-            match_ids = await asyncio.to_thread(
+            match_ids = await riot_to_thread(
                 client.match_ids,
                 target.puuid,
                 target.server,
@@ -325,6 +341,7 @@ class PlayerCommands(commands.Cog):
                 ),
             )
         except RiotAPIError as error:
+            LOGGER.info("Match history fetch failed for %s: %s", target.riot_id, error)
             await ctx.respond(
                 embed=make_embed(f"Could not fetch match history: {error}")
             )
@@ -334,10 +351,16 @@ class PlayerCommands(commands.Cog):
                 embed=make_embed(f"No matches found for {target.riot_id}.")
             )
             return
+        LOGGER.debug(
+            "Scanning up to %d match ids for %s (game_mode=%s, champion=%s)",
+            len(match_ids), target.riot_id, game_mode, champion,
+        )
 
         catalog = await asyncio.to_thread(ddragon.catalog)
         displayed_matches = []
         lines = []
+        fetch_errors = []
+        filtered_out = 0
         # Fetch in small batches and stop as soon as enough matches pass the
         # filter, instead of always fetching all `count` matches up front —
         # a full 100-match fan-out would monopolize the shared Riot API rate
@@ -348,7 +371,7 @@ class PlayerCommands(commands.Cog):
             batch_ids = match_ids[batch_start : batch_start + _MATCH_HISTORY_FETCH_BATCH]
             fetched = await asyncio.gather(
                 *(
-                    asyncio.to_thread(client.match, match_id, target.server)
+                    riot_to_thread(client.match, match_id, target.server)
                     for match_id in batch_ids
                 ),
                 return_exceptions=True,
@@ -358,21 +381,43 @@ class PlayerCommands(commands.Cog):
                     LOGGER.warning(
                         "Could not fetch match %s for history: %s", match_id, result
                     )
+                    fetch_errors.append(f"{match_id} ({result})")
                     continue
                 if not _matches_history_filters(
                     result, target.puuid, catalog, game_mode, champion
                 ):
+                    filtered_out += 1
                     continue
                 line = _match_history_line(result, target.puuid, catalog)
                 if line is None:
+                    filtered_out += 1
                     continue
                 displayed_matches.append(result)
                 lines.append(line)
                 if len(lines) == _MATCH_HISTORY_COUNT:
                     break
         if not lines:
+            details = [
+                f"Player: {target.riot_id} ({target.server})",
+                f"Matches checked: {len(match_ids)}",
+            ]
+            if game_mode:
+                details.append(f"Game mode filter: {game_mode}")
+            if champion:
+                details.append(f"Champion filter: {champion}")
+            if fetch_errors:
+                details.append(
+                    f"Fetch failures ({len(fetch_errors)}): "
+                    + "; ".join(fetch_errors[:5])
+                    + (" ..." if len(fetch_errors) > 5 else "")
+                )
+            if filtered_out:
+                details.append(f"Filtered out: {filtered_out}")
             await ctx.respond(
-                embed=make_embed("Could not load any match details. Please try again.")
+                embed=make_embed(
+                    "Could not load any match details. Please try again.\n"
+                    + "\n".join(details)
+                )
             )
             return
 
@@ -382,22 +427,25 @@ class PlayerCommands(commands.Cog):
             title=f"Match History — {target.riot_id} ({wins}W {losses}L)",
         )
         set_player_author(embed, target)
+        LOGGER.info(
+            "Sent match history for %s (%d shown, %d filtered out)",
+            target.riot_id, len(lines), filtered_out,
+        )
         await ctx.respond(embed=embed)
 
     @discord.slash_command(
         guild_ids=GUILD_IDS, description="Recent match IDs for a tracked player"
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
-    async def matchlist(self, ctx, server, summoner, user):
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    async def matchlist(self, ctx, server, username):
         """The player's most recent match ids."""
-        log_command(ctx, server=server, summoner=summoner, user=user)
+        log_command(ctx, server=server, username=username)
         await ctx.defer()
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
 
         try:
@@ -405,6 +453,7 @@ class PlayerCommands(commands.Cog):
                 get_client().match_ids, target.puuid, target.server
             )
         except RiotAPIError as error:
+            LOGGER.info("Match list fetch failed for %s: %s", target.riot_id, error)
             await ctx.respond(embed=make_embed(f"Could not fetch match list: {error}"))
             return
 
@@ -412,38 +461,36 @@ class PlayerCommands(commands.Cog):
             await ctx.respond(embed=make_embed("No matches found."))
             return
 
-        await ctx.respond(
-            embed=make_embed(
-                "\n".join(match_ids), title=f"Recent Matches — {target.riot_id}"
-            )
-        )
+        embed = make_embed("\n".join(match_ids), title=f"Recent Matches — {target.riot_id}")
+        set_player_author(embed, target)
+        LOGGER.info("Sent %d match ids for %s", len(match_ids), target.riot_id)
+        await ctx.respond(embed=embed)
 
     @discord.slash_command(
         guild_ids=GUILD_IDS, description="Look up a player's PUUID (owner only)"
     )
     @commands.is_owner()
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
-    async def puuid(self, ctx, server, summoner, user):
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    async def puuid(self, ctx, server, username):
         """Resolve a player's PUUID.
 
         Owner-only and ephemeral: a PUUID can be used to look someone up
         through the Riot API directly, without going through this bot.
         """
-        log_command(ctx, server=server, summoner=summoner, user=user)
+        log_command(ctx, server=server, username=username)
 
-        target = await target_for(ctx, server, summoner, user)
+        target = await target_for(ctx, server, username)
         if target is None:
             await ctx.respond(
-                embed=not_found_embed(summoner, server, user=user), ephemeral=True
+                embed=not_found_embed(username, server, ctx=ctx), ephemeral=True
             )
             return
 
-        await ctx.respond(
-            embed=make_embed(f"`{target.puuid}`", title=f"PUUID — {target.riot_id}"),
-            ephemeral=True,
-        )
+        embed = make_embed(f"`{target.puuid}`", title=f"PUUID — {target.riot_id}")
+        set_player_author(embed, target)
+        LOGGER.info("Sent PUUID for %s", target.riot_id)
+        await ctx.respond(embed=embed, ephemeral=True)
 
 
 def setup(bot: discord.Bot) -> None:

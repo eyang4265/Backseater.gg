@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import discord
 from discord.ext import commands, tasks
 
+from bot_app import ddragon
 from bot_app.commands import register_all
 from bot_app.commands.shared import (
     command_option_fields,
@@ -43,7 +44,7 @@ Poller = Callable[[discord.Bot], Awaitable[None]]
 def mention_reply_content(latency_seconds: float) -> str:
     """Return the concise response sent when the bot is mentioned."""
     latency_ms = max(round(latency_seconds * 1000), 0)
-    return f"🏓 Pong! **{latency_ms} ms**\nDo `/commands` for the list of commands."
+    return f"🏓 Pong! **{latency_ms} ms**\nDo `/help` for the list of commands."
 
 
 async def handle_application_command_error(ctx, error: Exception) -> bool:
@@ -199,7 +200,7 @@ def main() -> None:
         """Reply with latency and command-directory guidance when mentioned."""
         if message.author.bot:
             return
-        if bot.user is not None and bot.user in message.mentions:
+        if bot.user is not None and bot.user.id in message.raw_mentions:
             await message.channel.send(mention_reply_content(bot.latency))
 
     @bot.event
@@ -210,6 +211,7 @@ def main() -> None:
         )
 
         if not pollers[0].is_running():
+            await asyncio.to_thread(ddragon.recent_patch_prefixes, 6)
             updated, failed = await asyncio.to_thread(update_all_rank_snapshots)
             LOGGER.info("Rank snapshots updated: %d | failed: %d", updated, failed)
             if settings.match_cache_enabled:

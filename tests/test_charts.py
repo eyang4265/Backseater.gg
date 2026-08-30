@@ -4,8 +4,15 @@ import unittest
 from unittest.mock import patch
 
 from bot_app.charts import (
+    _BOT_SIDE_BOUNDARY,
+    _BOT_SCUTTLE_SPAWN,
+    _TOP_SIDE_BOUNDARY,
+    _TOP_SCUTTLE_SPAWN,
     _in_base,
+    _in_mid_corridor,
     _lane_weights,
+    _lp_point_labels,
+    build_laning_comparison_chart,
     build_lp_chart,
     jungle_checkpoint_minutes,
     jungle_heatmap_density_points,
@@ -22,13 +29,61 @@ from bot_app.charts import (
 
 
 class LpChartTests(unittest.TestCase):
+    def test_points_use_compact_rank_and_lp_labels(self) -> None:
+        """Format points like the rank-history reference chart."""
+        self.assertEqual(("G 1", "29LP"), _lp_point_labels(1529))
+        self.assertEqual(("P 4", "0LP"), _lp_point_labels(1600))
+
     def test_missing_matplotlib_returns_none(self) -> None:
         """Verify that missing matplotlib returns none."""
         with patch("bot_app.charts.MATPLOTLIB_AVAILABLE", False):
             self.assertIsNone(build_lp_chart([{"t": 1, "v": 100}], days=30))
 
 
+class LaningComparisonChartTests(unittest.TestCase):
+    def test_missing_matplotlib_returns_none(self) -> None:
+        """Verify that missing matplotlib returns none."""
+        checkpoints = [(5, {"you": {"Gold": 2000, "XP": 1800}, "opponent": {"Gold": 1700, "XP": 1600}})]
+        with patch("bot_app.charts.MATPLOTLIB_AVAILABLE", False):
+            self.assertIsNone(build_laning_comparison_chart(checkpoints))
+
+    def test_empty_checkpoints_returns_none(self) -> None:
+        """Verify that an empty checkpoint list returns none rather than an empty chart."""
+        self.assertIsNone(build_laning_comparison_chart([]))
+
+    def test_renders_a_chart_with_missing_and_present_checkpoints(self) -> None:
+        """Verify a mix of missing and present sides renders without error."""
+        checkpoints = [
+            (5, {"you": {"Gold": 2000, "XP": 1800}, "opponent": {"Gold": 1700, "XP": 1600}}),
+            (10, {"you": None, "opponent": None}),
+            (15, {"you": {"Gold": 6600, "XP": 6100}, "opponent": {"Gold": 5900, "XP": 5700}}),
+        ]
+        chart = build_laning_comparison_chart(checkpoints)
+        self.assertIsNotNone(chart)
+        self.assertEqual("laning.png", chart.filename)
+
+
 class JungleInvolvementTests(unittest.TestCase):
+    def test_mid_corridor_uses_requested_scuttle_order(self) -> None:
+        """Keep the Mid corridor between the requested bot/top boundary routes."""
+        # The two paths retain their forward blue-Nexus-to-red-Nexus order.
+        # The initial shrines are at (10,000, 5,000) and (5,000, 10,000),
+        # rather than the river's central patrol locations.
+        self.assertEqual((10_000, 5_000), _BOT_SCUTTLE_SPAWN)
+        self.assertEqual((5_000, 10_000), _TOP_SCUTTLE_SPAWN)
+        self.assertEqual(
+            ((0, 0), (7050, 4000), _BOT_SCUTTLE_SPAWN, (10600, 6400), (14500, 14500)),
+            _BOT_SIDE_BOUNDARY,
+        )
+        self.assertEqual(
+            ((0, 0), (3870, 7900), _TOP_SCUTTLE_SPAWN, (7450, 10500), (14500, 14500)),
+            _TOP_SIDE_BOUNDARY,
+        )
+        self.assertTrue(_in_mid_corridor(7500, 7000))
+        self.assertTrue(_in_mid_corridor(8_000, 6_000))
+        self.assertTrue(_in_mid_corridor(6_000, 8_000))
+        self.assertFalse(_in_mid_corridor(3000, 11000))
+
     def test_fountain_samples_are_excluded_and_marker_timestamps_stay_aligned(self) -> None:
         """Drop base time without desynchronizing heatmap marker timestamps."""
         timeline = {"info": {"mapId": 11, "frames": [
@@ -55,13 +110,27 @@ class JungleInvolvementTests(unittest.TestCase):
         self.assertEqual([(1, 60_000), (2, 180_000)], timestamps)
         self.assertEqual(set(dict(timestamps)), {number for number, *_ in samples})
 
-    def test_soft_lane_weights_are_normalized_near_gromp(self) -> None:
-        """Spread jungle positions across lanes while favoring nearby Top."""
+    def test_boundary_lane_weights_blend_adjacent_lanes(self) -> None:
+        """Split proximity evenly across the two lanes on a route boundary."""
         weights = _lane_weights(2_100, 8_400)
 
-        self.assertAlmostEqual(1.0, sum(weights.values()))
-        self.assertGreater(weights["Top"], weights["Mid"])
-        self.assertGreater(weights["Mid"], weights["Bottom"])
+        self.assertEqual({"Top": 1.0, "Mid": 0.0, "Bottom": 0.0}, weights)
+        self.assertEqual(
+            {"Top": 0.0, "Mid": 1.0, "Bottom": 0.0},
+            _lane_weights(7_500, 7_000),
+        )
+        self.assertEqual(
+            {"Top": 0.0, "Mid": 0.0, "Bottom": 1.0},
+            _lane_weights(13_000, 1_000),
+        )
+        self.assertEqual(
+            {"Top": 0.5, "Mid": 0.5, "Bottom": 0.0},
+            _lane_weights(*_TOP_SCUTTLE_SPAWN),
+        )
+        self.assertEqual(
+            {"Top": 0.0, "Mid": 0.5, "Bottom": 0.5},
+            _lane_weights(*_BOT_SCUTTLE_SPAWN),
+        )
 
     def test_proximity_is_invariant_to_position_sampling_rate(self) -> None:
         """Represent the same route at one-minute and one-second resolution."""
@@ -168,8 +237,8 @@ class JungleInvolvementTests(unittest.TestCase):
             jungle_position_samples(timeline, 1),
         )
 
-    def test_heatmap_stops_after_five_numbered_points(self) -> None:
-        """Limit heatmap movement markers to five points after the ignored start."""
+    def test_heatmap_numbers_every_point_after_the_ignored_start(self) -> None:
+        """Every post-spawn movement sample is numbered by default (no cap)."""
         timeline = {"info": {"frames": [
             {"timestamp": minute * 60_000, "participantFrames": {
                 "1": {"position": {"x": 6_000 + minute * 100, "y": 6_000 + minute * 100}}
@@ -179,11 +248,25 @@ class JungleInvolvementTests(unittest.TestCase):
 
         samples = jungle_position_samples(timeline, 1)
 
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [number for number, *_ in samples])
+        self.assertEqual((6_700, 6_700), samples[-1][1:3])
+
+    def test_heatmap_limit_still_truncates_when_explicitly_passed(self) -> None:
+        """An explicit ``limit`` still caps the numbered markers."""
+        timeline = {"info": {"frames": [
+            {"timestamp": minute * 60_000, "participantFrames": {
+                "1": {"position": {"x": 6_000 + minute * 100, "y": 6_000 + minute * 100}}
+            }}
+            for minute in range(8)
+        ]}}
+
+        samples = jungle_position_samples(timeline, 1, limit=5)
+
         self.assertEqual([1, 2, 3, 4, 5], [number for number, *_ in samples])
         self.assertEqual((6_500, 6_500), samples[-1][1:3])
 
     def test_sample_timeline_hexagon_timestamps(self) -> None:
-        """Read the first five post-spawn timestamps from the sample timeline."""
+        """Read every post-spawn timestamp from the sample timeline by default."""
         import json
         from pathlib import Path
 
@@ -191,10 +274,13 @@ class JungleInvolvementTests(unittest.TestCase):
             (Path(__file__).parents[1] / "json/samples/sample_timeline.json").read_text()
         )
 
+        timestamps = jungle_position_sample_timestamps(timeline, 2)
+
         self.assertEqual(
             [(1, 60_026), (2, 120_046), (3, 180_109), (4, 240_125), (5, 300_145)],
-            jungle_position_sample_timestamps(timeline, 2),
+            timestamps[:5],
         )
+        self.assertGreater(len(timestamps), 5)
 
     def test_kill_positions_are_cut_off_and_numbered_chronologically(self) -> None:
         """Return only valid jungler kill positions in chronological order."""

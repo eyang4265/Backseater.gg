@@ -79,6 +79,7 @@ class AdminCommands(commands.Cog):
         """Every tracked Discord user and their Riot ID."""
         log_command(ctx)
         accounts = load_accounts()
+        LOGGER.debug("Listing %d tracked accounts", len(accounts))
         listing = "\n".join(
             f"<@{account.discord_id}>: {account.riot_id}"
             for account in accounts.values()
@@ -97,6 +98,7 @@ class AdminCommands(commands.Cog):
         log_command(ctx)
         await ctx.defer(ephemeral=True)
 
+        LOGGER.info("Refreshing Riot IDs for all tracked accounts")
         result = refresh_riot_ids()
         lines = [*result.changed, f"Unchanged: {result.unchanged}"]
         if result.failed:
@@ -126,6 +128,7 @@ class AdminCommands(commands.Cog):
     async def test(self, ctx):
         """Handle test."""
         log_command(ctx)
+        LOGGER.debug("Connectivity check requested")
         await ctx.respond(embed=make_embed("Hi"))
 
     @discord.slash_command(
@@ -166,9 +169,11 @@ class AdminCommands(commands.Cog):
         }
         handler = handlers.get(sample)
         if handler is not None:
+            LOGGER.debug("Running selftest using canned sample %s", sample)
             await handler(ctx)
             return
 
+        LOGGER.debug("Running selftest against live Riot data (match_id=%s)", match_id)
         await self._live_match(ctx, match_id)
 
     @staticmethod
@@ -259,6 +264,7 @@ class AdminCommands(commands.Cog):
             return
 
         players = _tracked_players_in(match)
+        LOGGER.debug("Match %s has %d tracked players", selected_id, len(players))
         if not match_id and not any(
             player.puuid == SELFTEST_PUUID for player in players
         ):
@@ -307,6 +313,7 @@ class AdminCommands(commands.Cog):
             return
 
         embed, chart = await build_announcement_embed(announcement)
+        LOGGER.info("Rendered selftest announcement for match %s", match.get("metadata", {}).get("matchId"))
 
         footer = []
         if not MATPLOTLIB_AVAILABLE:

@@ -27,6 +27,9 @@ _CDN = "https://ddragon.leagueoflegends.com/cdn"
 _REFRESH_SECONDS = 6 * 3600
 _FETCH_ATTEMPTS = 3
 _TIMEOUT = 10.0
+_PATCH_WINDOW_LOCK = threading.Lock()
+_PATCH_WINDOW: tuple[str, ...] = ()
+_PATCH_WINDOW_CHECKED_AT = 0.0
 
 
 BLANK_PROFILE_ICON_ID = 29
@@ -78,9 +81,12 @@ _ALIASES: dict[str, str] = {
 }
 
 
+_NORMALIZE_RE = re.compile(r"[^a-z0-9]")
+
+
 def normalize(text: str) -> str:
     """Fold user input so punctuation and spacing don't matter (``Vel'Koz`` → ``velkoz``)."""
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+    return _NORMALIZE_RE.sub("", text.lower())
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,18 @@ class Champion:
 
     name: str
     tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ItemMetadata:
+    """Normalized Data Dragon metadata, including its item tier."""
+
+    identifier: int
+    name: str
+    tags: tuple[str, ...]
+    from_ids: tuple[int, ...] = ()
+    depth: int | None = None
+    into_ids: tuple[int, ...] = ()
 
 
 class ChampionCatalog:
@@ -145,6 +163,8 @@ class _CatalogLoader:
     def __init__(self) -> None:
         """Initialize the instance."""
         self._lock = threading.Lock()
+        self._catalog_refresh_lock = threading.Lock()
+        self._version_refresh_lock = threading.Lock()
         self._catalog: ChampionCatalog | None = None
         self._loaded_at = 0.0
         self._version: str | None = None
@@ -157,13 +177,17 @@ class _CatalogLoader:
             if self._version and now - self._version_checked_at < _REFRESH_SECONDS:
                 return self._version
 
-        version = self._fetch_version()
+        with self._version_refresh_lock:
+            with self._lock:
+                if self._version and now - self._version_checked_at < _REFRESH_SECONDS:
+                    return self._version
+            version = self._fetch_version()
 
-        with self._lock:
-            if version:
-                self._version = version
-                self._version_checked_at = now
-            return self._version
+            with self._lock:
+                if version:
+                    self._version = version
+                    self._version_checked_at = time.monotonic()
+                return self._version
 
     def catalog(self) -> ChampionCatalog | None:
         """Handle catalog."""
@@ -175,34 +199,44 @@ class _CatalogLoader:
             if fresh:
                 return self._catalog
 
-        version = self.version()
-        if not version:
-            return self._stale("could not determine the current patch version")
+        with self._catalog_refresh_lock:
+            with self._lock:
+                if (
+                    self._catalog is not None
+                    and time.monotonic() - self._loaded_at < _REFRESH_SECONDS
+                ):
+                    return self._catalog
 
-        payload = self._fetch_champions(version)
-        if payload is None:
-            return self._stale(f"could not fetch champion data for {version}")
+            version = self.version()
+            if not version:
+                return self._stale("could not determine the current patch version")
 
-        try:
-            catalog = ChampionCatalog(
-                version,
-                (
-                    Champion(
-                        key=int(entry["key"]),
-                        internal_id=entry["id"],
-                        name=entry["name"],
-                        tags=tuple(entry.get("tags", [])),
-                    )
-                    for entry in payload["data"].values()
-                ),
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            return self._stale(f"champion data for {version} was malformed: {error}")
+            LOGGER.debug("Refreshing champion catalog for patch %s", version)
+            payload = self._fetch_champions(version)
+            if payload is None:
+                return self._stale(f"could not fetch champion data for {version}")
 
-        with self._lock:
-            self._catalog = catalog
-            self._loaded_at = now
-        return catalog
+            try:
+                catalog = ChampionCatalog(
+                    version,
+                    (
+                        Champion(
+                            key=int(entry["key"]),
+                            internal_id=entry["id"],
+                            name=entry["name"],
+                            tags=tuple(entry.get("tags", [])),
+                        )
+                        for entry in payload["data"].values()
+                    ),
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                return self._stale(f"champion data for {version} was malformed: {error}")
+
+            with self._lock:
+                self._catalog = catalog
+                self._loaded_at = time.monotonic()
+            LOGGER.info("Loaded champion catalog: patch=%s champions=%d", version, len(catalog.champions))
+            return catalog
 
     def _stale(self, reason: str) -> ChampionCatalog | None:
         """Fall back to the last good catalog.
@@ -228,7 +262,9 @@ class _CatalogLoader:
         try:
             response = requests.get(_VERSIONS_URL, timeout=_TIMEOUT)
             response.raise_for_status()
-            return response.json()[0]
+            version = response.json()[0]
+            LOGGER.debug("Fetched current League version: %s", version)
+            return version
         except (
             requests.RequestException,
             IndexError,
@@ -294,6 +330,35 @@ def current_version() -> str | None:
     return _loader.version()
 
 
+def recent_patch_prefixes(count: int = 6) -> tuple[str, ...]:
+    """Return the newest distinct major/minor League patches."""
+    global _PATCH_WINDOW, _PATCH_WINDOW_CHECKED_AT
+    now = time.monotonic()
+    with _PATCH_WINDOW_LOCK:
+        if _PATCH_WINDOW and now - _PATCH_WINDOW_CHECKED_AT < _REFRESH_SECONDS:
+            return _PATCH_WINDOW[:count]
+    try:
+        response = requests.get(_VERSIONS_URL, timeout=_TIMEOUT)
+        response.raise_for_status()
+        versions = response.json()
+        prefixes: list[str] = []
+        for version in versions:
+            match = re.match(r"^(\d+\.\d+)", str(version))
+            if match and match.group(1) not in prefixes:
+                prefixes.append(match.group(1))
+            if len(prefixes) >= count:
+                break
+        with _PATCH_WINDOW_LOCK:
+            _PATCH_WINDOW = tuple(prefixes)
+            _PATCH_WINDOW_CHECKED_AT = time.monotonic()
+        LOGGER.info("Current League patch window: %s", ", ".join(prefixes))
+        return tuple(prefixes)
+    except (requests.RequestException, TypeError, ValueError):
+        LOGGER.warning("Could not refresh the recent League patch window")
+        with _PATCH_WINDOW_LOCK:
+            return _PATCH_WINDOW[:count]
+
+
 def champion_name(
     champion_key: int | str | None, default: str | None = None
 ) -> str | None:
@@ -343,6 +408,7 @@ def map_image(map_id: int | None, version: str | None = None) -> bytes | None:
             return _map_images[key]
 
     url = f"{_CDN}/{version}/img/map/map{map_id}.png"
+    LOGGER.debug("Fetching map art %s", url)
     try:
         response = requests.get(url, timeout=_TIMEOUT)
         response.raise_for_status()
@@ -368,12 +434,14 @@ def _asset_name_map(cache_key: str, url: str, builder: Any) -> dict[str, str]:
     with _asset_names_lock:
         cached = _asset_names.get(cache_key)
     if cached is not None:
+        LOGGER.debug("Asset name cache hit: %s", cache_key)
         return cached
     with _asset_names_fetch_lock(cache_key):
         with _asset_names_lock:
             cached = _asset_names.get(cache_key)
         if cached is not None:
             return cached
+        LOGGER.debug("Asset name cache miss: %s, fetching %s", cache_key, url)
         try:
             response = requests.get(url, timeout=_TIMEOUT)
             response.raise_for_status()
@@ -383,22 +451,60 @@ def _asset_name_map(cache_key: str, url: str, builder: Any) -> dict[str, str]:
             return {}
         with _asset_names_lock:
             _asset_names[cache_key] = mapping
+        LOGGER.info("Loaded Data Dragon asset names: %s entries=%d", cache_key, len(mapping))
         return mapping
 
 
 def item_name(item_id: int | str | None) -> str | None:
     """Display name for a Data Dragon item id (e.g. 3020 → "Sorcerer's Shoes")."""
-    version = current_version()
-    if item_id is None or not version:
+    try:
+        identifier = int(item_id) if item_id is not None else None
+    except (TypeError, ValueError):
         return None
-    names = _asset_name_map(
+    if identifier is None:
+        return None
+    metadata = item_metadata().get(identifier)
+    return metadata.name if metadata else None
+
+
+def item_metadata() -> dict[int, ItemMetadata]:
+    """Return the current patch's normalized item metadata, keyed by item id."""
+    version = current_version()
+    if not version:
+        return {}
+
+    def item_ids(raw_ids: Any) -> tuple[int, ...]:
+        result: list[int] = []
+        for raw_id in raw_ids or ():
+            try:
+                result.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        return tuple(result)
+
+    def build(payload: Any) -> dict[str, ItemMetadata]:
+        result: dict[str, ItemMetadata] = {}
+        for raw_id, entry in payload["data"].items():
+            try:
+                identifier = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            result[str(identifier)] = ItemMetadata(
+                identifier=identifier,
+                name=str(entry.get("name") or f"Item {identifier}"),
+                tags=tuple(str(tag) for tag in (entry.get("tags") or ())),
+                from_ids=item_ids(entry.get("from")),
+                depth=int(entry["depth"]) if entry.get("depth") is not None else None,
+                into_ids=item_ids(entry.get("into")),
+            )
+        return result
+
+    raw = _asset_name_map(
         f"items:{version}",
         f"{_CDN}/{version}/data/en_US/item.json",
-        lambda payload: {
-            item_key: entry.get("name", item_key) for item_key, entry in payload["data"].items()
-        },
+        build,
     )
-    return names.get(str(item_id))
+    return {int(identifier): metadata for identifier, metadata in raw.items() if isinstance(metadata, ItemMetadata)}
 
 
 def rune_name(rune_id: int | str | None) -> str | None:

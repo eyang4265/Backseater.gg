@@ -6,6 +6,10 @@ of ``_SELFTEST_RANKED_QUEUES``), which had already drifted apart.
 
 from __future__ import annotations
 
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
 SOLO_QUEUE_ID = 420
 FLEX_QUEUE_ID = 440
 ARENA_QUEUE_IDS = frozenset({1700, 1710, 1750})
@@ -72,29 +76,17 @@ def is_ranked(queue_id: int | None) -> bool:
     return queue_id in RANKED_QUEUE_IDS
 
 
-# Queue ids currently queueable in the live client, offered by /matchhistory's
-# game_mode filter. League rotates modes in and out with patches and events,
-# and there's no reliable public API for "what's queueable right now" (Riot's
-# queues.json leaves most retired rotating modes unmarked) — so this is a
-# hand-maintained allowlist. Update it when a mode is added, retired, or its
-# queue id changes; bot startup calls validate_current_queue_ids() to catch a
-# stale/typo'd id here (one that no longer maps to a QUEUE_NAMES entry).
+# Queue ids offered by the /matchhistory and /duo game_mode filters. Keep this
+# intentionally limited to the supported modes shown to users; bot startup
+# still validates the ids against QUEUE_NAMES.
 CURRENT_QUEUE_IDS: frozenset[int] = frozenset(
     {
         400,  # Normal (Draft)
         420,  # Ranked Solo/Duo
-        430,  # Normal (Blind)
         440,  # Ranked Flex
         450,  # ARAM
-        480,  # Swiftplay
-        490,  # Normal (Quickplay)
-        700,  # Clash
-        870,  # Co-op vs AI (Intro)
-        880,  # Co-op vs AI (Beginner)
-        890,  # Co-op vs AI (Intermediate)
         1700,  # Arena
         1710,  # Arena
-        2300,  # Brawl
     }
 )
 
@@ -113,4 +105,9 @@ def validate_current_queue_ids() -> tuple[int, ...]:
     mistyped id in the allowlist logs a warning instead of the mode it was
     meant to add just silently never showing up.
     """
-    return tuple(sorted(queue_id for queue_id in CURRENT_QUEUE_IDS if queue_id not in QUEUE_NAMES))
+    stale = tuple(sorted(queue_id for queue_id in CURRENT_QUEUE_IDS if queue_id not in QUEUE_NAMES))
+    if stale:
+        LOGGER.warning("CURRENT_QUEUE_IDS has unmapped queue ids: %s", stale)
+    else:
+        LOGGER.debug("CURRENT_QUEUE_IDS validated: %d queue ids all mapped", len(CURRENT_QUEUE_IDS))
+    return stale

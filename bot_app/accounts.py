@@ -32,8 +32,10 @@ def refresh_riot_ids() -> RiotIdRefresh:
     accounts = load_accounts()
     result = RiotIdRefresh()
     if not accounts:
+        LOGGER.debug("Riot id refresh requested with no tracked accounts")
         return result
 
+    LOGGER.info("Refreshing riot ids for %d tracked accounts", len(accounts))
     client = get_client()
 
     def resolve(account: Account) -> tuple[Account, str | None]:
@@ -47,12 +49,18 @@ def refresh_riot_ids() -> RiotIdRefresh:
                 result.failed.append(
                     f"<@{account.discord_id}>: could not update {account.riot_id}"
                 )
+                LOGGER.debug("Riot id refresh failed for %s", account.riot_id)
             elif riot_id != account.riot_id:
                 result.changed.append(f"{account.riot_id} -> {riot_id}")
                 updated[account.discord_id] = replace(account, riot_id=riot_id)
+                LOGGER.debug("Riot id changed: %s -> %s", account.riot_id, riot_id)
             else:
                 result.unchanged += 1
 
     if result.changed:
         save_accounts(updated)
+    LOGGER.info(
+        "Riot id refresh complete: changed=%d unchanged=%d failed=%d",
+        len(result.changed), result.unchanged, len(result.failed),
+    )
     return result

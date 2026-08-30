@@ -1,21 +1,218 @@
 """Shared embed layout regression tests."""
 
+from __future__ import annotations
+
 import unittest
 from unittest.mock import patch
 
+from bot_app.rating import PlayerRating, RatingBuckets
 from bot_app.render import (
     NameStyle,
+    RatingColumns,
     TeamColumns,
     _PlayerLookup,
     _Row,
     _columns_from_rows,
+    add_rating_columns,
     add_team_columns,
     build_match_columns,
+    _final_items_text,
+    build_rating_columns,
     make_embed,
+    rank_text,
 )
+from bot_app.ranks import RankSnapshot
+
+
+class InventoryBootFallbackTests(unittest.TestCase):
+    """ADC inventory rows recover boots omitted from final Match-V5 slots."""
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_adc_uses_last_purchased_boot_when_final_slots_have_none(
+        self, *_mocks: object
+    ) -> None:
+        """The latest purchased boot is shown even when final slots replaced it."""
+        participant = {
+            "participantId": 9,
+            "teamPosition": "BOTTOM",
+            "item0": 3031,
+            "item1": 6672,
+            "item2": 3036,
+            "item3": 3085,
+            "item4": 1038,
+            "item5": 1037,
+            "item6": 3340,
+        }
+        timeline = {
+            "info": {
+                "frames": [
+                    {"events": [{"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3006, "timestamp": 100}]},
+                    {"events": [{"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3020, "timestamp": 200}]},
+                ]
+            }
+        }
+
+        text = _final_items_text(participant, timeline)
+
+        self.assertIn("<3020>", text)
+        self.assertNotIn("<3006>", text)
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_adc_does_not_recover_a_boot_sold_later_in_the_timeline(
+        self, *_mocks: object
+    ) -> None:
+        """A sold or undone boot is not restored from the timeline fallback."""
+        participant = {
+            "participantId": 9,
+            "teamPosition": "BOTTOM",
+            "item0": 3031,
+            "item1": 6672,
+            "item2": 3036,
+            "item3": 3085,
+            "item4": 1038,
+            "item5": 1037,
+            "item6": 3340,
+        }
+        timeline = {
+            "info": {
+                "frames": [{"events": [
+                    {"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3020, "timestamp": 100},
+                    {"type": "ITEM_SOLD", "participantId": 9, "itemId": 3020, "timestamp": 200},
+                ]}]
+            }
+        }
+
+        text = _final_items_text(participant, timeline)
+
+        self.assertNotIn("<3020>", text)
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_adc_keeps_a_boot_moved_to_the_role_quest_slot(
+        self, *_mocks: object
+    ) -> None:
+        """Bot quest completion reports the boot move as ITEM_DESTROYED."""
+        participant = {
+            "participantId": 9,
+            "teamPosition": "BOTTOM",
+            "item0": 3031,
+            "item1": 6672,
+            "item2": 3036,
+            "item3": 3085,
+            "item4": 1038,
+            "item5": 1037,
+            "item6": 3340,
+        }
+        timeline = {
+            "info": {
+                "frames": [{"events": [
+                    {"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3020, "timestamp": 100},
+                    {"type": "ITEM_DESTROYED", "participantId": 9, "itemId": 3020, "timestamp": 200},
+                ]}]
+            }
+        }
+
+        text = _final_items_text(participant, timeline)
+
+        self.assertIn("<3020>", text)
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_adc_keeps_final_boot_instead_of_using_timeline_fallback(
+        self, *_mocks: object
+    ) -> None:
+        """A boot in final slots remains authoritative."""
+        participant = {
+            "participantId": 9,
+            "teamPosition": "BOTTOM",
+            "item0": 3031,
+            "item1": 3006,
+            "item2": 3036,
+            "item3": 3085,
+            "item4": 1038,
+            "item5": 1037,
+            "item6": 3340,
+        }
+        timeline = {
+            "info": {
+                "frames": [{"events": [
+                    {"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3020, "timestamp": 200},
+                ]}]
+            }
+        }
+
+        text = _final_items_text(participant, timeline)
+
+        self.assertIn("<3006>", text)
+        self.assertNotIn("<3020>", text)
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_manamune_3004_does_not_count_as_an_adc_boot(
+        self, *_mocks: object
+    ) -> None:
+        """Manamune 3004 must not suppress recovery of a purchased boot."""
+        participant = {
+            "participantId": 9,
+            "teamPosition": "BOTTOM",
+            "item0": 3004,
+            "item1": 3031,
+            "item2": 6672,
+            "item3": 3036,
+            "item4": 3085,
+            "item5": 1038,
+            "item6": 3340,
+        }
+        timeline = {
+            "info": {
+                "frames": [{"events": [
+                    {"type": "ITEM_PURCHASED", "participantId": 9, "itemId": 3020, "timestamp": 200},
+                ]}]
+            }
+        }
+
+        text = _final_items_text(participant, timeline)
+
+        self.assertIn("<3004>", text)
+        self.assertIn("<3020>", text)
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value=None)
+    @patch("bot_app.render.emoji_lookup.item_emoji", return_value=None)
+    def test_boot_3008_remains_visible_without_data_dragon_or_custom_emoji(
+        self, *_mocks: object
+    ) -> None:
+        """A missing catalog or guild emoji does not hide Gluttonous Greaves."""
+        participant = {
+            "participantId": 1,
+            "teamPosition": "TOP",
+            "item0": 3008,
+            "item6": 3340,
+        }
+
+        text = _final_items_text(participant)
+
+        self.assertIn("🥾", text)
 
 
 class TeamColumnLayoutTests(unittest.TestCase):
+    def test_ranked_solo_text_includes_win_rate(self) -> None:
+        """Ranked Solo/Duo standings include the account win rate."""
+        self.assertEqual(
+            rank_text(
+                RankSnapshot("GOLD", "II", 42, wins=29, losses=21),
+                with_winrate=True,
+            ),
+            "Gold II (42 LP) · 58%",
+        )
+
     def test_places_team_names_then_team_ranks_in_aligned_rows(self) -> None:
         """Blue/red names occupy the first row and their ranks the second."""
         embed = make_embed("Live game")
@@ -117,6 +314,91 @@ class TeamColumnLayoutTests(unittest.TestCase):
         )
 
         self.assertEqual(columns.blue_names, ["<:champ:1> Unranked"])
+
+
+def _rating(score: float, grade: str, label: str | None = None) -> PlayerRating:
+    """Handle rating."""
+    return PlayerRating(
+        puuid="",
+        participant_id=0,
+        champion="Ahri",
+        role="MIDDLE",
+        team_id=100,
+        score=score,
+        grade=grade,
+        composite=0.0,
+        buckets=RatingBuckets(50.0, 50.0, 50.0, 50.0, 50.0, 50.0),
+        label=label,
+    )
+
+
+class RatingColumnLayoutTests(unittest.TestCase):
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
+    def test_score_and_kda_columns_line_up_with_the_name_column(
+        self, *_mocks: object
+    ) -> None:
+        """Verify that score and kda columns line up with the name column."""
+        match = {
+            "info": {
+                "queueId": 420,
+                "participants": [
+                    {
+                        "puuid": "blue",
+                        "teamId": 100,
+                        "teamPosition": "TOP",
+                        "championName": "Ahri",
+                        "kills": 2,
+                        "deaths": 1,
+                        "assists": 3,
+                    },
+                    {
+                        "puuid": "red",
+                        "teamId": 200,
+                        "teamPosition": "TOP",
+                        "championName": "Garen",
+                        "kills": 1,
+                        "deaths": 4,
+                        "assists": 2,
+                    },
+                ],
+            }
+        }
+        ratings = {
+            "blue": _rating(7.4, "A", label="MVP"),
+            "red": _rating(3.1, "D"),
+        }
+        columns = build_rating_columns(match, ratings)
+
+        self.assertEqual(columns.blue_scores, ["7.4 A · MVP"])
+        self.assertEqual(columns.blue_kda, ["2/1/3"])
+        self.assertEqual(columns.red_scores, ["3.1 D"])
+        self.assertEqual(columns.red_kda, ["1/4/2"])
+
+        embed = make_embed("Ratings")
+        add_rating_columns(embed, columns)
+        self.assertEqual(
+            [field.name for field in embed.fields],
+            ["Blue Team", "Score", "K/D/A", "Red Team", "Score", "K/D/A"],
+        )
+
+    def test_unrated_player_shows_an_em_dash(self) -> None:
+        """Verify that an unrated player shows an em dash instead of a blank."""
+        match = {
+            "info": {
+                "queueId": 420,
+                "participants": [
+                    {"puuid": "blue", "teamId": 100, "championName": "Ahri"}
+                ],
+            }
+        }
+        columns = build_rating_columns(match, {})
+        self.assertEqual(columns.blue_scores, ["—"])
+
+    def test_empty_lobby_produces_no_columns(self) -> None:
+        """Verify that an empty lobby produces no columns."""
+        columns = build_rating_columns({"info": {"participants": []}}, {})
+        self.assertEqual(columns, RatingColumns())
 
 
 if __name__ == "__main__":

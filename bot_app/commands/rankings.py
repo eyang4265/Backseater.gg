@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import discord
@@ -19,6 +20,7 @@ from ..store import load_accounts, load_tracker_state
 from ..tracker import fetch_all_rank_snapshots
 from .shared import GUILD_IDS, SERVERS, log_command, not_found_embed, target_for
 
+LOGGER = logging.getLogger(__name__)
 LEADERBOARD_PAGE_SIZE = 10
 
 
@@ -62,14 +64,15 @@ class RankingCommands(commands.Cog):
         """Initialize the instance."""
         self.bot = bot
 
-    async def _history_target(self, ctx, server, summoner, user):
+    async def _history_target(self, ctx, server, username):
         """Handle target."""
-        target = await target_for(ctx, server, summoner, user, include_icon=False)
+        target = await target_for(ctx, server, username, include_icon=False)
         if target is None:
-            await ctx.respond(embed=not_found_embed(summoner, server, user=user))
+            await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return None, None
         state = await asyncio.to_thread(_target_state, target)
         if state is None:
+            LOGGER.info("LP history unavailable: %s is not a tracked account", target.riot_id)
             await ctx.respond(
                 embed=make_embed("LP history is only available for tracked accounts.")
             )
@@ -80,21 +83,21 @@ class RankingCommands(commands.Cog):
         guild_ids=GUILD_IDS, description="Show today's stored LP changes"
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option(
         "queue", description="Ranked queue", choices=["solo", "flex"], required=False
     )
-    async def today(self, ctx, server, summoner, user, queue="solo"):
+    async def today(self, ctx, server, username, queue="solo"):
         """Handle today."""
         log_command(
-            ctx, server=server, summoner=summoner, user=user, queue=queue
+            ctx, server=server, username=username, queue=queue
         )
         await ctx.defer()
-        target, state = await self._history_target(ctx, server, summoner, user)
+        target, state = await self._history_target(ctx, server, username)
         if state is None:
             return
         entries = since_local_midnight(state, _queue_id(queue), get_settings().timezone)
+        LOGGER.debug("/today: %d entries since local midnight for %s (queue=%s)", len(entries), target.riot_id, queue)
         if not entries:
             await ctx.respond(
                 embed=make_embed(
@@ -102,16 +105,12 @@ class RankingCommands(commands.Cog):
                 )
             )
             return
-        await ctx.respond(
-            embed=make_embed(
-                summary_text(summarize(entries)), title=f"Today — {target.riot_id}"
-            )
-        )
+        embed = make_embed(summary_text(summarize(entries)), title=f"Today — {target.riot_id}")
+        await ctx.respond(embed=embed)
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Graph stored LP history")
     @discord.option("server", description="Server", choices=SERVERS, required=False)
-    @discord.option("summoner", description="Game Name", required=False)
-    @discord.option("user", description="User (defaults to you)", required=False)
+    @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option(
         "queue", description="Ranked queue", choices=["solo", "flex"], required=False
     )
@@ -123,21 +122,21 @@ class RankingCommands(commands.Cog):
         max_value=365,
         required=False,
     )
-    async def lpgraph(self, ctx, server, summoner, user, queue="solo", days=30):
+    async def lpgraph(self, ctx, server, username, queue="solo", days=30):
         """Handle lpgraph."""
         log_command(
             ctx,
             server=server,
-            summoner=summoner,
-            user=user,
+            username=username,
             queue=queue,
             days=days,
         )
         await ctx.defer()
-        target, state = await self._history_target(ctx, server, summoner, user)
+        target, state = await self._history_target(ctx, server, username)
         if state is None:
             return
         entries = state.history.get(_queue_id(queue), [])
+        LOGGER.debug("/lpgraph: %d history entries for %s (queue=%s, days=%d)", len(entries), target.riot_id, queue, days)
         if not entries:
             await ctx.respond(
                 embed=make_embed(
@@ -150,9 +149,7 @@ class RankingCommands(commands.Cog):
             summary_text(summarize(entries)), title=f"LP History — {target.riot_id}"
         )
         if chart is None:
-            embed.set_footer(
-                text="Chart rendering is unavailable; showing the text summary."
-            )
+            embed.set_footer(text="Chart rendering is unavailable; showing the text summary.")
             await ctx.respond(embed=embed)
             return
         embed.set_image(url=f"attachment://{LP_CHART_FILENAME}")
@@ -179,7 +176,9 @@ class RankingCommands(commands.Cog):
         await ctx.defer()
         overrides = None
         if refresh:
+            LOGGER.info("/leaderboard: refreshing all rank snapshots (requested by %s)", ctx.author)
             overrides, _failed = await asyncio.to_thread(fetch_all_rank_snapshots)
+            LOGGER.debug("/leaderboard: refresh returned %d overrides, %d failed", len(overrides or {}), len(_failed or []))
         accounts, state = await asyncio.gather(
             asyncio.to_thread(load_accounts), asyncio.to_thread(load_tracker_state)
         )

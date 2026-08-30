@@ -10,7 +10,11 @@ request URLs against the host ``None.api.riotgames.com``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from urllib.parse import quote
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,23 @@ SERVERS: list[str] = [platform.code for platform in _PLATFORMS]
 
 DEFAULT_PLATFORM = "NA1"
 
+SEARCH_PLATFORMS: tuple[str, ...] = ("NA1", "EUW1", "KR")
+"""Platforms every riot-id lookup sweeps, in order, whatever server was asked for."""
+
+
+def lookup_platforms(code: str | None) -> list[str]:
+    """Order the platforms a riot-id lookup should try.
+
+    A supplied server only decides which platform is checked *first*: NA, EUW,
+    and KR are always swept afterwards, so an account named on one server but
+    living on another is still found.
+    """
+    chosen = code.upper() if code else None
+    ordered = [chosen] if chosen in PLATFORMS else []
+    ordered += [item for item in SEARCH_PLATFORMS if item not in ordered]
+    LOGGER.debug("Lookup platforms for %r -> %s", code, ordered)
+    return ordered
+
 
 def platform(code: str | None) -> Platform | None:
     """Handle platform."""
@@ -74,8 +95,6 @@ def match_route(code: str | None) -> str | None:
 
 def opgg_url(code: str | None, riot_id: str | None) -> str | None:
     """Profile link for a ``Name#Tag`` riot id, or None when it can't be built."""
-    from urllib.parse import quote
-
     found = platform(code)
     if found is None or found.opgg_slug is None or not riot_id or "#" not in riot_id:
         return None
@@ -87,8 +106,6 @@ def opgg_champion_url(
     code: str | None, internal_id: str | None, position: str | None = None
 ) -> str | None:
     """Return an OP.GG champion stats/build URL for a platform and role."""
-    from urllib.parse import quote
-
     if code and code.upper() == "GLOBAL":
         if not internal_id:
             return None

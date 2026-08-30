@@ -15,9 +15,12 @@ binary search, and classified once for the entire match.
 
 from __future__ import annotations
 
+import logging
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 
 SOLO_KILL_PROXIMITY = 1400
@@ -59,6 +62,44 @@ class LaneDiff:
     xp: int
     levels: float
     cs: int
+
+
+OBJECTIVE_PROXIMITY = 2200
+
+
+DEATH_COST_FLOOR = 0.3
+
+
+@dataclass(frozen=True)
+class BountyLedger:
+    """Gold a player took off the enemy, and gold they handed back.
+
+    ``given`` is time-weighted rather than a plain sum: see
+    :func:`death_time_factor`. Both sides are gold, not death counts, which is
+    what keeps a strategy built on cheap repeated deaths from being scored as
+    if every one of them were a late-game shutdown.
+    """
+
+    earned: float = 0.0
+    given: float = 0.0
+
+
+def death_time_factor(timestamp: int, duration_ms: int) -> float:
+    """How much a death at ``timestamp`` counts, from 0.3 early to 1.0 at the end.
+
+    A death two minutes in costs the game very little no matter what the
+    bounty says; the same bounty at minute 35 can be the game. Scaling by
+    elapsed fraction is the cheapest way to say so, and it means a rating
+    built on this never has to special-case early aggression.
+    """
+    if duration_ms <= 0:
+        return 1.0
+    elapsed = timestamp / duration_ms
+    if elapsed <= 0:
+        return DEATH_COST_FLOOR
+    if elapsed >= 1:
+        return 1.0
+    return DEATH_COST_FLOOR + (1.0 - DEATH_COST_FLOOR) * elapsed
 
 
 MAX_LEVEL = 18
@@ -187,6 +228,10 @@ class MatchTimeline:
         )
         self._solo_kills: list[dict[str, Any]] | None = None
         self._champion_kills: list[KillEvent] | None = None
+        self._all_events_cache: list[dict[str, Any]] | None = None
+        self._raw_champion_kills_cache: list[dict[str, Any]] | None = None
+        self._elite_monster_events_cache: list[dict[str, Any]] | None = None
+        LOGGER.debug("Indexed timeline with %d frames", len(self._frames))
 
     def _frame_index_at_or_before(self, timestamp: int) -> int | None:
         """Handle index at or before."""
@@ -361,9 +406,203 @@ class MatchTimeline:
             cs=_cs(mine) - _cs(theirs),
         )
 
+    def stats_at(
+        self, participant_id: int | None, timestamp: int
+    ) -> dict[str, int] | None:
+        """Raw gold/xp/cs for one participant at a point in the game, or None.
+
+        Companion to :meth:`lane_diff_at` for callers that want both sides'
+        absolute values (e.g. side-by-side embed columns) rather than only
+        the signed difference.
+        """
+        if participant_id is None:
+            return None
+
+        index = self._nearest_frame_index(timestamp)
+        if (
+            index is None
+            or abs(self._timestamps[index] - timestamp) > LANE_DIFF_TOLERANCE_MS
+        ):
+            return None
+
+        frame = self._frames[index].get("participantFrames", {}).get(str(participant_id))
+        if frame is None:
+            return None
+
+        return {
+            "gold": frame.get("totalGold", 0),
+            "xp": frame.get("xp", 0),
+            "cs": _cs(frame),
+        }
+
     def duration_ms(self) -> int:
         """Timestamp of the last frame — the game's length, to the nearest frame."""
         return self._timestamps[-1] if self._timestamps else 0
+
+    def _raw_champion_kills(self) -> list[dict[str, Any]]:
+        """Every ``CHAMPION_KILL`` event, positions optional.
+
+        :meth:`champion_kills` drops events without coordinates because it
+        feeds a map plot. Bounty accounting wants all of them.
+        """
+        if self._raw_champion_kills_cache is None:
+            self._raw_champion_kills_cache = [
+                event
+                for frame in self._frames
+                for event in frame.get("events", [])
+                if event.get("type") == "CHAMPION_KILL"
+            ]
+        return self._raw_champion_kills_cache
+
+    def bounty_ledger(self, participant_id: int | None) -> BountyLedger:
+        """Kill gold one player took, and the time-weighted gold they gave back.
+
+        Killers take the whole bounty; assists split an equal share with the
+        killer, so a five-man collapse does not credit five players with the
+        full amount. Deaths are weighted by :func:`death_time_factor`.
+        """
+        if participant_id is None:
+            return BountyLedger()
+
+        duration = self.duration_ms()
+        earned = 0.0
+        given = 0.0
+        for event in self._raw_champion_kills():
+            value = float(event.get("bounty") or 0) + float(
+                event.get("shutdownBounty") or 0
+            )
+            if not value:
+                continue
+            assists = event.get("assistingParticipantIds") or ()
+            if event.get("killerId") == participant_id:
+                earned += value / (len(assists) + 1)
+            elif participant_id in assists:
+                earned += value / (len(assists) + 1)
+            if event.get("victimId") == participant_id:
+                given += value * death_time_factor(event.get("timestamp", 0), duration)
+        return BountyLedger(earned=earned, given=given)
+
+    def _all_events(self) -> list[dict[str, Any]]:
+        """Handle events."""
+        if self._all_events_cache is None:
+            self._all_events_cache = [
+                event for frame in self._frames for event in frame.get("events", [])
+            ]
+        return self._all_events_cache
+
+    def _event_participation(self, participant_id: int | None, event_type: str) -> int:
+        """Events of ``event_type`` this player was the killer or an explicit assistant on.
+
+        Deliberately credit-only, not proximity-based: rating.md §2 draws a
+        hard line against treating a nearby frame sample as proof of
+        participation, so unlike :meth:`objective_presence` (used elsewhere
+        for the jungle-proximity feature) this never falls back to position.
+        """
+        if participant_id is None:
+            return 0
+        return sum(
+            1
+            for event in self._all_events()
+            if event.get("type") == event_type
+            and (
+                event.get("killerId") == participant_id
+                or participant_id in (event.get("assistingParticipantIds") or ())
+            )
+        )
+
+    def epic_event_participation(self, participant_id: int | None) -> int:
+        """Epic-monster takedowns this player got explicit killer/assist credit for."""
+        return self._event_participation(participant_id, "ELITE_MONSTER_KILL")
+
+    def building_event_participation(self, participant_id: int | None) -> int:
+        """Turret/inhibitor takedowns this player got explicit killer/assist credit for."""
+        return self._event_participation(participant_id, "BUILDING_KILL")
+
+    def jungle_cs_diff_at(
+        self, participant_id: int | None, opponent_id: int | None, timestamp: int
+    ) -> int | None:
+        """Neutral-jungle-only CS advantage over the lane opponent at a mark.
+
+        Separate from :meth:`lane_diff_at`'s ``cs`` field, which includes lane
+        minions: two junglers' farm gap is a jungle-camp story, and mixing in
+        lane CS (usually near zero for both) would only add noise.
+        """
+        if participant_id is None or opponent_id is None:
+            return None
+        index = self._nearest_frame_index(timestamp)
+        if (
+            index is None
+            or abs(self._timestamps[index] - timestamp) > LANE_DIFF_TOLERANCE_MS
+        ):
+            return None
+        participant_frames = self._frames[index].get("participantFrames", {})
+        mine = participant_frames.get(str(participant_id))
+        theirs = participant_frames.get(str(opponent_id))
+        if mine is None or theirs is None:
+            return None
+        return mine.get("jungleMinionsKilled", 0) - theirs.get("jungleMinionsKilled", 0)
+
+    def objective_presence(
+        self,
+        participant_id: int | None,
+        team_participant_ids: frozenset[int] | None = None,
+        radius: int = OBJECTIVE_PROXIMITY,
+    ) -> int:
+        """Team objectives this player was actually present for.
+
+        Takedown credit in the post-game stats is generous — it counts anyone
+        alive on the map. This counts an objective only when the player landed
+        the blow, assisted, or stood within ``radius`` of it at the nearest
+        frame, which is the difference between showing up for a Baron and
+        being in the enemy bot lane while it happened.
+
+        ``team_participant_ids`` restricts the count to objectives this
+        player's team took; pass None to count every objective on the map.
+        """
+        if participant_id is None:
+            return 0
+
+        present = 0
+        # This is intentionally narrower than general objective contribution:
+        # the rating's presence metric concerns epic monsters only. Turrets
+        # and plates are scored separately.
+        if self._elite_monster_events_cache is None:
+            self._elite_monster_events_cache = [
+                event
+                for frame in self._frames
+                for event in frame.get("events", [])
+                if event.get("type") == "ELITE_MONSTER_KILL"
+            ]
+        for event in self._elite_monster_events_cache:
+            killer_id = event.get("killerId")
+            if team_participant_ids is not None and (
+                killer_id not in team_participant_ids
+            ):
+                continue
+            assists = event.get("assistingParticipantIds") or ()
+            if killer_id == participant_id or participant_id in assists:
+                present += 1
+                continue
+            if self._within(participant_id, event, radius):
+                present += 1
+        return present
+
+    def _within(
+        self, participant_id: int, event: dict[str, Any], radius: int
+    ) -> bool:
+        """Whether the player stood within ``radius`` of an event's position."""
+        position = event.get("position")
+        if not position:
+            return False
+        index = self._nearest_frame_index(event.get("timestamp", 0))
+        if index is None:
+            return False
+        location = self._frame_positions(index).get(participant_id)
+        if location is None:
+            return False
+        dx = position.get("x", 0) - location[0]
+        dy = position.get("y", 0) - location[1]
+        return dx * dx + dy * dy <= radius**2
 
     def lane_diff_series(
         self,
@@ -389,4 +628,10 @@ class MatchTimeline:
             diff = self.lane_diff_at(participant_id, opponent_id, timestamp, max_level)
             if diff is not None:
                 series.append((timestamp // 60_000, diff))
+        LOGGER.debug(
+            "Lane diff series for participant %s vs %s: %d marks",
+            participant_id,
+            opponent_id,
+            len(series),
+        )
         return series

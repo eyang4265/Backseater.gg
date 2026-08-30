@@ -2,6 +2,8 @@
 
 Every writer goes through :func:`write_json`, which writes to a sibling temp
 file and renames, so a crash mid-write can't truncate a state file.
+Persistent Discord component records are delegated to incremental SQLite
+storage, with the former JSON file retained only as a backward import/fallback.
 """
 
 from __future__ import annotations
@@ -43,8 +45,11 @@ def read_json(path: Path, default: Any) -> Any:
     """Read json."""
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+            payload = json.load(handle)
+            LOGGER.debug("Read %s", path)
+            return payload
     except FileNotFoundError:
+        LOGGER.debug("%s does not exist; using default", path)
         return default
     except (json.JSONDecodeError, OSError, ValueError) as error:
         LOGGER.warning("Could not read %s (%s); using default", path, error)
@@ -59,14 +64,28 @@ def write_json(path: Path, payload: Any, *, indent: int = 2) -> None:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=indent)
         temporary.replace(path)
+        LOGGER.debug("Wrote %s", path)
 
 
 def load_embed_button_states() -> list[dict[str, Any]]:
-    """Load Discord message records used to restore persistent embed views."""
+    """Load persistent views from SQLite, importing the legacy JSON once.
+
+    The former JSON implementation rewrote every full Match-V5 payload for
+    every new message.  Existing installations retain that file as a
+    backward-compatible import source, while all current reads and writes are
+    incremental SQLite operations.
+    """
+    from .match_cache import get_match_cache
+
+    cache = get_match_cache()
+    stored = cache.load_embed_button_states()
+    if stored:
+        return stored
+
     raw = read_json(EMBED_BUTTON_STATE_PATH, [])
     if not isinstance(raw, list):
         return []
-    return [
+    legacy = [
         entry
         for entry in raw
         if isinstance(entry, dict)
@@ -74,12 +93,29 @@ def load_embed_button_states() -> list[dict[str, Any]]:
         and isinstance(entry.get("kind"), str)
         and isinstance(entry.get("payload"), dict)
     ]
+    if legacy:
+        imported = cache.import_embed_button_states(legacy)
+        if imported:
+            LOGGER.info("Imported %d legacy persistent view records into SQLite", imported)
+            stored = cache.load_embed_button_states()
+            if stored:
+                return stored
+    return legacy
 
 
 def remember_embed_button_state(
     message_id: int, channel_id: int, kind: str, payload: dict[str, Any]
 ) -> None:
-    """Atomically remember one message's persistent embed view state."""
+    """Incrementally remember one persistent component view in SQLite."""
+    from .match_cache import get_match_cache
+
+    if get_match_cache().remember_embed_button_state(
+        message_id, channel_id, kind, payload
+    ):
+        return
+
+    # Preserve the old atomic JSON path as a degradation mode if SQLite is
+    # corrupt or unavailable; persistence should fail soft, not kill a command.
     with _write_lock:
         states = load_embed_button_states()
         states = [entry for entry in states if entry.get("message_id") != message_id]
@@ -147,6 +183,7 @@ def save_accounts(accounts: dict[str, Account]) -> None:
         {discord_id: account.to_json() for discord_id, account in accounts.items()},
         indent=4,
     )
+    LOGGER.info("Saved %d tracked accounts", len(accounts))
     _tracked_puuid_cache.invalidate()
 
 
@@ -307,6 +344,13 @@ class PlayerState:
         self.history.setdefault(queue_id, []).append(entry)
         self.history[queue_id] = self.history[queue_id][-RANK_HISTORY_LIMIT:]
         self.ranks[queue_id] = snapshot
+        LOGGER.debug(
+            "Recorded rank point for queue %s: value=%s delta=%s match=%s",
+            queue_id,
+            value,
+            delta,
+            match_id,
+        )
         return True
 
 

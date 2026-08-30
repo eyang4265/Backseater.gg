@@ -4,12 +4,30 @@ import ast
 import unittest
 from pathlib import Path
 
+import discord
+
+from bot_app.commands import register_all
 from bot_app.domain.ranks import RankSnapshot
 from bot_app.repositories.accounts import Account
 from bot_app.services.riot_api import RiotClient
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_slash_command_required_options_precede_optional_options(self) -> None:
+        """Prevent Discord from rejecting the entire bulk command sync."""
+        bot = discord.Bot()
+        register_all(bot)
+        for command in bot.pending_application_commands:
+            optional_seen = False
+            for option in command.options:
+                if not option.required:
+                    optional_seen = True
+                elif optional_seen:
+                    self.fail(
+                        f"/{command.qualified_name}: required option "
+                        f"{option.name!r} follows an optional option"
+                    )
+
     def test_public_boundaries_expose_their_primary_types(self) -> None:
         """Verify that public boundaries expose their primary types."""
         self.assertEqual(RankSnapshot.__name__, "RankSnapshot")
@@ -44,7 +62,14 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_pure_modules_do_not_import_io_layers(self) -> None:
         """Verify that pure modules do not import io layers."""
         root = Path(__file__).resolve().parents[1] / "bot_app"
-        pure = ["routing.py", "queues.py", "positions.py", "timeline.py", "history.py"]
+        pure = [
+            "routing.py",
+            "queues.py",
+            "positions.py",
+            "timeline.py",
+            "history.py",
+            "rating.py",
+        ]
         forbidden = {"riot", "ddragon", "store", "discord", "requests"}
         for filename in pure:
             tree = ast.parse((root / filename).read_text(encoding="utf-8"))

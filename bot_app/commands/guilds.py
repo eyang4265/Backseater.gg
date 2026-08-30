@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import discord
 from discord.ext import commands
@@ -10,6 +11,8 @@ from discord.ext import commands
 from ..render import make_embed
 from ..store import update_guild_channels
 from .shared import GUILD_IDS, log_command
+
+LOGGER = logging.getLogger(__name__)
 
 
 def set_guild_channel(guild_id: int | str, channel_id: int) -> None:
@@ -58,6 +61,7 @@ class GuildCommands(commands.Cog):
             return
         selected = channel or ctx.channel
         await asyncio.to_thread(set_guild_channel, ctx.guild.id, selected.id)
+        LOGGER.info("Guild %s announcement channel set to %s", ctx.guild.id, selected.id)
         await ctx.respond(
             embed=make_embed(f"Announcements will be posted in {selected.mention}."),
             ephemeral=True,
@@ -77,6 +81,7 @@ class GuildCommands(commands.Cog):
             )
             return
         removed = await asyncio.to_thread(unset_guild_channel, ctx.guild.id)
+        LOGGER.info("Guild %s announcement channel %s", ctx.guild.id, "removed" if removed else "was not configured")
         text = (
             "Announcement routing removed."
             if removed
