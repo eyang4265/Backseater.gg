@@ -1,4 +1,4 @@
-"""Pure aggregation for a player's champion matchup win rates."""
+"""Pure aggregation for a player's champion matchup win rates or 15-minute lane leads."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .champstats import ALL_GAMES, ALL_ROLES, ROLE_POSITION_IDS, queue_ids_for_scope
+from .timeline import MatchTimeline, opponent_participant_id
+
+
+_LANING_CHECKPOINT_MS = 15 * 60_000
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class CounterStatsReport:
     counters: tuple[CounterRecord, ...]
     enemy_role: str = ALL_ROLES
     usage_filter: bool = False
+    laning: bool = False
 
     @property
     def losses(self) -> int:
@@ -57,6 +62,8 @@ def aggregate(
     *,
     enemy_role: str = ALL_ROLES,
     min_usage_rate: float = 0.0,
+    timelines: dict[str, dict[str, Any]] | None = None,
+    laning: bool = False,
 ) -> CounterStatsReport:
     """Aggregate one row per enemy champion in each eligible completed game.
 
@@ -65,7 +72,9 @@ def aggregate(
     each enemy champion?" rather than only reporting lane opponents. ``role``
     filters the selected player's role; ``enemy_role`` optionally filters the
     opposing participants' roles. ``min_usage_rate`` removes matchups at or
-    below that share of eligible games.
+    below that share of eligible games. When ``laning`` is true, a game is a
+    win when the selected player has more total gold than their direct role
+    opponent at 15:00; ties and unavailable checkpoints are excluded.
     """
     allowed_queues = queue_ids_for_scope(queue_scope)
     allowed_player_positions = ROLE_POSITION_IDS.get(role) if role != ALL_ROLES else None
@@ -96,8 +105,6 @@ def aggregate(
                 continue
         if player.get("gameEndedInEarlySurrender"):
             continue
-        if match_id:
-            seen_matches.add(match_id)
         player_team = player.get("teamId")
         enemy_names = {
             str(row.get("championName") or "Unknown")
@@ -115,7 +122,23 @@ def aggregate(
         }
         if not enemy_names:
             continue
-        win = bool(player.get("win"))
+        if laning:
+            timeline = (timelines or {}).get(match_id)
+            opponent_id = opponent_participant_id(payload, player)
+            if timeline is None or opponent_id is None:
+                continue
+            match_timeline = MatchTimeline(timeline)
+            mine = match_timeline.stats_at(
+                player.get("participantId"), _LANING_CHECKPOINT_MS
+            )
+            theirs = match_timeline.stats_at(opponent_id, _LANING_CHECKPOINT_MS)
+            if mine is None or theirs is None or mine["gold"] == theirs["gold"]:
+                continue
+            win = mine["gold"] > theirs["gold"]
+        else:
+            win = bool(player.get("win"))
+        if match_id:
+            seen_matches.add(match_id)
         games += 1
         wins += int(win)
         for enemy in enemy_names:
@@ -139,5 +162,5 @@ def aggregate(
         for name in (row[2],)
     )
     return CounterStatsReport(
-        champion, queue_scope, role, games, wins, counters, enemy_role, bool(min_usage_rate)
+        champion, queue_scope, role, games, wins, counters, enemy_role, bool(min_usage_rate), laning
     )

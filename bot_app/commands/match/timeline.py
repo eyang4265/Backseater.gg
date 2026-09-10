@@ -31,12 +31,14 @@ from ...timeline import (
 )
 from ..shared import (
     GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
     SERVERS,
     Target,
     log_command,
     match_reference_index,
     not_found_embed,
     set_player_author,
+    target_at_match_position,
     target_for,
 )
 
@@ -73,7 +75,7 @@ class MatchCommands(commands.Cog):
     @discord.option(
         "position",
         int,
-        description="Slot 1-10: 1-5 blue top→support, 6-10 red. Reports on that player instead",
+        description=MATCH_POSITION_DESCRIPTION,
         min_value=1,
         max_value=10,
         required=False,
@@ -139,17 +141,7 @@ class MatchCommands(commands.Cog):
                     )
                 )
                 return
-            name = (
-                participant.get("riotIdGameName")
-                or participant.get("summonerName")
-                or "Unknown player"
-            )
-            tag_line = participant.get("riotIdTagline")
-            subject = Target(
-                puuid=participant.get("puuid", ""),
-                server=target.server,
-                riot_id=f"{name}#{tag_line}" if tag_line else name,
-            )
+            subject = target_at_match_position(match, position, target.server) or target
             LOGGER.debug("Reporting on position %d (%s) instead of %s", position, subject.riot_id, target.riot_id)
 
         try:

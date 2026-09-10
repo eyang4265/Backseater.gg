@@ -1,4 +1,4 @@
-"""Formatting and publishing match announcements.
+"""Formatting and publishing League and Teamfight Tactics announcements.
 
 Both pollers and ``/selftest`` share this. The two pollers previously carried
 their own copy of the publish step — resolve channel, build embed, build
@@ -11,7 +11,8 @@ import asyncio
 import io
 import logging
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 import discord
@@ -26,10 +27,9 @@ from .charts import (
 from .config import get_settings
 from .jungle_proximity_render import jungle_chart_checkpoints
 from .queues import FLEX_QUEUE_ID, RANKED_QUEUE_IDS, SOLO_QUEUE_ID, lobby_queue_name, queue_name
-from .ranks import RankSnapshot
+from .ranks import RankSnapshot, fetch_tft_rank
 from .rating import PlayerRating, rate_match
 from .render import (
-    NameStyle,
     add_inventory_columns,
     add_rating_columns,
     add_team_columns,
@@ -47,9 +47,12 @@ from .riot import RiotAPIError, TTLCache, get_client
 from .routing import opgg_url
 from .store import (
     load_accounts,
+    load_tft_accounts,
     load_embed_button_states,
     load_guild_channels,
+    pop_live_game_messages,
     remember_embed_button_state,
+    remember_live_game_message,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +61,13 @@ _UNSET = object()
 REMAKE = "Remake"
 VICTORY = "Victory"
 DEFEAT = "Defeat"
+
+# Completed TFT announcements pick a trailing embed column: nothing (Players),
+# every player's Ranked TFT standing (Ranks), or the synergies each ended on
+# (Traits).
+_TFT_MATCH_DISPLAY_PLAYERS = "players"
+_TFT_MATCH_DISPLAY_RANKS = "ranks"
+_TFT_MATCH_DISPLAY_TRAITS = "traits"
 
 
 @dataclass(frozen=True)
@@ -77,7 +87,9 @@ class MatchAnnouncement:
     outcome: str | None
     match: dict[str, Any]
     highlight_puuids: set[str]
-    name_style: NameStyle = NameStyle.SUMMONER
+    game_type: str = "lol"
+    # puuid -> already-formatted LP delta (e.g. "+24 LP"), tracked players only.
+    lp_changes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,7 @@ class LiveGameAnnouncement:
     text: str
     game: dict[str, Any]
     highlight_puuids: set[str]
+    game_type: str = "lol"
 
 
 def _announcement_payload(announcement: MatchAnnouncement) -> dict[str, Any]:
@@ -96,7 +109,8 @@ def _announcement_payload(announcement: MatchAnnouncement) -> dict[str, Any]:
         "outcome": announcement.outcome,
         "match": announcement.match,
         "highlight_puuids": sorted(announcement.highlight_puuids),
-        "name_style": announcement.name_style.value,
+        "game_type": announcement.game_type,
+        "lp_changes": dict(announcement.lp_changes),
     }
 
 
@@ -106,21 +120,19 @@ def _live_game_payload(announcement: LiveGameAnnouncement) -> dict[str, Any]:
         "text": announcement.text,
         "game": announcement.game,
         "highlight_puuids": sorted(announcement.highlight_puuids),
+        "game_type": announcement.game_type,
     }
 
 
 def _announcement_from_payload(payload: dict[str, Any]) -> MatchAnnouncement:
     """Restore a completed-match announcement from JSON state."""
-    try:
-        name_style = NameStyle(payload.get("name_style", NameStyle.SUMMONER.value))
-    except ValueError:
-        name_style = NameStyle.SUMMONER
     return MatchAnnouncement(
         text=str(payload.get("text", "")),
         outcome=payload.get("outcome"),
         match=payload.get("match", {}),
         highlight_puuids=set(payload.get("highlight_puuids", [])),
-        name_style=name_style,
+        game_type=str(payload.get("game_type", "lol")),
+        lp_changes=dict(payload.get("lp_changes", {}) or {}),
     )
 
 
@@ -130,7 +142,70 @@ def _live_game_from_payload(payload: dict[str, Any]) -> LiveGameAnnouncement:
         text=str(payload.get("text", "")),
         game=payload.get("game", {}),
         highlight_puuids=set(payload.get("highlight_puuids", [])),
+        game_type=str(payload.get("game_type", "lol")),
     )
+
+
+def _live_game_key(game: dict[str, Any]) -> str | None:
+    """The ``platform:gameId`` key a live lobby is tracked and deduplicated by.
+
+    Built the same way the poller builds its live-game state key
+    (``f"{server}:{game_id}"``) so a completed match id can be matched back to
+    the live announcement posted for it.
+    """
+    game_id = game.get("gameId")
+    platform = game.get("platformId") or game.get("platform")
+    if game_id is None or not platform:
+        return None
+    try:
+        return f"{platform}:{int(game_id)}"
+    except (TypeError, ValueError):
+        return None
+
+
+def live_game_key_from_match_id(match_id: str) -> str | None:
+    """Turn a finished ``PLATFORM_gameId`` match id into its live-lobby key."""
+    if not isinstance(match_id, str) or "_" not in match_id:
+        return None
+    platform, _, game_id = match_id.partition("_")
+    if not platform or not game_id.isdigit():
+        return None
+    return f"{platform}:{int(game_id)}"
+
+
+async def delete_live_game_messages(bot: Any, game_keys: Sequence[str]) -> None:
+    """Delete every automatic live-game announcement posted for ``game_keys``.
+
+    Called by the match poller once a lobby's game is over (announced, or seen
+    to have ended), so the "in a live game" post doesn't linger. Missing
+    messages, channels, or permissions are swallowed — the record is dropped
+    either way.
+    """
+    pairs = await asyncio.to_thread(pop_live_game_messages, game_keys)
+    if not pairs:
+        return
+    LOGGER.info("Deleting %d finished live-game announcement(s)", len(pairs))
+    for channel_id, message_id in pairs:
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(
+                channel_id
+            )
+            if channel is None:
+                continue
+            message = await channel.fetch_message(message_id)
+            await message.delete()
+            LOGGER.debug(
+                "Deleted live-game announcement channel=%s message=%s",
+                channel_id,
+                message_id,
+            )
+        except (discord.DiscordException, AttributeError) as error:
+            LOGGER.debug(
+                "Could not delete live-game announcement channel=%s message=%s: %s",
+                channel_id,
+                message_id,
+                error,
+            )
 
 
 async def remember_match_view_state(
@@ -219,14 +294,15 @@ def format_match(
     *,
     require_finished: bool = True,
     require_ranked_queue: bool = True,
-    name_style: NameStyle = NameStyle.SUMMONER,
+    game_type: str = "lol",
 ) -> MatchAnnouncement | None:
     """One announcement covering every tracked player in a match.
 
     ``require_finished`` and ``require_ranked_queue`` gate the two checks that
-    only make sense for the live poller (skip games still in progress; only
-    announce ranked). ``/selftest`` and the guest tracker turn them off so
-    they can render any match through this same code path.
+    restrict an announcement to a finished ranked game. ``require_ranked_queue``
+    defaults to True for callers that only ever want ranked games, but both the
+    match poller and the slash commands pass ``False`` so every queue a tracked
+    player finishes is rendered through this same code path.
 
     The full lobby isn't part of this text — callers add it as embed fields
     via :func:`build_match_columns`, so the rows line up in real columns.
@@ -235,6 +311,8 @@ def format_match(
     when they were on opposing teams; callers colour the embed by it.
     """
     info = match.get("info", {})
+    if game_type == "tft":
+        return _format_tft_match(match, players, require_finished=require_finished)
 
     if require_finished and not info.get("gameEndTimestamp"):
         LOGGER.debug("Skipping format_match: game not yet finished")
@@ -324,14 +402,16 @@ def format_match(
         outcome=outcome,
         match=match,
         highlight_puuids={player.puuid for player in players},
-        name_style=name_style,
+        game_type="lol",
     )
 
 
 def format_live_game(
-    game: dict[str, Any], players: Sequence[TrackedPlayer]
+    game: dict[str, Any], players: Sequence[TrackedPlayer], *, game_type: str = "lol"
 ) -> LiveGameAnnouncement | None:
     """Create the tracked-player summary for a newly detected live lobby."""
+    if game_type == "tft":
+        return _format_tft_live_game(game, players)
     participants = game.get("participants", []) or []
     catalog = ddragon.catalog()
     lines = []
@@ -372,7 +452,127 @@ def format_live_game(
         ),
         game=game,
         highlight_puuids=highlighted,
+        game_type="lol",
     )
+
+
+_TFT_QUEUE_NAMES = {
+    1090: "TFT Normal",
+    1100: "TFT Ranked",
+    1110: "TFT Tutorial",
+    1130: "TFT Hyper Roll",
+    1150: "TFT Double Up",
+    1160: "TFT Double Up (Ranked)",
+}
+
+
+def _tft_queue_name(queue_id: int | None, game_type: str | None = None) -> str:
+    """Human-readable TFT mode, retaining Riot's mode when the queue is new."""
+    if queue_id in _TFT_QUEUE_NAMES:
+        return _TFT_QUEUE_NAMES[queue_id]
+    if game_type:
+        cleaned = game_type.removeprefix("TFT_").replace("_", " ").title()
+        return f"TFT {cleaned}" if not cleaned.startswith("Tft") else cleaned
+    return "Teamfight Tactics"
+
+
+def _format_tft_match(
+    match: dict[str, Any],
+    players: Sequence[TrackedPlayer],
+    *,
+    require_finished: bool,
+) -> MatchAnnouncement | None:
+    """Format TFT placement results through the shared match announcement path."""
+    info = match.get("info", {})
+    participants = info.get("participants", []) or []
+    if require_finished and not participants:
+        return None
+    participants_by_puuid = {
+        participant.get("puuid"): participant
+        for participant in participants
+        if participant.get("puuid")
+    }
+    lines: list[tuple[str, str]] = []
+    outcomes: set[str] = set()
+    present: list[TrackedPlayer] = []
+    for player in players:
+        participant = participants_by_puuid.get(player.puuid)
+        if participant is None:
+            continue
+        present.append(player)
+        placement = int(participant.get("placement") or 0)
+        outcome = VICTORY if 0 < placement <= 4 else DEFEAT
+        outcomes.add(outcome)
+        place = f"#{placement}" if placement else "Unplaced"
+        level = _tft_stat(participant, "level")
+        lp_suffix = f" | {player.lp_change}" if player.lp_change else ""
+        lines.append(
+            (
+                outcome,
+                f"**{player.riot_id}** — {place} · Level {level or '?'}{lp_suffix}",
+            )
+        )
+    if not lines:
+        LOGGER.debug("Skipping TFT format_match: no tracked players found")
+        return None
+    game_length = float(info.get("game_length") or info.get("gameLength") or 0)
+    duration = format_duration(round(game_length))
+    # Match-V1 `game_datetime` is already the moment the game ended, and a match
+    # only enters the id history once it is over, so this is never in the future.
+    # Adding `game_length` on top of it pushed the "ended X" stamp a whole game
+    # ahead of the current time.
+    ended_ms = int(info.get("game_datetime") or info.get("gameDatetime") or 0)
+    ago = _relative_timestamp(ended_ms)
+    suffix = f" • {ago}" if ago else ""
+    mode = _tft_queue_name(
+        info.get("queue_id") or info.get("queueId"),
+        info.get("tft_game_type") or info.get("tftGameType"),
+    )
+    if len(outcomes) == 1:
+        outcome: str | None = next(iter(outcomes))
+        body = "\n".join(line for _, line in lines)
+        header = f"**{mode} - {outcome}** ({duration}){suffix}"
+    else:
+        outcome = None
+        body = "\n".join(f"**{result}** — {line}" for result, line in lines)
+        header = f"**{mode}** ({duration}){suffix}"
+    return MatchAnnouncement(
+        f"{header}\n{body}",
+        outcome,
+        match,
+        {player.puuid for player in present},
+        "tft",
+        lp_changes={
+            player.puuid: player.lp_change
+            for player in present
+            if player.lp_change
+        },
+    )
+
+
+def _format_tft_live_game(
+    game: dict[str, Any], players: Sequence[TrackedPlayer]
+) -> LiveGameAnnouncement | None:
+    """Format tracked TFT players in a live lobby without League-only fields."""
+    participant_puuids = {
+        participant.get("puuid")
+        for participant in game.get("participants", []) or []
+        if participant.get("puuid")
+    }
+    present = [player for player in players if player.puuid in participant_puuids]
+    if not present:
+        LOGGER.debug("Skipping TFT format_live_game: no tracked players found")
+        return None
+    length = int(game.get("gameLength") or 0)
+    start_ms = game.get("gameStartTime") or int(time.time() * 1000) - length * 1000
+    ago = _relative_timestamp(start_ms)
+    suffix = f" • started {ago}" if ago else ""
+    mode = _tft_queue_name(game.get("gameQueueConfigId"), game.get("gameType"))
+    text = (
+        f"**{mode} — Live Game** ({format_duration(length)}){suffix}\n"
+        + "\n".join(f"**{player.riot_id}**" for player in present)
+    )
+    return LiveGameAnnouncement(text, game, {player.puuid for player in present}, "tft")
 
 
 async def resolve_announcement_channel(bot: Any) -> Any | None:
@@ -405,9 +605,17 @@ async def resolve_announcement_channels(
         if configured is not None
         else await asyncio.to_thread(load_guild_channels)
     )
-    resolved_accounts = (
-        accounts if accounts is not None else await asyncio.to_thread(load_accounts)
-    )
+    if accounts is not None:
+        resolved_accounts = accounts
+    else:
+        league_accounts, tft_accounts = await asyncio.gather(
+            asyncio.to_thread(load_accounts),
+            asyncio.to_thread(load_tft_accounts),
+        )
+        resolved_accounts = {
+            **{f"lol:{key}": value for key, value in league_accounts.items()},
+            **{f"tft:{key}": value for key, value in tft_accounts.items()},
+        }
     if member_cache is None:
         member_cache = {}
     if channel_cache is None:
@@ -598,6 +806,7 @@ async def build_announcement_embed(
     show_mastery: bool = False,
     active_field: str = _DEFAULT_CHART_FIELD,
     existing_chart_url: str | None = None,
+    tft_display_mode: str = _TFT_MATCH_DISPLAY_PLAYERS,
 ) -> tuple[discord.Embed, discord.File | None]:
     """Render an announcement into an embed plus its optional chart attachment.
 
@@ -611,6 +820,15 @@ async def build_announcement_embed(
     Both the column lookups and the chart render are blocking, so each runs on
     a worker thread rather than on the event loop.
     """
+    if announcement.game_type == "tft":
+        embed = make_embed(
+            announcement.text, color=outcome_color(announcement.outcome)
+        )
+        await asyncio.to_thread(
+            _add_tft_match_fields, embed, announcement, mode=tft_display_mode
+        )
+        return embed, None
+
     LOGGER.debug(
         "Building match announcement embed: active_field=%s show_mastery=%s show_rank_names=%s",
         active_field, show_mastery, show_rank_names,
@@ -624,7 +842,6 @@ async def build_announcement_embed(
         server=info.get("platformId"),
         queue_id=rank_queue_id or info.get("queueId"),
         highlight_puuids=announcement.highlight_puuids,
-        name_style=announcement.name_style,
         show_rank_names=show_rank_names,
         show_mastery=show_mastery,
     )
@@ -652,7 +869,6 @@ async def build_live_game_embed(
     announcement: LiveGameAnnouncement,
     *,
     rank_queue_id: int | None = None,
-    name_style: NameStyle = NameStyle.SUMMONER,
     show_rank_names: bool = False,
     show_mastery: bool = False,
 ) -> discord.Embed:
@@ -663,6 +879,10 @@ async def build_live_game_embed(
     player's rank, matching the completed-match display behavior.
     """
     game = announcement.game
+    if announcement.game_type == "tft":
+        embed = make_embed(announcement.text, color=discord.Color.gold())
+        await asyncio.to_thread(_add_tft_live_fields, embed, announcement)
+        return embed
     LOGGER.debug("Building live-game announcement embed: show_mastery=%s show_rank_names=%s", show_mastery, show_rank_names)
     embed = make_embed(announcement.text, color=discord.Color.gold())
     columns = await asyncio.to_thread(
@@ -670,12 +890,227 @@ async def build_live_game_embed(
         game,
         game.get("platformId") or "NA1",
         queue_id=rank_queue_id,
-        name_style=name_style,
         show_rank_names=show_rank_names,
         show_mastery=show_mastery,
     )
     add_team_columns(embed, columns, include_rank_rows=False)
     return embed
+
+
+def _tft_stat(participant: dict[str, Any], *keys: str) -> Any:
+    """First present value among ``keys``, tolerating snake_case/camelCase."""
+    for key in keys:
+        if key in participant and participant[key] is not None:
+            return participant[key]
+    return None
+
+
+def _tft_known_riot_ids() -> dict[str, str]:
+    """Map every registered TFT PUUID to its stored ``Name#Tag``."""
+    return {
+        account.puuid: account.riot_id
+        for account in load_tft_accounts().values()
+        if account.puuid
+    }
+
+
+def _tft_server_from_match(match: dict[str, Any]) -> str:
+    """Recover the hosting platform from the ``PLATFORM_gameid`` match id.
+
+    TFT Match-V1's ``info`` carries no ``platformId``, so a bare ``"NA1"``
+    default routed every non-NA account-v1 name lookup to the wrong region.
+    """
+    match_id = str(match.get("metadata", {}).get("match_id") or "")
+    prefix = match_id.split("_", 1)[0].upper()
+    return prefix or "NA1"
+
+
+def _tft_display_name(
+    participant: dict[str, Any],
+    server: str,
+    known: dict[str, str] | None = None,
+) -> str:
+    """Resolve a TFT participant's ``Name#Tag``.
+
+    Registered players resolve from ``known`` without a network call; everyone
+    else uses whatever Riot ID fields the payload carries (Match-V1 supplies
+    none, Spectator-TFT-v5 supplies ``riotId``) before falling back to a
+    regionally-correct account-v1 lookup.
+    """
+    puuid = participant.get("puuid")
+    if known and puuid and known.get(puuid):
+        return known[puuid]
+    riot_id = participant.get("riotId")
+    if isinstance(riot_id, str) and "#" in riot_id:
+        return riot_id
+    game_name = participant.get("riotIdGameName") or participant.get("gameName")
+    tag = participant.get("riotIdTagline") or participant.get("tagLine")
+    if game_name:
+        return f"{game_name}#{tag}" if tag else str(game_name)
+    resolved = get_client().tft_riot_id(puuid, server) if puuid else None
+    return resolved or "Unknown player"
+
+
+def _tft_short_name(value: Any) -> str:
+    """Turn a TFT API content id into a compact readable label."""
+    text = str(value or "Unknown")
+    text = text.rsplit("_", 1)[-1]
+    return text.replace("TFT", "").replace("Character", "").strip() or "Unknown"
+
+
+def _trait_style(trait: dict[str, Any]) -> int:
+    """Activation tier of a trait across the field names Riot has shipped."""
+    for key in ("style", "style_tier", "tier_current", "current_tier"):
+        value = trait.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _active_traits(participant: dict[str, Any]) -> str:
+    """Compact list of a TFT participant's active traits."""
+    active = [
+        trait
+        for trait in participant.get("traits", []) or []
+        if _trait_style(trait) > 0
+    ]
+    active.sort(
+        key=lambda trait: (
+            _trait_style(trait),
+            int(trait.get("num_units") or trait.get("tier_total") or 0),
+        ),
+        reverse=True,
+    )
+    text = ", ".join(
+        f"{_tft_short_name(trait.get('name'))} {trait.get('num_units', '')}".rstrip()
+        for trait in active[:4]
+    ) or "—"
+    return text if len(text) <= 120 else f"{text[:119]}…"
+
+
+def _add_tft_match_fields(
+    embed: discord.Embed,
+    announcement: MatchAnnouncement,
+    *,
+    mode: str = _TFT_MATCH_DISPLAY_PLAYERS,
+) -> None:
+    """Add Discord-safe placement/stat columns for a completed TFT game.
+
+    The layout is always three columns — Place, a middle column, then Level.
+    ``mode`` chooses the middle column, replacing it in place rather than
+    appending: ``_TFT_MATCH_DISPLAY_PLAYERS`` shows the player name,
+    ``_TFT_MATCH_DISPLAY_RANKS`` shows every player's Ranked TFT standing (an
+    on-demand lookup, so that branch only runs when the Display dropdown asks
+    for it), and ``_TFT_MATCH_DISPLAY_TRAITS`` shows each player's active
+    synergies.
+    """
+    info = announcement.match.get("info", {})
+    server = _tft_server_from_match(announcement.match)
+    known = _tft_known_riot_ids()
+    participants = sorted(
+        info.get("participants", []) or [],
+        key=lambda participant: int(participant.get("placement") or 99),
+    )
+    if not participants:
+        return
+    tracked = [
+        participant.get("puuid") in announcement.highlight_puuids
+        for participant in participants
+    ]
+
+    def highlight(values: list[str]) -> list[str]:
+        """Bold a tracked player's Place, Player, and Level cells.
+
+        The LP delta lives on the announcement line, not in a column. When
+        Ranks or Traits replaces the middle column, that cell is left
+        unbolded — only the Place/Player/Level triple is highlighted.
+        """
+        return [
+            f"**{value}**" if is_tracked and value else value
+            for value, is_tracked in zip(values, tracked)
+        ]
+
+    names = [_tft_display_name(participant, server, known) for participant in participants]
+    placements = [
+        f"#{_tft_stat(participant, 'placement')}"
+        if _tft_stat(participant, "placement")
+        else "—"
+        for participant in participants
+    ]
+    levels = [str(_tft_stat(participant, "level") or "—") for participant in participants]
+    traits = [_active_traits(participant) for participant in participants]
+    # The middle column is Player by default; Ranks/Traits replace it in place
+    # rather than trailing after Level, matching League match announcements
+    # where a rank option swaps out the summoner-name column.
+    middle: tuple[str, list[str]] = ("Player", highlight(names))
+    if mode == _TFT_MATCH_DISPLAY_RANKS:
+        ranks = _tft_live_ranks(
+            [participant.get("puuid") for participant in participants], server
+        )
+        middle = (
+            "Rank",
+            [
+                ranks.get(participant.get("puuid"), "—")
+                for participant in participants
+            ],
+        )
+    elif mode == _TFT_MATCH_DISPLAY_TRAITS:
+        middle = ("Top Traits", traits)
+    columns = [
+        ("Place", highlight(placements)),
+        middle,
+        ("Level", highlight(levels)),
+    ]
+    for label, values in columns:
+        embed.add_field(name=label, value="\n".join(values), inline=True)
+
+
+def _tft_live_ranks(puuids: Sequence[str], server: str) -> dict[str, str]:
+    """Ranked TFT standing text for every lobby member, fetched concurrently.
+
+    ``"Unranked"`` when the account has no Ranked TFT standing and ``"—"`` when
+    the lookup failed, so a transient error is visibly distinct from no rank.
+    """
+    unique = [puuid for puuid in dict.fromkeys(puuids) if puuid]
+    if not unique:
+        return {}
+
+    def fetch(puuid: str) -> tuple[str, str]:
+        snapshot = fetch_tft_rank(puuid, server)
+        if snapshot is None:
+            return puuid, "—"
+        return puuid, rank_text(snapshot) or "Unranked"
+
+    with ThreadPoolExecutor(max_workers=min(8, len(unique))) as pool:
+        return dict(pool.map(fetch, unique))
+
+
+def _add_tft_live_fields(
+    embed: discord.Embed, announcement: LiveGameAnnouncement
+) -> None:
+    """Add player/rank columns for every member of a live TFT lobby."""
+    game = announcement.game
+    server = game.get("platformId") or game.get("platform_id") or "NA1"
+    known = _tft_known_riot_ids()
+    participants = game.get("participants", []) or []
+    if not participants:
+        return
+    ranks = _tft_live_ranks(
+        [participant.get("puuid") for participant in participants], server
+    )
+    names, rank_cells, tracked = [], [], []
+    for participant in participants:
+        name = _tft_display_name(participant, server, known)
+        is_tracked = participant.get("puuid") in announcement.highlight_puuids
+        names.append(f"**{name}**" if is_tracked else name)
+        rank_cells.append(ranks.get(participant.get("puuid"), "—"))
+        tracked.append("Tracked" if is_tracked else "—")
+    embed.add_field(name="Player", value="\n".join(names), inline=True)
+    embed.add_field(name="Rank", value="\n".join(rank_cells), inline=True)
+    embed.add_field(name="Status", value="\n".join(tracked), inline=True)
 
 
 def gold_embed(match: dict[str, Any]) -> discord.Embed:
@@ -718,8 +1153,8 @@ def gold_embed(match: dict[str, Any]) -> discord.Embed:
         )
 
     embed = discord.Embed(title="Gold Earned", color=discord.Color.gold())
-    embed.add_field(name="Blue Team", value="\n".join(blue_lines), inline=True)
-    embed.add_field(name="Red Team", value="\n".join(red_lines), inline=True)
+    embed.add_field(name="Blue", value="\n".join(blue_lines), inline=True)
+    embed.add_field(name="Red", value="\n".join(red_lines), inline=True)
     embed.add_field(name="Diff", value="\n".join(diff_lines), inline=True)
     return embed
 
@@ -866,12 +1301,7 @@ class _ChartSelect(discord.ui.Select):
 
 
 class _MatchDisplaySelect(discord.ui.Select):
-    """Choose the match embed's mode, including end-of-game champion mastery.
-
-    Guest announcements render with :attr:`NameStyle.CHAMPION` to stay
-    anonymous, so the Players option is omitted for them — picking it would
-    put summoner names back in the name column.
-    """
+    """Choose the match embed's mode, including end-of-game champion mastery."""
 
     def __init__(
         self,
@@ -901,18 +1331,15 @@ class _MatchDisplaySelect(discord.ui.Select):
                 if show_rank_names
                 else _MATCH_DISPLAY_PLAYERS
             )
-        anonymous = announcement.name_style is NameStyle.CHAMPION
-        options: list[discord.SelectOption] = []
-        if not anonymous:
-            options.append(
-                discord.SelectOption(
-                    label="Players",
-                    value=_MATCH_DISPLAY_PLAYERS,
-                    emoji="🧑",
-                    description="Summoner names and KDA",
-                    default=current == _MATCH_DISPLAY_PLAYERS,
-                )
+        options: list[discord.SelectOption] = [
+            discord.SelectOption(
+                label="Players",
+                value=_MATCH_DISPLAY_PLAYERS,
+                emoji="🧑",
+                description="Summoner names and KDA",
+                default=current == _MATCH_DISPLAY_PLAYERS,
             )
+        ]
         is_flex_match = announcement.match.get("info", {}).get("queueId") == FLEX_QUEUE_ID
         options.append(
             discord.SelectOption(
@@ -1097,11 +1524,85 @@ class GoldView(discord.ui.View):
         )
 
 
+class _TftMatchDisplaySelect(discord.ui.Select):
+    """Pick a completed TFT announcement's trailing column: players, ranks, or traits.
+
+    Mirrors League's Display dropdown so ``/tftmatch`` and the automatic
+    completed-match announcement share the one control.
+    """
+
+    def __init__(
+        self,
+        announcement: MatchAnnouncement,
+        *,
+        active_mode: str = _TFT_MATCH_DISPLAY_PLAYERS,
+    ) -> None:
+        """Initialize the display select."""
+        if active_mode not in (
+            _TFT_MATCH_DISPLAY_PLAYERS,
+            _TFT_MATCH_DISPLAY_RANKS,
+            _TFT_MATCH_DISPLAY_TRAITS,
+        ):
+            active_mode = _TFT_MATCH_DISPLAY_PLAYERS
+        options = [
+            discord.SelectOption(
+                label="Players",
+                value=_TFT_MATCH_DISPLAY_PLAYERS,
+                emoji="🧑",
+                description="Placement, player, and level only",
+                default=active_mode == _TFT_MATCH_DISPLAY_PLAYERS,
+            ),
+            discord.SelectOption(
+                label="Ranks",
+                value=_TFT_MATCH_DISPLAY_RANKS,
+                emoji="🏅",
+                description="Ranked TFT standing of every player",
+                default=active_mode == _TFT_MATCH_DISPLAY_RANKS,
+            ),
+            discord.SelectOption(
+                label="Traits",
+                value=_TFT_MATCH_DISPLAY_TRAITS,
+                emoji="✨",
+                description="Active synergies each player ended on",
+                default=active_mode == _TFT_MATCH_DISPLAY_TRAITS,
+            ),
+        ]
+        super().__init__(
+            placeholder="Display",
+            options=options,
+            custom_id="embed:tft:match:display",
+        )
+        self._announcement = announcement
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Re-render the announcement with the selected trailing column."""
+        await interaction.response.defer()
+        mode = self.values[0]
+        embed, _ = await build_announcement_embed(
+            self._announcement, tft_display_mode=mode
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=MatchAnnouncementView(self._announcement, tft_display_mode=mode),
+        )
+
+
 class MatchAnnouncementView(GoldView):
     """Completed-match controls, including the Flex-to-Solo rank toggle."""
 
-    def __init__(self, announcement: MatchAnnouncement) -> None:
+    def __init__(
+        self,
+        announcement: MatchAnnouncement,
+        *,
+        tft_display_mode: str = _TFT_MATCH_DISPLAY_PLAYERS,
+    ) -> None:
         """Initialize controls for one match announcement."""
+        if announcement.game_type == "tft":
+            discord.ui.View.__init__(self, timeout=None)
+            self.add_item(
+                _TftMatchDisplaySelect(announcement, active_mode=tft_display_mode)
+            )
+            return
         super().__init__(
             announcement.match,
             highlight_puuids=announcement.highlight_puuids,
@@ -1339,6 +1840,8 @@ class LiveGameAnnouncementView(discord.ui.View):
     ) -> None:
         """Initialize the display dropdown."""
         super().__init__(timeout=None)
+        if announcement.game_type == "tft":
+            return
         is_flex_lobby = announcement.game.get("gameQueueConfigId") == FLEX_QUEUE_ID
         self.add_item(
             _LiveDisplaySelect(
@@ -1363,10 +1866,15 @@ async def publish(
         return
 
     LOGGER.info("Publishing %d match announcement(s)", len(announcements))
-    configured, accounts = await asyncio.gather(
+    configured, league_accounts, tft_accounts = await asyncio.gather(
         asyncio.to_thread(load_guild_channels),
         asyncio.to_thread(load_accounts),
+        asyncio.to_thread(load_tft_accounts),
     )
+    accounts = {
+        **{f"lol:{key}": value for key, value in league_accounts.items()},
+        **{f"tft:{key}": value for key, value in tft_accounts.items()},
+    }
     if global_channel is _UNSET:
         global_channel = await resolve_announcement_channel(bot)
     member_cache: dict[tuple[int, int], bool] = {}
@@ -1426,10 +1934,15 @@ async def publish_live_games(
     if not announcements:
         return
     LOGGER.info("Publishing %d live-game announcement(s)", len(announcements))
-    configured, accounts = await asyncio.gather(
+    configured, league_accounts, tft_accounts = await asyncio.gather(
         asyncio.to_thread(load_guild_channels),
         asyncio.to_thread(load_accounts),
+        asyncio.to_thread(load_tft_accounts),
     )
+    accounts = {
+        **{f"lol:{key}": value for key, value in league_accounts.items()},
+        **{f"tft:{key}": value for key, value in tft_accounts.items()},
+    }
     if global_channel is _UNSET:
         global_channel = await resolve_announcement_channel(bot)
     member_cache: dict[tuple[int, int], bool] = {}
@@ -1459,6 +1972,11 @@ async def publish_live_games(
                     view=LiveGameAnnouncementView(announcement),
                 )
                 await remember_live_game_view_state(message, channel.id, announcement)
+                game_key = _live_game_key(announcement.game)
+                if game_key is not None:
+                    await asyncio.to_thread(
+                        remember_live_game_message, game_key, channel.id, message.id
+                    )
                 LOGGER.debug("Posted live-game announcement to channel=%s message=%s", channel.id, message.id)
             except Exception:
                 LOGGER.exception(

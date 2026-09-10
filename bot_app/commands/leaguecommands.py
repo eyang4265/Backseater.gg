@@ -1,0 +1,40 @@
+"""Public ``/leaguecommands`` directory generated from registered commands."""
+
+from __future__ import annotations
+
+import logging
+
+import discord
+from discord.ext import commands
+
+from .command_directory import build_game_command_directory, public_commands
+from .shared import GUILD_IDS, log_command
+
+LOGGER = logging.getLogger(__name__)
+
+
+class LeagueCommandDirectory(commands.Cog):
+    """List every registered public command outside the TFT namespace."""
+
+    def __init__(self, bot: discord.Bot) -> None:
+        """Initialize the command directory."""
+        self.bot = bot
+
+    @discord.slash_command(
+        guild_ids=GUILD_IDS,
+        description="List every public League and general bot command",
+    )
+    async def leaguecommands(self, ctx: discord.ApplicationContext) -> None:
+        """Send the live League command directory."""
+        log_command(ctx)
+        embed = build_game_command_directory(self.bot, tft=False)
+        await ctx.respond(embed=embed)
+        LOGGER.info(
+            "Sent League command directory (%d commands)",
+            len(public_commands(self.bot, tft=False)),
+        )
+
+
+def setup(bot: discord.Bot) -> None:
+    """Register the League command directory."""
+    bot.add_cog(LeagueCommandDirectory(bot))

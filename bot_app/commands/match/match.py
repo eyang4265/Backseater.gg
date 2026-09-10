@@ -18,11 +18,13 @@ from ...announce import (
 from ...services.riot_api import RiotAPIError, get_client
 from ..shared import (
     GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
     SERVERS,
     log_command,
     make_embed,
     not_found_embed,
     match_reference_index,
+    target_at_match_position,
     target_for,
 )
 
@@ -43,9 +45,10 @@ class MatchStatsCommands(commands.Cog):
     @discord.option(
         "match_id", description="Match ID or recent-game number (1=latest); blank uses latest", required=False
     )
-    async def match(self, ctx, server, username, match_id):
-        """Render a completed match with the same embed and buttons as announcements."""
-        log_command(ctx, server=server, username=username, match_id=match_id)
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def match(self, ctx, server, username, match_id, position):
+        """Render a completed League match through the announcement path."""
+        log_command(ctx, server=server, username=username, match_id=match_id, position=position)
         await ctx.defer()
         target = await target_for(ctx, server, username)
         if target is None:
@@ -66,6 +69,12 @@ class MatchStatsCommands(commands.Cog):
                 await ctx.respond(embed=make_embed("No matching game found."))
                 return
             match_data = await asyncio.to_thread(get_client().match, selected, target.server)
+            if position is not None:
+                selected_target = target_at_match_position(match_data, position, target.server)
+                if selected_target is None:
+                    await ctx.respond(embed=make_embed(f"Match `{selected}` has no player in position {position}."))
+                    return
+                target = selected_target
         except RiotAPIError as error:
             LOGGER.info("Match fetch failed for %s: %s", target.riot_id, error)
             await ctx.respond(embed=make_embed(f"Could not fetch match data: {error}"))
@@ -81,7 +90,12 @@ class MatchStatsCommands(commands.Cog):
             await ctx.respond(embed=make_embed("That player was not in this match."))
             return
         embed, chart = await build_announcement_embed(announcement)
-        message = await ctx.respond(embed=embed, file=chart, view=MatchAnnouncementView(announcement))
+        # followup.send (a deferred interaction's respond) raises on file=None,
+        # so only attach the chart when build_announcement_embed produced one.
+        respond_kwargs = {"embed": embed, "view": MatchAnnouncementView(announcement)}
+        if chart is not None:
+            respond_kwargs["file"] = chart
+        message = await ctx.respond(**respond_kwargs)
         if message is not None:
             await remember_match_view_state(message, message.channel.id, announcement)
         LOGGER.info("Sent /match announcement for match %s (%s)", selected, target.riot_id)

@@ -8,6 +8,7 @@ from bot_app.charts import (
     _BOT_SCUTTLE_SPAWN,
     _TOP_SIDE_BOUNDARY,
     _TOP_SCUTTLE_SPAWN,
+    _build_damage_chart,
     _in_base,
     _in_mid_corridor,
     _lane_weights,
@@ -496,3 +497,51 @@ class JungleInvolvementTests(unittest.TestCase):
 
         self.assertEqual(1, involvement["Top"]["kills"])
         self.assertEqual(0, involvement["Bottom"]["kills"])
+
+
+class DamageChartTests(unittest.TestCase):
+    def _match(self) -> dict:
+        return {
+            "info": {
+                "participants": [
+                    {"participantId": 1, "teamId": 100, "puuid": "a",
+                     "championName": "Senna", "totalDamageDealtToChampions": 6022},
+                    {"participantId": 2, "teamId": 200, "puuid": "b",
+                     "championName": "Senna", "totalDamageDealtToChampions": 13349},
+                    {"participantId": 3, "teamId": 100, "puuid": "c",
+                     "championName": "Zoe", "totalDamageDealtToChampions": 25178},
+                ]
+            }
+        }
+
+    def test_missing_matplotlib_returns_none(self) -> None:
+        """Verify that missing matplotlib returns none."""
+        with patch("bot_app.charts.MATPLOTLIB_AVAILABLE", False):
+            self.assertIsNone(_build_damage_chart(self._match()))
+
+    def test_duplicate_champion_names_get_their_own_bar(self) -> None:
+        """Two players on the same champion must not collapse onto one row."""
+        import bot_app.charts as charts
+
+        seen = []
+        real_subplots = charts.plt.subplots
+
+        def capture(*args, **kwargs):
+            figure, axes = real_subplots(*args, **kwargs)
+            seen.append(axes)
+            return figure, axes
+
+        with patch.object(charts.plt, "subplots", side_effect=capture):
+            result = _build_damage_chart(self._match())
+
+        self.assertIsNotNone(result)
+        axes = seen[0]
+        self.assertEqual(3, len(axes.patches))
+        widths = sorted(round(bar.get_width()) for bar in axes.patches)
+        self.assertEqual([6022, 13349, 25178], widths)
+        y_positions = sorted(bar.get_y() for bar in axes.patches)
+        self.assertEqual(3, len(set(y_positions)))
+        self.assertEqual(
+            ["Senna", "Senna", "Zoe"],
+            sorted(label.get_text() for label in axes.get_yticklabels()),
+        )

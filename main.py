@@ -19,9 +19,9 @@ from bot_app.commands.shared import (
     log_command_error,
 )
 from bot_app.config import Settings, get_settings
-from bot_app.guest_tracker import guest_poll_and_announce
 from bot_app.http_debug import install_rate_limit_debug_logging
 from bot_app.match_cache import get_match_cache
+from bot_app.meetups import poll_and_close_meetups
 from bot_app.queues import validate_current_queue_ids
 from bot_app.runtime import configure_bot
 from bot_app.singleton import acquire_singleton_lock
@@ -33,12 +33,16 @@ from bot_app.tracker import (
     poll_and_announce,
     poll_live_games_and_announce,
     update_all_rank_snapshots,
+    update_all_tft_rank_snapshots,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 
 Poller = Callable[[discord.Bot], Awaitable[None]]
+
+MEETUP_CLOSE_INTERVAL_SECONDS = 600
+"""Meetups close on a fixed slow cadence; nothing here is time-critical."""
 
 
 def mention_reply_content(latency_seconds: float) -> str:
@@ -184,9 +188,9 @@ def main() -> None:
         ),
         make_poller(
             bot,
-            guest_poll_and_announce,
-            interval_seconds=settings.poll_interval_seconds,
-            initial_delay_seconds=settings.poll_interval_seconds * 2 / 3,
+            poll_and_close_meetups,
+            interval_seconds=MEETUP_CLOSE_INTERVAL_SECONDS,
+            initial_delay_seconds=settings.poll_interval_seconds / 2,
         ),
     ]
 
@@ -214,6 +218,12 @@ def main() -> None:
             await asyncio.to_thread(ddragon.recent_patch_prefixes, 6)
             updated, failed = await asyncio.to_thread(update_all_rank_snapshots)
             LOGGER.info("Rank snapshots updated: %d | failed: %d", updated, failed)
+            tft_seeded, tft_failed = await asyncio.to_thread(
+                update_all_tft_rank_snapshots
+            )
+            LOGGER.info(
+                "TFT rank baselines seeded: %d | failed: %d", tft_seeded, tft_failed
+            )
             if settings.match_cache_enabled:
                 pruned = await asyncio.to_thread(get_match_cache().prune)
                 LOGGER.info("Pruned %d expired matches from the cache", pruned)

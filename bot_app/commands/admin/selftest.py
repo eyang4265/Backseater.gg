@@ -9,14 +9,12 @@ from typing import Any
 import discord
 from discord.ext import commands
 
-from ... import guest_tracker
 from ...accounts import refresh_riot_ids
 from ...announce import MatchAnnouncementView, TrackedPlayer, build_announcement_embed, format_match
 from ...charts import MATPLOTLIB_AVAILABLE
 from ...config import JSON_DIR
 from ...queues import lobby_queue_name
 from ...render import (
-    NameStyle,
     add_team_columns,
     build_lobby_columns,
     format_duration,
@@ -37,7 +35,7 @@ SELFTEST_SERVER = DEFAULT_PLATFORM
 SELFTEST_NAME = "StealthSwifter"
 
 SAMPLE_DIR = JSON_DIR / "samples"
-SAMPLE_CHOICES = ["guest", "livegame", "match"]
+SAMPLE_CHOICES = ["livegame", "match"]
 
 _EMBED_DESCRIPTION_LIMIT = 4096
 
@@ -151,9 +149,8 @@ class AdminCommands(commands.Cog):
         """Exercise the announcement pipeline without waiting for the poller.
 
         ``sample`` swaps in a fixture from json/samples instead of calling the
-        Riot API: ``livegame`` renders a lobby, ``match`` runs a match through
-        the normal pipeline, and ``guest`` runs that same match through the
-        guest tracker's champion-name formatting.
+        Riot API: ``livegame`` renders a lobby and ``match`` runs a match
+        through the normal pipeline.
         """
         log_command(ctx, match_id=match_id, sample=sample)
         await ctx.defer()
@@ -165,7 +162,6 @@ class AdminCommands(commands.Cog):
         handlers = {
             "livegame": self._sample_livegame,
             "match": self._sample_match,
-            "guest": self._sample_guest,
         }
         handler = handlers.get(sample)
         if handler is not None:
@@ -206,28 +202,6 @@ class AdminCommands(commands.Cog):
             )
             return
         await self._respond_with_announcement(ctx, match, _tracked_players_in(match))
-
-    async def _sample_guest(self, ctx) -> None:
-        """Handle guest."""
-        match = _load_sample("sample_match.json")
-        if match is None or "info" not in match:
-            await ctx.respond(
-                embed=make_embed("Could not load json/samples/sample_match.json.")
-            )
-            return
-
-        players = guest_tracker.build_guest_players(match)
-        if players is None:
-            await ctx.respond(
-                embed=make_embed(
-                    f'"{guest_tracker.GUEST_NAME}" and CrispyPineapple were not both present in '
-                    "json/samples/sample_match.json."
-                )
-            )
-            return
-        await self._respond_with_announcement(
-            ctx, match, players, name_style=NameStyle.CHAMPION
-        )
 
     async def _live_match(self, ctx, match_id: str | None) -> None:
         """Render a selected match; numeric references 1–20 count back from recent games."""
@@ -290,8 +264,6 @@ class AdminCommands(commands.Cog):
         ctx,
         match: dict[str, Any],
         players: list[TrackedPlayer],
-        *,
-        name_style: NameStyle = NameStyle.SUMMONER,
     ) -> None:
         """Render a match exactly as the poller would, and reply with it.
 
@@ -302,7 +274,6 @@ class AdminCommands(commands.Cog):
             players,
             require_finished=False,
             require_ranked_queue=False,
-            name_style=name_style,
         )
         if announcement is None:
             await ctx.respond(

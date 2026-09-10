@@ -28,7 +28,15 @@ from ..match_cache import MatchCache
 from ..render import make_embed
 from ..config import JSON_DIR
 from ..services.riot_api import RiotAPIError, get_client
-from .shared import GUILD_IDS, SERVERS, log_command, not_found_embed, target_for
+from .shared import (
+    GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
+    SERVERS,
+    log_command,
+    not_found_embed,
+    target_at_latest_match_position,
+    target_for,
+)
 
 _CACHE_PATH = JSON_DIR / "matches.sqlite"
 _PAGE_SIZE = 10
@@ -360,17 +368,27 @@ class ChampStatsCommands(commands.Cog):
     @discord.option("server", description="Preferred lookup platform", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option("filter", bool, description="Hide choices with a play rate below 1%", required=False, default=True)
-    async def champstats(self, ctx, champion, queue, role, patch, since_patch, server, username, filter: bool):
-        """Show cached personal choices, optionally filtered by patch and pick rate."""
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def champstats(self, ctx, champion, queue, role, patch, since_patch, server, username, filter: bool, position):
+        """Show match-derived choices for a direct target or latest-match slot."""
         queue = queue or ALL_GAMES
         role = role or ALL_ROLES
         apply_filter = bool(filter)
-        log_command(ctx, champion=champion, queue=queue, role=role, patch=patch, since_patch=since_patch, server=server, username=username, filter=filter)
+        log_command(ctx, champion=champion, queue=queue, role=role, patch=patch, since_patch=since_patch, server=server, username=username, filter=filter, position=position)
         await ctx.defer()
         target = await target_for(ctx, server, username, include_icon=False)
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+        if position is not None:
+            try:
+                target = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                await ctx.respond(embed=make_embed(f"Could not fetch the latest match: {error}"))
+                return
+            if target is None:
+                await ctx.respond(embed=make_embed(f"The latest match has no player in position {position}."))
+                return
         found = await asyncio.to_thread(lambda: ddragon.catalog().by_query(champion) if ddragon.catalog() else None)
         if found is None:
             LOGGER.info("/champstats could not resolve champion query %r", champion)

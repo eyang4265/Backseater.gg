@@ -53,6 +53,40 @@ class RegistryTests(unittest.TestCase):
             self.assertNotIn("1", load_tracker_state())
             self.assertEqual(load_live_game_state(), {})
 
+    def test_none_discord_id_keys_a_synthetic_sentinel(self) -> None:
+        """An unlinked /add keys under 000…1 and re-adds replace it in place."""
+        with (
+            temporary_state(),
+            patch("bot_app.account_registry.get_client", return_value=self._client()),
+            patch("bot_app.account_registry.fetch_ranks", return_value={}),
+        ):
+            first = track_account(None, "Player", "NA1", "NA1")
+            self.assertEqual(first.discord_id, "000000000000000001")
+            self.assertEqual(list(load_accounts()), ["000000000000000001"])
+            self.assertIn("000000000000000001", load_tracker_state())
+
+            again = track_account(None, "Player", "NA1", "NA1")
+            self.assertEqual(again.discord_id, "000000000000000001")
+            self.assertEqual(list(load_accounts()), ["000000000000000001"])
+
+    def test_none_discord_id_skips_an_occupied_sentinel(self) -> None:
+        """A taken 000…1 pushes the next unlinked account to 000…2."""
+        with (
+            temporary_state(),
+            patch(
+                "bot_app.account_registry.get_client",
+                return_value=self._client(puuid="p2"),
+            ),
+            patch("bot_app.account_registry.fetch_ranks", return_value={}),
+        ):
+            save_accounts(
+                {"000000000000000001": Account(
+                    "000000000000000001", "p1", "NA1", "Other#NA1"
+                )}
+            )
+            account = track_account(None, "Player", "NA1", "NA1")
+            self.assertEqual(account.discord_id, "000000000000000002")
+
     def test_duplicate_puuid_is_rejected(self) -> None:
         """Verify that duplicate puuid is rejected."""
         with (

@@ -195,6 +195,29 @@ def fetch_rank(
     return ranks.get(queue_id, RankSnapshot())
 
 
+def fetch_tft_rank(puuid: str, server: str) -> RankSnapshot | None:
+    """Current Ranked TFT standing for an account via the separate TFT key.
+
+    Returns None when the request failed and an unranked snapshot when the
+    account simply has no Ranked TFT standing, so a caller can tell the two
+    apart the same way it can for League ranks.
+    """
+    if not puuid:
+        return None
+    entries = get_client().tft_league_entries(puuid, server)
+    if not isinstance(entries, list):
+        return None
+    entry = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, dict) and item.get("queueType") == "RANKED_TFT"
+        ),
+        None,
+    )
+    return RankSnapshot.from_entry(entry) if entry else RankSnapshot()
+
+
 def rank_queue_for_match(queue_id: int | None) -> int:
     """Which ranked queue's standing to show for a match.
 

@@ -100,3 +100,54 @@ class RateLimiterTests(unittest.TestCase):
         with patch("bot_app.riot.time.sleep"), self.assertRaises(RiotAPIError):
             client._get("americas", "/test")
         self.assertEqual(client._session.get.call_count, 2)
+
+    def test_tft_endpoints_use_match_and_spectator_v5_routes(self) -> None:
+        """TFT history is regional while live games use the platform host."""
+        client = object.__new__(RiotClient)
+        client._tft_api_key = "tft-key"
+        client._get = Mock(side_effect=[["NA1_1"], {"info": {}}, {"gameId": 1}])
+
+        self.assertEqual(client.tft_match_ids("p1", "NA1"), ["NA1_1"])
+        self.assertEqual(client.tft_match("NA1_1", "NA1"), {"info": {}})
+        self.assertEqual(client.tft_active_game("p1", "NA1"), {"gameId": 1})
+
+        calls = client._get.call_args_list
+        self.assertEqual(calls[0].args[:2], ("americas", "/tft/match/v1/matches/by-puuid/p1/ids"))
+        self.assertEqual(calls[1].args[:2], ("americas", "/tft/match/v1/matches/NA1_1"))
+        self.assertEqual(calls[2].args[:2], ("NA1", "/lol/spectator/tft/v5/active-games/by-puuid/p1"))
+        self.assertTrue(all(call.kwargs["api_key"] == "tft-key" for call in calls))
+
+    def test_tft_key_spends_its_own_rate_limit_budget(self) -> None:
+        """Riot gives the TFT key its own quota, so it needs its own window.
+
+        Charging TFT calls against the League window halved the throughput of
+        both, which is what made a whole-roster ``/tftupdate`` take minutes.
+        """
+        client = object.__new__(RiotClient)
+        client._api_key = "league-key"
+        client._tft_api_key = "tft-key"
+        client._limiter = RateLimiter(((5, 1.0),))
+        client._tft_limiter = RateLimiter(((5, 1.0),))
+
+        self.assertIs(client._limiter_for(None), client._limiter)
+        self.assertIs(client._limiter_for("league-key"), client._limiter)
+        self.assertIs(client._limiter_for("tft-key"), client._tft_limiter)
+
+    def test_one_key_configured_for_both_shares_a_single_budget(self) -> None:
+        """Two settings holding the same key are still one real quota."""
+        client = object.__new__(RiotClient)
+        client._api_key = "same-key"
+        client._tft_api_key = "same-key"
+        client._limiter = RateLimiter(((5, 1.0),))
+        client._tft_limiter = RateLimiter(((5, 1.0),))
+
+        self.assertIs(client._limiter_for("same-key"), client._limiter)
+
+    def test_tft_endpoints_never_fall_back_to_the_league_key(self) -> None:
+        client = object.__new__(RiotClient)
+        client._tft_api_key = ""
+        client._api_key = "league-key"
+        client._get = Mock()
+        with self.assertRaisesRegex(RiotAPIError, "TFT_API_KEY"):
+            client.tft_match_ids("tft-puuid", "NA1")
+        client._get.assert_not_called()

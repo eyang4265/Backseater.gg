@@ -9,13 +9,27 @@ import discord
 from discord.ext import commands
 
 from .. import ddragon, emoji
-from ..champstats import ALL_GAMES, ALL_ROLES, QUEUE_SCOPES
+from ..champstats import (
+    ALL_GAMES,
+    ALL_ROLES,
+    QUEUE_SCOPES,
+    ROLE_POSITION_IDS,
+    queue_ids_for_scope,
+)
 from ..config import JSON_DIR
 from ..counterstats import CounterStatsReport, aggregate
 from ..match_cache import MatchCache
 from ..render import make_embed
 from ..services.riot_api import RiotAPIError, get_client
-from .shared import GUILD_IDS, SERVERS, log_command, not_found_embed, target_for
+from .shared import (
+    GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
+    SERVERS,
+    log_command,
+    not_found_embed,
+    target_at_latest_match_position,
+    target_for,
+)
 
 LOGGER = logging.getLogger(__name__)
 _CACHE_PATH = JSON_DIR / "matches.sqlite"
@@ -31,8 +45,14 @@ def _counter_page_count(report: CounterStatsReport) -> int:
 
 def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) -> discord.Embed:
     """Render one Discord-safe page of aligned matchup columns."""
+    result_label = "15m gold leads" if report.laning else "games"
+    summary = (
+        f"{report.queue_scope} · Player: {report.role} · Enemy: {report.enemy_role} · "
+        f"{report.games} {result_label} · {report.wins}W–{report.losses}L · "
+        f"{report.win_rate:.1%} WR"
+    )
     embed = make_embed(
-        f"{report.queue_scope} · Player: {report.role} · Enemy: {report.enemy_role} · {report.games} games · {report.wins}W–{report.losses}L · {report.win_rate:.1%} WR",
+        summary,
         title=f"{report.champion} Counter Stats — {player_name}",
     )
     if report.counters:
@@ -51,6 +71,11 @@ def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) 
     else:
         embed.description += "\n\nNo matching enemy champions were found in the available history."
     footer = "Each eligible game counts once against every champion on the opposing team."
+    if report.laning:
+        footer += (
+            " Wins use total gold versus the direct role opponent at 15:00; "
+            "ties and missing timelines are excluded."
+        )
     if report.usage_filter:
         footer += " Showing matchups above 1% usage."
     if report.counters and _counter_page_count(report) > 1:
@@ -62,7 +87,11 @@ def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) 
 class CounterStatsView(discord.ui.View):
     """Author-scoped role buttons that never expire for matchup tables."""
 
-    def __init__(self, payloads, puuid: str, champion: str, queue_scope: str, player_role: str, usage_filter: bool, player_name: str, author_id: int) -> None:
+    def __init__(
+        self, payloads, puuid: str, champion: str, queue_scope: str,
+        player_role: str, usage_filter: bool, player_name: str, author_id: int,
+        *, timelines=None, laning: bool = False,
+    ) -> None:
         super().__init__(timeout=None)
         self.payloads = payloads
         self.champion = champion
@@ -72,6 +101,8 @@ class CounterStatsView(discord.ui.View):
         self.puuid = puuid
         self.player_role = player_role
         self.usage_filter = usage_filter
+        self.timelines = timelines or {}
+        self.laning = laning
         self.enemy_role = ALL_ROLES
         self.page = 0
         self._buttons: dict[str, discord.ui.Button] = {}
@@ -153,6 +184,8 @@ class CounterStatsView(discord.ui.View):
             self.player_role,
             enemy_role=self.enemy_role if enemy_role is None else enemy_role,
             min_usage_rate=0.01 if self.usage_filter else 0.0,
+            timelines=self.timelines,
+            laning=self.laning,
         )
 
     async def on_timeout(self) -> None:
@@ -192,6 +225,49 @@ def _load_payloads(puuid: str, server: str, *, scan_riot: bool) -> list[dict]:
         cache.close()
 
 
+def _load_timelines(
+    payloads: list[dict], puuid: str, champion: str, queue_scope: str, role: str,
+    server: str, *, fetch_missing: bool,
+) -> dict[str, dict]:
+    """Load timelines needed to score the selected champion's 15-minute lane leads."""
+    cache = MatchCache(_CACHE_PATH)
+    timelines: dict[str, dict] = {}
+    allowed_queues = queue_ids_for_scope(queue_scope)
+    allowed_positions = ROLE_POSITION_IDS.get(role) if role != ALL_ROLES else None
+    client = get_client() if fetch_missing else None
+    try:
+        for payload in payloads:
+            info = payload.get("info", {}) if isinstance(payload, dict) else {}
+            if allowed_queues is not None and info.get("queueId") not in allowed_queues:
+                continue
+            player = next(
+                (
+                    row for row in (info.get("participants", []) or [])
+                    if isinstance(row, dict) and row.get("puuid") == puuid
+                ),
+                None,
+            )
+            if player is None or str(player.get("championName") or "").casefold() != champion.casefold():
+                continue
+            position = str(player.get("teamPosition") or player.get("individualPosition") or "").upper()
+            if allowed_positions is not None and position not in allowed_positions:
+                continue
+            match_id = str(payload.get("metadata", {}).get("matchId") or "")
+            if not match_id or match_id in timelines:
+                continue
+            timeline = cache.get_timeline(match_id)
+            if timeline is None and client is not None:
+                try:
+                    timeline = client.match_timeline(match_id, server)
+                except RiotAPIError:
+                    LOGGER.warning("Could not scan counterstats timeline %s", match_id)
+            if timeline is not None:
+                timelines[match_id] = timeline
+        return timelines
+    finally:
+        cache.close()
+
+
 class CounterStatsCommands(commands.Cog):
     """Register the /counterstats command."""
 
@@ -203,6 +279,11 @@ class CounterStatsCommands(commands.Cog):
         """Refresh the visible matchup table after the Riot history scan."""
         try:
             view.payloads = await asyncio.to_thread(_load_payloads, puuid, server, scan_riot=True)
+            if view.laning:
+                view.timelines = await asyncio.to_thread(
+                    _load_timelines, view.payloads, puuid, view.champion, view.queue_scope,
+                    view.player_role, server, fetch_missing=True,
+                )
             report = view._report()
             view.page = min(view.page, _counter_page_count(report) - 1)
             view._refresh()
@@ -215,24 +296,55 @@ class CounterStatsCommands(commands.Cog):
     @discord.option("queue", description="Queue scope", choices=QUEUE_SCOPES, required=False)
     @discord.option("role", description="Your champion's role", choices=_ROLES, required=True)
     @discord.option("filter", bool, description="Only show matchups above 1% usage", required=False, default=False)
+    @discord.option(
+        "laning", bool, description="Use who is ahead in gold at 15 minutes",
+        required=False, default=False,
+    )
     @discord.option("server", description="Preferred lookup platform", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
-    async def counterstats(self, ctx, champion, role, queue, filter: bool, server, username):
-        """Show a champion's win rate against enemy champions in the selected role, with role buttons."""
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def counterstats(
+        self, ctx, champion, role, queue, filter: bool, laning: bool,
+        server, username, position,
+    ):
+        """Show matchup history using final wins or 15-minute lane gold leads."""
         queue = queue or ALL_GAMES
-        log_command(ctx, champion=champion, queue=queue, role=role, filter=filter, server=server, username=username)
+        log_command(
+            ctx, champion=champion, queue=queue, role=role, filter=filter,
+            laning=laning, server=server, username=username, position=position,
+        )
         await ctx.defer()
         target = await target_for(ctx, server, username, include_icon=False)
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+        if position is not None:
+            try:
+                target = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                await ctx.respond(embed=make_embed(f"Could not fetch the latest match: {error}"))
+                return
+            if target is None:
+                await ctx.respond(embed=make_embed(f"The latest match has no player in position {position}."))
+                return
         found = await asyncio.to_thread(lambda: ddragon.catalog().by_query(champion) if ddragon.catalog() else None)
         if found is None:
             await ctx.respond(embed=make_embed(f"I could not resolve `{champion}` as a champion."))
             return
         payloads = await asyncio.to_thread(_load_payloads, target.puuid, target.server, scan_riot=False)
-        report = aggregate(payloads, target.puuid, found.name, queue, role, min_usage_rate=0.01 if filter else 0.0)
-        view = CounterStatsView(payloads, target.puuid, found.name, queue, role, bool(filter), target.riot_id, ctx.author.id)
+        timelines = await asyncio.to_thread(
+            _load_timelines, payloads, target.puuid, found.name, queue, role,
+            target.server, fetch_missing=False,
+        ) if laning else {}
+        report = aggregate(
+            payloads, target.puuid, found.name, queue, role,
+            min_usage_rate=0.01 if filter else 0.0,
+            timelines=timelines, laning=laning,
+        )
+        view = CounterStatsView(
+            payloads, target.puuid, found.name, queue, role, bool(filter),
+            target.riot_id, ctx.author.id, timelines=timelines, laning=laning,
+        )
         view.add_role_buttons()
         embed = _counter_embed(report, target.riot_id, view.page)
         embed.description += "\n\nScanning Riot match history; this message will refresh when it finishes."

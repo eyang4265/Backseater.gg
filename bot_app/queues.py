@@ -10,11 +10,18 @@ import logging
 
 LOGGER = logging.getLogger(__name__)
 
+NORMAL_DRAFT_QUEUE_ID = 400
 SOLO_QUEUE_ID = 420
 FLEX_QUEUE_ID = 440
-ARENA_QUEUE_IDS = frozenset({1700, 1710, 1750})
-ARENA_TEAM_SIZES: dict[int, int] = {1700: 2, 1710: 2, 1750: 3}
+SWIFTPLAY_QUEUE_ID = 480
+RANKED_5S_QUEUE_ID = 710
+ARAM_MAYHEM_QUEUE_ID = 2400
+ARENA_QUEUE_IDS = frozenset({1700, 1710, 1740, 1750})
+ARENA_TEAM_SIZES: dict[int, int] = {1700: 2, 1710: 2, 1740: 3, 1750: 3}
 RANKED_QUEUE_IDS = frozenset({SOLO_QUEUE_ID, FLEX_QUEUE_ID})
+
+# Standard Ranked TFT. Its own Match-V1 queue id, unrelated to League ranked.
+TFT_RANKED_QUEUE_ID = 1100
 
 
 QUEUE_TYPES: dict[int, str] = {
@@ -28,11 +35,12 @@ QUEUE_NAMES: dict[int, str] = {
     430: "Normal (Blind)",
     440: "Ranked Flex",
     450: "ARAM",
-    480: "Swiftplay",
+    SWIFTPLAY_QUEUE_ID: "Swiftplay",
     490: "Normal (Quickplay)",
     600: "Blood Hunt Assassin",
     610: "Dark Star: Singularity",
     700: "Clash",
+    710: "Ranked 5s",
     720: "ARAM Clash",
     830: "Co-op vs AI (Intro)",
     840: "Co-op vs AI (Beginner)",
@@ -46,6 +54,7 @@ QUEUE_NAMES: dict[int, str] = {
     1400: "Ultimate Spellbook",
     1700: "Arena",
     1710: "Arena",
+    1740: "Bravery Arena",
     1750: "Arena (3v3)",
     1810: "Swarm (1 Player)",
     1820: "Swarm (2 Players)",

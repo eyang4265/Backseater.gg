@@ -11,7 +11,6 @@ from discord.ext import commands
 from ... import ddragon
 from ...announce import (
     LiveGameAnnouncementView,
-    TrackedPlayer,
     build_live_game_embed,
     format_live_game,
     remember_live_game_view_state,
@@ -20,22 +19,25 @@ from ...emoji import champion_emoji, prefixed
 from ...history import format_match_history_line, match_history_score
 from ...queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID, queue_name
 from ...ranks import RankSnapshot, fetch_ranks
+from ...store import load_accounts, load_tft_accounts
 from ...render import (
     make_embed,
     rank_text,
     relative_time,
 )
 from ...services.riot_api import RiotAPIError, get_client
-from ...store import load_accounts
 from ..shared import (
     GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
     SERVERS,
     game_mode_choices,
     log_command,
     not_found_embed,
     riot_to_thread,
     set_player_author,
+    target_at_latest_match_position,
     target_for,
+    tracked_players_in_lobby,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -44,6 +46,40 @@ _TOP_MASTERY_COUNT = 3
 _MATCH_HISTORY_COUNT = 10
 _MATCH_HISTORY_FILTER_LOOKBACK = 100
 _MATCH_HISTORY_FETCH_BATCH = 5
+
+
+def _tft_rank_line(target) -> str | None:
+    """A ``**TFT:** …`` line, only when the account has a TFT ranked standing.
+
+    Needs the separately resolved TFT PUUID, so it applies only to accounts
+    linked through the TFT registry. Returns ``None`` — and the caller adds
+    nothing — when the player has no TFT account, is unranked in TFT, or the
+    lookup failed.
+    """
+    discord_id = next(
+        (
+            account.discord_id
+            for account in load_accounts().values()
+            if account.puuid == target.puuid
+        ),
+        None,
+    )
+    if discord_id is None:
+        return None
+    tft_account = load_tft_accounts().get(str(discord_id))
+    if tft_account is None:
+        return None
+    entries = get_client().tft_league_entries(tft_account.puuid, tft_account.server)
+    if not entries:
+        return None
+    entry = next(
+        (item for item in entries if item.get("queueType") == "RANKED_TFT"),
+        None,
+    )
+    if entry is None:
+        return None
+    text = rank_text(RankSnapshot.from_entry(entry), with_winrate=True)
+    return f"**TFT:** {text}" if text else None
 
 
 def _record_text(snapshot: RankSnapshot | None) -> str | None:
@@ -181,6 +217,10 @@ class PlayerCommands(commands.Cog):
             if record:
                 lines.append(f"**Record:** {record}")
 
+        tft_line = await asyncio.to_thread(_tft_rank_line, target)
+        if tft_line:
+            lines.append(tft_line)
+
         mastery_lines = await asyncio.to_thread(self._top_mastery_lines, target)
         if mastery_lines:
             lines.append("\n**Top Champions:**\n" + "\n".join(mastery_lines))
@@ -215,12 +255,12 @@ class PlayerCommands(commands.Cog):
 
     @discord.slash_command(
         guild_ids=GUILD_IDS,
-        description="Show a live game's lobby (champions + ranks). Leave everything blank for your own account.",
+        description="Show a live League lobby. Leave everything blank for your own account.",
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     async def livegame(self, ctx, server, username):
-        """The target's current lobby: names, ranks, and win rates per team.
+        """The target's current League lobby through the shared renderer.
 
         Renders with the same embed and buttons as automatic live-game
         announcements, and persists its button state the same way so the
@@ -256,28 +296,9 @@ class PlayerCommands(commands.Cog):
             return
 
         try:
-            accounts = await asyncio.to_thread(load_accounts)
-            registered = {account.puuid: account for account in accounts.values()}
-            lobby_players = []
-            for participant in game.get("participants", []) or []:
-                account = registered.get(participant.get("puuid"))
-                if account is None:
-                    continue
-                lobby_players.append(
-                    TrackedPlayer(
-                        puuid=account.puuid,
-                        riot_id=account.riot_id,
-                        server=account.server,
-                    )
-                )
-            if target.puuid not in registered:
-                lobby_players.append(
-                    TrackedPlayer(
-                        puuid=target.puuid,
-                        riot_id=target.riot_id,
-                        server=target.server,
-                    )
-                )
+            lobby_players = await asyncio.to_thread(
+                tracked_players_in_lobby, game, target
+            )
             announcement = await asyncio.to_thread(
                 format_live_game,
                 game,
@@ -312,14 +333,16 @@ class PlayerCommands(commands.Cog):
         required=False,
     )
     @discord.option("champion", description="Filter by champion", required=False)
-    async def matchhistory(self, ctx, server, username, game_mode, champion):
-        """Show up to ten recent games, optionally filtered by mode or champion."""
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def matchhistory(self, ctx, server, username, game_mode, champion, position):
+        """Show history for a direct target or a player in their latest match."""
         log_command(
             ctx,
             server=server,
             username=username,
             game_mode=game_mode,
             champion=champion,
+            position=position,
         )
         await ctx.defer()
 
@@ -327,6 +350,15 @@ class PlayerCommands(commands.Cog):
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+        if position is not None:
+            try:
+                target = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                await ctx.respond(embed=make_embed(f"Could not fetch the latest match: {error}"))
+                return
+            if target is None:
+                await ctx.respond(embed=make_embed(f"The latest match has no player in position {position}."))
+                return
 
         client = get_client()
         try:
@@ -438,15 +470,25 @@ class PlayerCommands(commands.Cog):
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
-    async def matchlist(self, ctx, server, username):
-        """The player's most recent match ids."""
-        log_command(ctx, server=server, username=username)
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def matchlist(self, ctx, server, username, position):
+        """List matches for a direct target or a player in their latest match."""
+        log_command(ctx, server=server, username=username, position=position)
         await ctx.defer()
 
         target = await target_for(ctx, server, username)
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+        if position is not None:
+            try:
+                target = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                await ctx.respond(embed=make_embed(f"Could not fetch the latest match: {error}"))
+                return
+            if target is None:
+                await ctx.respond(embed=make_embed(f"The latest match has no player in position {position}."))
+                return
 
         try:
             match_ids = await asyncio.to_thread(

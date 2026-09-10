@@ -175,9 +175,14 @@ class RiotClient:
         """Initialize the instance."""
         settings = get_settings()
         self._api_key = settings.riot_api_key
+        self._tft_api_key = settings.tft_api_key
         self._timeout = settings.request_timeout_seconds
         self._max_retries = settings.max_retries
         self._limiter = RateLimiter(settings.riot_rate_limits)
+        # Riot issues the TFT key its own quota, so it gets its own budget.
+        # Sharing one limiter made every TFT request spend the League key's
+        # allowance (and vice versa), halving throughput for both.
+        self._tft_limiter = RateLimiter(settings.riot_rate_limits)
         self._match_cache = (
             match_cache or get_match_cache() if settings.match_cache_enabled else None
         )
@@ -195,6 +200,17 @@ class RiotClient:
         self._league_cache = TTLCache(ttl_seconds=60)
         self._timeline_cache = TTLCache(ttl_seconds=6 * 3600, max_entries=256)
 
+    def _limiter_for(self, api_key: str | None) -> RateLimiter:
+        """The rate-limit budget belonging to the key a request will use.
+
+        The TFT key carries a quota of its own, so its requests must not be
+        charged against the League key's window.  When both settings hold the
+        same key there is only one real quota, so they share one limiter.
+        """
+        if api_key and api_key == self._tft_api_key and api_key != self._api_key:
+            return self._tft_limiter
+        return self._limiter
+
     def _get(
         self,
         host: str,
@@ -202,6 +218,7 @@ class RiotClient:
         *,
         params: dict[str, Any] | None = None,
         none_on_404: bool = False,
+        api_key: str | None = None,
     ) -> Any:
         """GET a Riot endpoint, honouring rate limits and retrying transient failures.
 
@@ -212,11 +229,17 @@ class RiotClient:
         last_error: str = "no attempt made"
 
         LOGGER.debug("GET %s params=%s", path, params)
+        limiter = self._limiter_for(api_key)
         start = time.monotonic()
         for attempt in range(self._max_retries):
-            self._limiter.acquire()
+            limiter.acquire()
             try:
-                response = self._session.get(url, params=params, timeout=self._timeout)
+                response = self._session.get(
+                    url,
+                    params=params,
+                    timeout=self._timeout,
+                    headers={"X-Riot-Token": api_key} if api_key else None,
+                )
             except requests.RequestException as error:
                 last_error = str(error)
                 LOGGER.debug("GET %s failed (attempt %d): %s", path, attempt + 1, error)
@@ -269,6 +292,12 @@ class RiotClient:
     def _backoff(attempt: int) -> float:
         """Exponential backoff with jitter, capped so a retry never stalls a poll."""
         return min(0.5 * (2**attempt), 8.0) * (0.75 + random.random() * 0.5)
+
+    def _require_tft_api_key(self) -> str:
+        """Return the independent TFT key or fail without using the League key."""
+        if not self._tft_api_key:
+            raise RiotAPIError("TFT_API_KEY is required for TFT commands and polling")
+        return self._tft_api_key
 
     def riot_id(
         self, puuid: str, server: str = DEFAULT_PLATFORM, *, refresh: bool = False
@@ -323,6 +352,72 @@ class RiotClient:
             )
             return None
         return account.get("puuid")
+
+    def tft_puuid(self, summoner: str, tag: str, server: str) -> str | None:
+        """Resolve a TFT Riot ID with the separately configured TFT API key."""
+        route = account_route(server)
+        if route is None:
+            return None
+        api_key = self._require_tft_api_key()
+        try:
+            account = self._get(
+                route,
+                f"/riot/account/v1/accounts/by-riot-id/{quote(summoner)}/{quote(tag)}",
+                api_key=api_key,
+            )
+        except RiotAPIError as error:
+            LOGGER.warning("Could not resolve TFT account %s#%s: %s", summoner, tag, error)
+            return None
+        return account.get("puuid")
+
+    def tft_riot_id(self, puuid: str, server: str) -> str | None:
+        """Return ``Name#Tag`` for a TFT PUUID using the TFT API key."""
+        if not puuid:
+            return None
+        api_key = self._require_tft_api_key()
+
+        def fetch() -> str | None:
+            route = account_route(server)
+            if route is None:
+                return None
+            try:
+                account = self._get(
+                    route,
+                    f"/riot/account/v1/accounts/by-puuid/{puuid}",
+                    api_key=api_key,
+                )
+            except RiotAPIError as error:
+                LOGGER.warning("Could not resolve TFT puuid %s: %s", puuid, error)
+                return None
+            game_name = account.get("gameName")
+            tag_line = account.get("tagLine")
+            return f"{game_name}#{tag_line}" if game_name and tag_line else None
+
+        return self._riot_id_cache.get_or_set(("tft_riot_id", puuid), fetch)
+
+    def tft_summoner(self, puuid: str, server: str) -> dict[str, Any] | None:
+        """Return the platform-specific TFT summoner record for a PUUID."""
+        api_key = self._require_tft_api_key()
+        try:
+            result = self._get(
+                server,
+                f"/tft/summoner/v1/summoners/by-puuid/{puuid}",
+                none_on_404=True,
+                api_key=api_key,
+            )
+        except RiotAPIError as error:
+            LOGGER.warning("Could not fetch TFT summoner %s on %s: %s", puuid, server, error)
+            return None
+        return None if result is _NOT_FOUND else result
+
+    def tft_home_platform(
+        self, puuid: str, candidates: Sequence[str]
+    ) -> str | None:
+        """First candidate platform that hosts the separately resolved TFT PUUID."""
+        for candidate in candidates:
+            if self.tft_summoner(puuid, candidate):
+                return candidate
+        return None
 
     def home_platform(self, puuid: str, candidates: Sequence[str]) -> str | None:
         """First candidate platform that actually hosts ``puuid``.
@@ -384,6 +479,37 @@ class RiotClient:
                 return None
 
         return self._league_cache.get_or_set(("league", server, puuid), fetch)
+
+    def tft_league_entries(
+        self, puuid: str, server: str
+    ) -> list[dict[str, Any]] | None:
+        """Every TFT ranked entry for a PUUID, using the separate TFT API key.
+
+        Returns ``None`` when the fetch fails and ``[]`` when the account
+        simply has no TFT ranked standing, so callers can tell "no rank" from
+        "could not check".
+        """
+        if not puuid:
+            return None
+        api_key = self._require_tft_api_key()
+        try:
+            result = self._get(
+                server,
+                f"/tft/league/v1/by-puuid/{puuid}",
+                none_on_404=True,
+                api_key=api_key,
+            )
+        except RiotAPIError as error:
+            LOGGER.warning(
+                "Could not fetch TFT league entries for %s on %s: %s",
+                puuid,
+                server,
+                error,
+            )
+            return None
+        if result is _NOT_FOUND or result is None:
+            return []
+        return result
 
     def apex_league(self, tier: str, queue_type: str, server: str) -> dict[str, Any]:
         """One apex league's entries: ``tier`` is challenger/grandmaster/master.
@@ -457,6 +583,43 @@ class RiotClient:
             server,
             f"/lol/spectator/v5/active-games/by-summoner/{puuid}",
             none_on_404=True,
+        )
+        return None if result is _NOT_FOUND else result
+
+    def tft_match_ids(
+        self, puuid: str, server: str, *, start: int = 0, count: int = 20
+    ) -> list[str]:
+        """Return one TFT Match-V1 history page for an account."""
+        route = match_route(server)
+        if route is None:
+            LOGGER.warning("Unknown platform %r; cannot list TFT matches", server)
+            return []
+        return self._get(
+            route,
+            f"/tft/match/v1/matches/by-puuid/{puuid}/ids",
+            params={"start": start, "count": count},
+            api_key=self._require_tft_api_key(),
+        )
+
+    def tft_match(self, match_id: str, server: str) -> dict[str, Any]:
+        """Return a completed TFT match from the regional Match-V1 API."""
+        route = match_route(server) or match_route(DEFAULT_PLATFORM)
+        if route is None:
+            raise RiotAPIError(f"No TFT match route is configured for {server!r}.")
+        LOGGER.info("Fetching TFT match %s from Riot API", match_id)
+        return self._get(
+            route,
+            f"/tft/match/v1/matches/{match_id}",
+            api_key=self._require_tft_api_key(),
+        )
+
+    def tft_active_game(self, puuid: str, server: str) -> dict[str, Any] | None:
+        """The player's live TFT game, or None when they are not in one."""
+        result = self._get(
+            server,
+            f"/lol/spectator/tft/v5/active-games/by-puuid/{puuid}",
+            none_on_404=True,
+            api_key=self._require_tft_api_key(),
         )
         return None if result is _NOT_FOUND else result
 

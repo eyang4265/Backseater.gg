@@ -21,7 +21,7 @@ class RoutingTests(unittest.TestCase):
         """Global champion stats do not require a platform slug."""
         self.assertEqual(
             opgg_champion_url("GLOBAL", "Syndra", "mid"),
-            "https://op.gg/lol/champions/Syndra/build/mid?region=global",
+            "https://op.gg/lol/champions/Syndra/build/mid?region=global&hl=en_US",
         )
 
     def test_every_offered_server_routes(self) -> None:
@@ -46,7 +46,7 @@ class RoutingTests(unittest.TestCase):
         """Verify that opgg url escapes names."""
         self.assertEqual(
             opgg_url("NA1", "Some Name#NA1"),
-            "https://op.gg/lol/summoners/na/Some%20Name-NA1",
+            "https://op.gg/lol/summoners/na/Some%20Name-NA1?hl=en_US",
         )
 
     def test_opgg_url_absent_for_unsupported_platform_or_malformed_id(self) -> None:
@@ -58,7 +58,7 @@ class RoutingTests(unittest.TestCase):
         """Verify that champion stats URLs use the OP.GG region and position."""
         self.assertEqual(
             opgg_champion_url("NA1", "AurelionSol", "mid"),
-            "https://op.gg/lol/champions/AurelionSol/build/mid?region=na",
+            "https://op.gg/lol/champions/AurelionSol/build/mid?region=na&hl=en_US",
         )
 
     def test_split_riot_id_prefers_an_explicit_tag(self) -> None:

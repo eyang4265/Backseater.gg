@@ -7,12 +7,12 @@
     "240982621247635456": {
         "puuid": "YLAgHyXa-JPX8Q1Nmek0aXKTvfqUpUIoJ02oN-7mSljpwN3WHqWqtcaoUyTUf_7mGLIqQaqMB6Us2Q",
         "server": "NA1",
-        "riotId": "Electric#emsee"
+        "riotId": "electriql#emsee"
     },
     "392893197681950720": {
-        "puuid": "Ov_bKZJlUPt2r10tgceplYDLGkkJHrFSwny2bvxWAKObeWfXldPiUB4-32V1obEnf6OBPLVrAUXK0g",
-        "server": "NA1",
-        "riotId": "CrispyPineapple#NA1"
+        "puuid": "WpDh3DHGVqGBc2khvUtdSSaIpwuL8x7BP5NN-dltnhbtRpTJ6y2rT9YJc8eRTai8j_0skzSk6NNzVg",
+        "server": "EUW1",
+        "riotId": "SpainWithoutTheS#6443"
     },
     "472947833801015306": {
         "puuid": "OA-qBs9goDj-WkllfQ1-0BEbqVGeYiWGpIESKXKhzAUQ2cn966npQekdAzQF8StAlzjtGqvKRRkcjA",
@@ -28,11 +28,6 @@
         "puuid": "z9zeb3KT34D1Su-MhYfmWhUt5Ja8Ga_PV64oJ2QaJh055iNNcIIW6zL6QpvmhGyrr5Pl0W1IFXoKJw",
         "server": "NA1",
         "riotId": "Elemonation#NA1"
-    },
-    "612861398447554590": {
-        "puuid": "Y2VD05Mol0ygjNyV5yFlrV-Yo16ced50oGixYa3Qd2uG7RGj_lEMRBBL5PY_jFqv5z9cR9kdNUUXqA",
-        "server": "NA1",
-        "riotId": "SakuraMochii#0w0"
     },
     "472891237263998977": {
         "puuid": "l3O2b5ZIjzOt0dueQBli8MGX1A5jZODC3nPWWNx4WYIhRJ4K4N_EtLdDf9e99mHjsVSv18xerDMGXg",
@@ -64,17 +59,12 @@
         "server": "NA1",
         "riotId": "PollosHermanos28#Rose1"
     },
-    "000000000000000000": {
-        "puuid": "WlZfmtwbX6lv__fayTxKS368SZICKMZzLL-JWeZsx8FnBGQjO7pg4_B6sBfdmdZuOMJzCt5wCii4LQ",
-        "server": "NA1",
-        "riotId": "Guest"
-    },
     "000000000000000001": {
         "puuid": "EuBaE93aLDA4ofZc5vJDRflu-H-zl0LPFB8pzRMGt-KFUkEhZnraROruV5-LrRzmz8wJBxS5wu-pEw",
         "server": "NA1",
         "riotId": "Carbonex21#NA1"
     },
-    "405198765889290250":{
+    "405198765889290250": {
         "puuid": "Zb0h8h1_q6-JZuH-EH5i_mzkPLKNL8LUls-qU7R0W6CppkwjgKSEOS9hbWNJzXOmUmnHfRIXAqDT_A",
         "server": "NA1",
         "riotId": "babus#2005"
@@ -83,5 +73,40 @@
         "puuid": "RTwdaalRTxtbEhqLnLjulr49jtuYG8M4M_pv-q4kfWa7e6Z7yxQvUTN9tsW8ynKY1O6YxCyloBDsmw",
         "server": "NA1",
         "riotId": "spicy poo#poo"
+    },
+    "227113377145552896": {
+        "puuid": "W_0ya-p66N9FfhpCh-SW-nnqh8yXPO_p18KqxwvjaPPBUAWhBigWYSbMDntCJgGSwycS65RDlEQ-ew",
+        "server": "NA1",
+        "riotId": "hamlegs#NA1"
+    },
+    "1012511330730786818": {
+        "puuid": "BMzoeFgrXX69jIVYts9kGSK9Hp20kuHOWZALKx-9oTiwO6iCNZAUjOTiiHus7cKo_n0_30MxKG8QXA",
+        "server": "NA1",
+        "riotId": "kiwizzz#green"
+    },
+    "000000000000000002": {
+        "puuid": "UQv_nEdYEF95b7rTkKqKcZ0Fya_GVaB5OeNBKrWBCKNc6tWDORlwOlkHLxFEvrrr79vu-BGyRFdH-A",
+        "server": "NA1",
+        "riotId": "Cloudhead11#NA1"
+    },
+    "000000000000000003": {
+        "puuid": "Ov_bKZJlUPt2r10tgceplYDLGkkJHrFSwny2bvxWAKObeWfXldPiUB4-32V1obEnf6OBPLVrAUXK0g",
+        "server": "NA1",
+        "riotId": "CrispyPineapple#NA1"
+    },
+    "000000000000000004": {
+        "puuid": "458qqEp7Ec73MWlIV__UXKjyeES9sZdBNZMWYWTSPYal9j6jwhaw1k1TDGjTxMBQMOmU8f5_T2l1Qw",
+        "server": "NA1",
+        "riotId": "Blytee#NA1"
+    },
+    "329447036028059658": {
+        "puuid": "c-Hn98QUKfOvQP6jFTJd2MDEpIsEYJLcnZTi6-xBdjepobDh8tMwxWFLWUtgg3wWwf8cO_Gni1AeKA",
+        "server": "NA1",
+        "riotId": "bubblegumluvr#minji"
+    },
+    "572638258803245058": {
+        "puuid": "ksbCmnL9siDMKe39WB57f6GhNS1KiGUzcIre-GnbLJmNyjAbr0_ImxRzCmxhpTeoLPGilh4zbap5pg",
+        "server": "NA1",
+        "riotId": "gelbieuwu#NA1"
     }
 }

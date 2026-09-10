@@ -11,7 +11,16 @@ from discord.ext import commands
 from ...laning_render import build_laning_embed
 from ...render import make_embed
 from ...services.riot_api import RiotAPIError, get_client
-from ..shared import GUILD_IDS, SERVERS, log_command, match_reference_index, not_found_embed, target_for
+from ..shared import (
+    GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
+    SERVERS,
+    log_command,
+    match_reference_index,
+    not_found_embed,
+    target_at_match_position,
+    target_for,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,9 +38,10 @@ class LaningCommands(commands.Cog):
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option("match_id", description="Match ID or recent-game number (1=latest); blank uses latest", required=False)
-    async def laning(self, ctx, server, username, match_id):
-        """Show a player's Gold/XP/CS side by side with their lane opponent's at the 5/10/15-minute checkpoints, with a bar chart, same layout as /jungleproximity."""
-        log_command(ctx, server=server, username=username, match_id=match_id)
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def laning(self, ctx, server, username, match_id, position):
+        """Compare the target, or a selected match slot, with their lane opponent."""
+        log_command(ctx, server=server, username=username, match_id=match_id, position=position)
         await ctx.defer()
         target = await target_for(ctx, server, username)
         if target is None:
@@ -52,6 +62,12 @@ class LaningCommands(commands.Cog):
                 await ctx.respond(embed=make_embed("No matching game found."))
                 return
             match = await asyncio.to_thread(get_client().match, selected_id, target.server)
+            if position is not None:
+                selected_target = target_at_match_position(match, position, target.server)
+                if selected_target is None:
+                    await ctx.respond(embed=make_embed(f"Match `{selected_id}` has no player in position {position}."))
+                    return
+                target = selected_target
             try:
                 timeline = await asyncio.to_thread(get_client().match_timeline, selected_id, target.server)
             except RiotAPIError:

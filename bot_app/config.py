@@ -36,7 +36,7 @@ class Settings:
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
     poll_interval_seconds: int = 120
-    max_tracked_accounts: int = 25
+    max_tracked_accounts: int = 50
     timezone: str = "UTC"
     match_cache_enabled: bool = True
     tft_api_key: str = ""
@@ -164,7 +164,7 @@ def get_settings() -> Settings:
         openai_api_key=str(_get(file_values, "openai_api_key", "") or ""),
         openai_model=str(_get(file_values, "openai_model", "gpt-5-mini")),
         poll_interval_seconds=_positive_int(file_values, "poll_interval_seconds", 120),
-        max_tracked_accounts=_positive_int(file_values, "max_tracked_accounts", 25),
+        max_tracked_accounts=_positive_int(file_values, "max_tracked_accounts", 50),
         timezone=_timezone(file_values),
         match_cache_enabled=_boolean(file_values, "match_cache_enabled", True),
         sync_commands_enabled=_boolean(file_values, "sync_commands_enabled", True),

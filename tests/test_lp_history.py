@@ -4,7 +4,12 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from bot_app.lp_history import since_local_midnight, summarize, summary_text
+from bot_app.lp_history import (
+    since_local_days,
+    since_local_midnight,
+    summarize,
+    summary_text,
+)
 from bot_app.queues import SOLO_QUEUE_ID
 from bot_app.ranks import RankSnapshot
 from bot_app.store import PlayerState
@@ -83,3 +88,45 @@ class LpHistoryTests(unittest.TestCase):
         )
         self.assertEqual(len(entries), 1)
         self.assertEqual(summarize(entries).net, 12)
+
+    def test_multiple_local_days_start_at_earliest_midnight(self) -> None:
+        """Include today plus the requested number of preceding calendar days."""
+        zone = ZoneInfo("America/Los_Angeles")
+        now = datetime(2026, 8, 14, 12, tzinfo=zone)
+        first_midnight = datetime(2026, 8, 12, tzinfo=zone).timestamp()
+        state = PlayerState(
+            history={
+                SOLO_QUEUE_ID: [
+                    {"t": first_midnight - 1, "d": 99},
+                    {"t": first_midnight, "d": 10, "w": True},
+                    {
+                        "t": datetime(2026, 8, 13, 8, tzinfo=zone).timestamp(),
+                        "d": -8,
+                        "w": False,
+                    },
+                    {
+                        "t": datetime(2026, 8, 14, 11, tzinfo=zone).timestamp(),
+                        "d": 12,
+                        "w": True,
+                    },
+                ]
+            }
+        )
+
+        entries = since_local_days(
+            state,
+            SOLO_QUEUE_ID,
+            "America/Los_Angeles",
+            days=3,
+            now=now,
+        )
+
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(summarize(entries).net, 14)
+
+    def test_local_days_rejects_non_positive_window(self) -> None:
+        """Reject invalid windows even when called outside Discord validation."""
+        with self.assertRaises(ValueError):
+            since_local_days(
+                PlayerState(), SOLO_QUEUE_ID, "America/Los_Angeles", days=0
+            )

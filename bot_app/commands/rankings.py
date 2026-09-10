@@ -12,7 +12,7 @@ from discord.ext import commands
 from ..charts import LP_CHART_FILENAME, build_lp_chart
 from ..config import get_settings
 from ..leaderboard import LeaderboardRow, leaderboard_rows
-from ..lp_history import since_local_midnight, summarize, summary_text
+from ..lp_history import since_local_days, summarize, summary_text
 from ..paginator import Paginator
 from ..queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID
 from ..render import make_embed, rank_text
@@ -80,32 +80,55 @@ class RankingCommands(commands.Cog):
         return target, state
 
     @discord.slash_command(
-        guild_ids=GUILD_IDS, description="Show today's stored LP changes"
+        guild_ids=GUILD_IDS, description="Show stored LP changes for recent days"
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option(
         "queue", description="Ranked queue", choices=["solo", "flex"], required=False
     )
-    async def today(self, ctx, server, username, queue="solo"):
-        """Handle today."""
+    @discord.option(
+        "days",
+        int,
+        description="Local calendar days to include",
+        min_value=1,
+        max_value=365,
+        required=False,
+    )
+    async def today(self, ctx, server, username, queue="solo", days=1):
+        """Summarize saved LP movement across recent local calendar days."""
         log_command(
-            ctx, server=server, username=username, queue=queue
+            ctx, server=server, username=username, queue=queue, days=days
         )
         await ctx.defer()
         target, state = await self._history_target(ctx, server, username)
         if state is None:
             return
-        entries = since_local_midnight(state, _queue_id(queue), get_settings().timezone)
-        LOGGER.debug("/today: %d entries since local midnight for %s (queue=%s)", len(entries), target.riot_id, queue)
+        entries = since_local_days(
+            state,
+            _queue_id(queue),
+            get_settings().timezone,
+            days=days,
+        )
+        LOGGER.debug(
+            "/today: %d entries across %d local day(s) for %s (queue=%s)",
+            len(entries),
+            days,
+            target.riot_id,
+            queue,
+        )
         if not entries:
+            period = "today" if days == 1 else f"in the last {days} local days"
             await ctx.respond(
                 embed=make_embed(
-                    "No LP history recorded today. It starts filling after the next ranked game."
+                    f"No LP history recorded {period}. It starts filling after the next ranked game."
                 )
             )
             return
-        embed = make_embed(summary_text(summarize(entries)), title=f"Today — {target.riot_id}")
+        title = "Today" if days == 1 else f"Last {days} Days"
+        embed = make_embed(
+            summary_text(summarize(entries)), title=f"{title} — {target.riot_id}"
+        )
         await ctx.respond(embed=embed)
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Graph stored LP history")

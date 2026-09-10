@@ -15,9 +15,12 @@ def temporary_state():
         root = Path(directory)
         for name, filename in {
             "DATA_PATH": "data.json",
+            "TFT_DATA_PATH": "tft_data.json",
             "TRACKER_STATE_PATH": "tracker.json",
-            "GUEST_STATE_PATH": "guest.json",
+            "TFT_TRACKER_STATE_PATH": "tft_tracker.json",
             "LIVE_GAME_STATE_PATH": "live.json",
+            "LIVE_GAME_MESSAGE_PATH": "live_messages.json",
+            "TFT_LIVE_GAME_STATE_PATH": "tft_live.json",
             "GUILD_STATE_PATH": "guilds.json",
         }.items():
             stack.enter_context(patch(f"bot_app.store.{name}", root / filename))

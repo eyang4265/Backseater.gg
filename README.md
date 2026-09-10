@@ -1,12 +1,23 @@
 # VibeCode Bot
 
-A Discord bot that tracks League of Legends accounts: it announces ranked
-matches with LP changes and a damage chart, renders live lobbies with each
-player's rank, and answers profile/mastery/timeline lookups — `/timeline`
+A Discord bot that tracks Riot accounts: it announces League ranked matches
+with LP changes and a damage chart, plus completed Teamfight Tactics
+placements with per-tracked-player LP changes. It renders League live lobbies
+with each player's rank and exposes TFT through the explicitly prefixed
+`/tftmatch` command. (TFT live lobbies are disabled while Riot's
+Spectator-TFT-V5 endpoint returns HTTP 403 for the TFT key.) Owner-only
+`/add` resolves and stores both the League
+and TFT PUUIDs; `/tftadd` remains available when the TFT Riot ID differs or its
+half needs to be retried, and `/tftupdate` refreshes the TFT PUUID from a
+stored League PUUID for every tracked account. It also answers profile/mastery/timeline lookups — `/timeline`
 plots that player's kills and deaths on the minimap and tracks their gold lead
 over the lane opponent at every five-minute mark. `/matchhistory` shows up to
 ten recent games with their result, champion, KDA, CS, queue, duration, and a
 W/L score; mode and champion filters search recent games for up to ten matches.
+
+`/leaguecommands` lists every public League/general command and `/tftcommands`
+lists every public TFT-prefixed command. Both are generated from the registered
+command tree, so new public commands appear automatically.
 
 ## Running it
 
@@ -17,7 +28,8 @@ python3 -m pip install -r requirements.txt
 Configuration is read from environment variables first, then from
 `json/secrets.json` (gitignored — copy `json/secrets.example.json` and fill it
 in). Required: `DISCORD_TOKEN`, `RIOT_API_KEY`, `DISCORD_OWNER_ID`,
-`ANNOUNCEMENT_CHANNEL_ID`. Optional: `GUILD_IDS`, `TFT_API_KEY`,
+`ANNOUNCEMENT_CHANNEL_ID`. TFT commands additionally require `TFT_API_KEY`.
+Optional: `GUILD_IDS`,
 `POLL_INTERVAL_SECONDS`, `MAX_TRACKED_ACCOUNTS`, `TIMEZONE` (IANA name),
 `MATCH_CACHE_ENABLED`, `LOG_LEVEL`.
 
@@ -45,7 +57,7 @@ and SQLite match cache, and needs neither network access nor a Discord token.
 | Services | `ranks`, `history`, `lp_history`, `leaderboard` | Rank math and stored-state queries; `ranks.fetch_ranks` delegates to Riot |
 | Adapters | `riot`, `ddragon`, `store`, `match_cache` | Riot API, Data Dragon, JSON and SQLite state |
 | Presentation | `emoji`, `render`, `charts` | Embeds, team columns, images |
-| Features | `announce`, `tracker`, `guest_tracker`, `account_registry` | Polling, formatting, publishing, account management |
+| Features | `announce`, `tracker`, `account_registry` | Polling, formatting, publishing, account management |
 | Interface | `commands/` | Slash-command cogs |
 
 Two rules keep it that way:

@@ -23,9 +23,18 @@ from ..routing import (
     opgg_url,
     split_riot_id,
 )
-from ..store import load_accounts, remember_embed_button_state
+from ..store import (
+    load_accounts,
+    load_teammates,
+    load_tft_accounts,
+    remember_embed_button_state,
+)
+from ..timeline import participant_at_slot
 
 LOGGER = logging.getLogger(__name__)
+MATCH_POSITION_DESCRIPTION = (
+    "Player slot: 1-5 blue Top→Support, 6-10 red Top→Support"
+)
 _RIOT_COMMAND_EXECUTOR = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="riot-command"
 )
@@ -166,6 +175,80 @@ class Target:
         return opgg_url(self.server, self.riot_id)
 
 
+def tracked_players_in_lobby(game: dict[str, Any], target: Target) -> list[Any]:
+    """Build tracked-player descriptors for either live-game command."""
+    from ..announce import TrackedPlayer
+
+    registered = {account.puuid: account for account in load_accounts().values()}
+    players = []
+    for participant in game.get("participants", []) or []:
+        account = registered.get(participant.get("puuid"))
+        if account is None:
+            continue
+        players.append(TrackedPlayer(account.puuid, account.riot_id, account.server))
+    if target.puuid not in registered:
+        players.append(TrackedPlayer(target.puuid, target.riot_id, target.server))
+    return players
+
+
+def tracked_tft_players_in_lobby(
+    game: dict[str, Any], target: Target
+) -> list[Any]:
+    """Build descriptors from the independent TFT account registry."""
+    from ..announce import TrackedPlayer
+
+    registered = {
+        account.puuid: account for account in load_tft_accounts().values()
+    }
+    players = []
+    for participant in game.get("participants", []) or []:
+        account = registered.get(participant.get("puuid"))
+        if account is not None:
+            players.append(TrackedPlayer(account.puuid, account.riot_id, account.server))
+    if target.puuid not in registered:
+        players.append(TrackedPlayer(target.puuid, target.riot_id, target.server))
+    return players
+
+
+def target_at_match_position(
+    match: dict[str, Any], position: int | None, server: str
+) -> Target | None:
+    """Build a command target from a match's blue/red role slot.
+
+    Slots 1-5 are blue Top, Jungle, Mid, ADC, and Support; slots 6-10
+    repeat that order for red.  The match's platform remains authoritative
+    for follow-up Riot calls such as champion mastery.
+    """
+    participant = participant_at_slot(match, position)
+    if participant is None or not participant.get("puuid"):
+        return None
+    name = (
+        participant.get("riotIdGameName")
+        or participant.get("summonerName")
+        or "Unknown player"
+    )
+    tag_line = participant.get("riotIdTagline")
+    return Target(
+        puuid=str(participant["puuid"]),
+        server=server,
+        riot_id=f"{name}#{tag_line}" if tag_line else str(name),
+    )
+
+
+async def target_at_latest_match_position(
+    target: Target, position: int
+) -> Target | None:
+    """Resolve a role slot from ``target``'s most recent match."""
+    client = get_client()
+    match_ids = await riot_to_thread(
+        client.match_ids, target.puuid, target.server, count=1
+    )
+    if not match_ids:
+        return None
+    match = await riot_to_thread(client.match, match_ids[0], target.server)
+    return target_at_match_position(match, position, target.server)
+
+
 def _discord_user_id(user: Any) -> str | None:
     """Normalize a typed user, raw numeric id, or exact Discord mention."""
     if user is None:
@@ -181,9 +264,24 @@ def _discord_user_id(user: Any) -> str | None:
 
 
 def _linked_target(identifier: str | None, *, include_icon: bool = True) -> Target | None:
-    """Resolve a stored account by Discord user id, if one is tracked."""
-    accounts = load_accounts()
-    account = accounts.get(identifier) if identifier else None
+    """Resolve a stored account by Discord user id.
+
+    A tracked ``data.json`` account wins; failing that, a teammate PUUID tied
+    to the same Discord user is used, so a ``username`` mention of a teammate
+    resolves even though the pollers never track them.
+    """
+    if not identifier:
+        return None
+    account = load_accounts().get(identifier)
+    if account is None:
+        account = next(
+            (
+                mate
+                for mate in load_teammates().values()
+                if mate.discord_id == identifier
+            ),
+            None,
+        )
     if account is None:
         return None
     return Target(
@@ -221,7 +319,12 @@ def _summoner_target(
     matched_server = client.home_platform(puuid, lookup_servers) or lookup_servers[0]
 
     stored = next(
-        (a.server for a in load_accounts().values() if a.puuid == puuid), None
+        (
+            a.server
+            for a in (*load_accounts().values(), *load_teammates().values())
+            if a.puuid == puuid
+        ),
+        None,
     )
     if stored:
         LOGGER.debug("_summoner_target: using stored server %s over probed %s", stored, matched_server)
@@ -300,6 +403,74 @@ async def target_for(
     )
 
 
+def resolve_tft_username(
+    ctx: Any, server: str | None, username: str | None
+) -> Target | None:
+    """Resolve only against TFT-linked accounts and TFT-key API lookups."""
+    accounts = load_tft_accounts()
+    if username is None or is_discord_mention(username):
+        identifier = (
+            str(ctx.author.id)
+            if username is None
+            else _discord_user_id(username)
+        )
+        account = accounts.get(identifier) if identifier else None
+        return (
+            Target(account.puuid, account.server, account.riot_id)
+            if account is not None
+            else None
+        )
+
+    name, tag = split_riot_id(username, None)
+    if server is None and tag and tag.upper() in SERVERS:
+        server, tag = tag.upper(), None
+    candidates = lookup_platforms(server)
+    client = get_client()
+    puuid = None
+    for candidate in candidates:
+        puuid = client.tft_puuid(name or "", tag or candidate, candidate)
+        if puuid:
+            break
+    if not puuid:
+        return None
+    stored = next((item for item in accounts.values() if item.puuid == puuid), None)
+    platform = (
+        stored.server
+        if stored is not None
+        else client.tft_home_platform(puuid, candidates) or candidates[0]
+    )
+    riot_id = (
+        stored.riot_id
+        if stored is not None
+        else client.tft_riot_id(puuid, platform) or f"{name}#{tag}"
+    )
+    return Target(puuid, platform, riot_id)
+
+
+async def tft_target_for(
+    ctx: Any, server: str | None, username: str | None
+) -> Target | None:
+    """Resolve a TFT command target without using the League registry."""
+    return await riot_to_thread(resolve_tft_username, ctx, server, username)
+
+
+def tft_not_found_embed(
+    username: str | None, server: str | None, *, ctx: Any = None
+) -> discord.Embed:
+    """Explain a failed TFT-specific account lookup."""
+    if username is None or is_discord_mention(username):
+        return make_embed(
+            "That Discord user has no tracked TFT account."
+            + supplied_options_text(ctx)
+        )
+    name, tag = split_riot_id(username, None)
+    who = f"{name}#{tag}" if name and tag else (name or "That TFT account")
+    return make_embed(
+        f"{who} could not be found for TFT on {searched_servers(server)}."
+        + supplied_options_text(ctx)
+    )
+
+
 async def riot_to_thread(function, /, *args, **kwargs):
     """Run blocking command-side Riot work on its own bounded executor.
 
@@ -356,3 +527,10 @@ def set_player_author(
         icon_url=target.icon_url,
         url=opgg_url(target.server, riot_id),
     )
+
+
+def set_tft_player_author(
+    embed: discord.Embed, target: Target, *, name: str | None = None
+) -> None:
+    """Set TFT identity without attaching a League-specific OP.GG URL."""
+    embed.set_author(name=name or target.riot_id)

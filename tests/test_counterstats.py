@@ -14,11 +14,26 @@ def _match(match_id, *, win, role="TOP", enemy="Ahri", enemy_role="TOP", queue_i
         "info": {
             "queueId": queue_id,
             "participants": [
-                {"puuid": "me", "championName": "Garen", "teamId": 100, "teamPosition": role, "win": win},
-                {"puuid": f"enemy-{match_id}", "championName": enemy, "teamId": 200, "teamPosition": enemy_role, "win": not win},
+                {"participantId": 1, "puuid": "me", "championName": "Garen", "teamId": 100, "teamPosition": role, "win": win},
+                {"participantId": 6, "puuid": f"enemy-{match_id}", "championName": enemy, "teamId": 200, "teamPosition": enemy_role, "win": not win},
                 {"puuid": f"ally-{match_id}", "championName": "Lux", "teamId": 100, "win": win},
             ],
         },
+    }
+
+
+def _timeline(my_gold, enemy_gold):
+    return {
+        "info": {
+            "frames": [{
+                "timestamp": 15 * 60_000,
+                "participantFrames": {
+                    "1": {"totalGold": my_gold, "xp": 0, "minionsKilled": 0, "jungleMinionsKilled": 0},
+                    "6": {"totalGold": enemy_gold, "xp": 0, "minionsKilled": 0, "jungleMinionsKilled": 0},
+                },
+                "events": [],
+            }]
+        }
     }
 
 
@@ -51,6 +66,25 @@ class CounterStatsTests(unittest.TestCase):
     def test_duplicate_match_payload_is_ignored(self):
         report = aggregate([_match("1", win=True), _match("1", win=True)], "me", "Garen")
         self.assertEqual((report.games, report.counters[0].games), (1, 1))
+
+    def test_laning_mode_uses_15_minute_gold_instead_of_final_result(self):
+        won_game_lost_lane = _match("1", win=True)
+        lost_game_won_lane = _match("2", win=False)
+        report = aggregate(
+            [won_game_lost_lane, lost_game_won_lane], "me", "Garen",
+            timelines={"1": _timeline(4_000, 5_000), "2": _timeline(6_000, 5_000)},
+            laning=True,
+        )
+        self.assertEqual((report.games, report.wins, report.laning), (2, 1, True))
+        self.assertEqual((report.counters[0].games, report.counters[0].wins), (2, 1))
+
+    def test_laning_mode_excludes_ties_and_missing_timelines(self):
+        report = aggregate(
+            [_match("1", win=True), _match("2", win=True)], "me", "Garen",
+            timelines={"1": _timeline(5_000, 5_000)},
+            laning=True,
+        )
+        self.assertEqual((report.games, report.wins, report.counters), (0, 0, ()))
 
     def test_embed_pages_keep_every_field_under_discord_limit(self):
         report = CounterStatsReport(

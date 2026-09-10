@@ -24,9 +24,13 @@ from .ranks import RankSnapshot
 LOGGER = logging.getLogger(__name__)
 
 DATA_PATH = JSON_DIR / "data.json"
+TFT_DATA_PATH = JSON_DIR / "tft_data.json"
+TEAMMATE_DATA_PATH = JSON_DIR / "teammates.json"
 TRACKER_STATE_PATH = JSON_DIR / "match_tracker_state.json"
-GUEST_STATE_PATH = JSON_DIR / "guest_tracker_state.json"
+TFT_TRACKER_STATE_PATH = JSON_DIR / "tft_match_tracker_state.json"
 LIVE_GAME_STATE_PATH = JSON_DIR / "live_game_state.json"
+LIVE_GAME_MESSAGE_PATH = JSON_DIR / "live_game_messages.json"
+TFT_LIVE_GAME_STATE_PATH = JSON_DIR / "tft_live_game_state.json"
 GUILD_STATE_PATH = JSON_DIR / "guilds.json"
 EMBED_BUTTON_STATE_PATH = JSON_DIR / "embed_button_state.json"
 
@@ -34,6 +38,10 @@ EMBED_BUTTON_STATE_PATH = JSON_DIR / "embed_button_state.json"
 MATCH_HISTORY_LIMIT = 100
 RANK_HISTORY_LIMIT = 500
 EMBED_BUTTON_STATE_LIMIT = 500
+# How many still-open live-game lobbies we keep posted-message records for. A
+# lobby is normally removed the moment its match is announced or the players
+# leave it; this cap only bounds the file if the bot misses that completion.
+LIVE_GAME_MESSAGE_LIMIT = 200
 
 
 _QUEUE_STATE_KEYS = {SOLO_QUEUE_ID: "solo", FLEX_QUEUE_ID: "flex"}
@@ -187,6 +195,100 @@ def save_accounts(accounts: dict[str, Account]) -> None:
     _tracked_puuid_cache.invalidate()
 
 
+def load_teammates() -> dict[str, Account]:
+    """Every ``/teammate`` PUUID, keyed by PUUID.
+
+    Teammates are not tracked accounts: the pollers never fetch their games
+    and they never trigger an announcement of their own.  They exist only so
+    that a completed-match announcement or ``/match`` for a real data.json
+    account also bolds a teammate who happened to share that lobby.  The
+    ``discord_id`` field is optional — it is only set when ``/teammate`` was
+    told which Discord user the PUUID belongs to — and is left blank
+    otherwise.
+    """
+    raw = read_json(TEAMMATE_DATA_PATH, {})
+    teammates: dict[str, Account] = {}
+    for puuid, entry in raw.items() if isinstance(raw, dict) else ():
+        if not isinstance(entry, dict) or not puuid:
+            LOGGER.warning("Skipping malformed teammates.json entry for %s", puuid)
+            continue
+        discord_id = entry.get("discordId")
+        teammates[str(puuid)] = Account(
+            discord_id=str(discord_id) if discord_id else "",
+            puuid=str(puuid),
+            server=entry.get("server") or "NA1",
+            riot_id=entry.get("riotId") or "Unknown teammate",
+        )
+    return teammates
+
+
+def save_teammates(teammates: dict[str, Account]) -> None:
+    """Atomically persist the ``/teammate`` PUUID registry."""
+    write_json(
+        TEAMMATE_DATA_PATH,
+        {
+            account.puuid: {
+                "server": account.server,
+                "riotId": account.riot_id,
+                **({"discordId": account.discord_id} if account.discord_id else {}),
+            }
+            for account in teammates.values()
+        },
+        indent=4,
+    )
+    LOGGER.info("Saved %d teammate PUUIDs", len(teammates))
+    _teammate_puuid_cache.invalidate()
+
+
+def update_teammates(
+    mutate: Callable[[dict[str, Account]], None],
+) -> dict[str, Account]:
+    """Atomically read, mutate, and persist the teammate PUUID registry."""
+    with _write_lock:
+        teammates = load_teammates()
+        mutate(teammates)
+        save_teammates(teammates)
+        return teammates
+
+
+def load_tft_accounts() -> dict[str, Account]:
+    """Every separately linked TFT account, keyed by Discord id."""
+    raw = read_json(TFT_DATA_PATH, {})
+    accounts: dict[str, Account] = {}
+    for discord_id, entry in raw.items() if isinstance(raw, dict) else ():
+        if not isinstance(entry, dict) or not entry.get("puuid"):
+            LOGGER.warning("Skipping malformed tft_data.json entry for %s", discord_id)
+            continue
+        accounts[str(discord_id)] = Account(
+            discord_id=str(discord_id),
+            puuid=entry["puuid"],
+            server=entry.get("server") or "NA1",
+            riot_id=entry.get("riotId") or "Unknown TFT player",
+        )
+    return accounts
+
+
+def save_tft_accounts(accounts: dict[str, Account]) -> None:
+    """Atomically save the independent TFT account registry."""
+    write_json(
+        TFT_DATA_PATH,
+        {discord_id: account.to_json() for discord_id, account in accounts.items()},
+        indent=4,
+    )
+    LOGGER.info("Saved %d tracked TFT accounts", len(accounts))
+
+
+def update_tft_accounts(
+    mutate: Callable[[dict[str, Account]], None],
+) -> dict[str, Account]:
+    """Atomically read, mutate, and persist the TFT account registry."""
+    with _write_lock:
+        accounts = load_tft_accounts()
+        mutate(accounts)
+        save_tft_accounts(accounts)
+        return accounts
+
+
 def update_accounts(mutate: Callable[[dict[str, Account]], None]) -> dict[str, Account]:
     """Atomically read, mutate, and persist the tracked-account registry."""
     with _write_lock:
@@ -231,9 +333,50 @@ class _TrackedPuuidCache:
 _tracked_puuid_cache = _TrackedPuuidCache()
 
 
+class _TeammatePuuidCache:
+    """Caches the teammate-puuid set, invalidated by teammates.json's mtime."""
+
+    def __init__(self) -> None:
+        """Initialize the instance."""
+        self._lock = threading.Lock()
+        self._mtime: float | None = None
+        self._puuids: frozenset[str] = frozenset()
+
+    def get(self) -> frozenset[str]:
+        """Return the cached teammate puuid set, refreshing on file change."""
+        try:
+            mtime = TEAMMATE_DATA_PATH.stat().st_mtime
+        except OSError:
+            return frozenset()
+        with self._lock:
+            if mtime != self._mtime:
+                self._puuids = frozenset(load_teammates())
+                self._mtime = mtime
+            return self._puuids
+
+    def invalidate(self) -> None:
+        """Drop the cached set so the next read reloads from disk."""
+        with self._lock:
+            self._mtime = None
+            self._puuids = frozenset()
+
+
+_teammate_puuid_cache = _TeammatePuuidCache()
+
+
 def tracked_puuids() -> frozenset[str]:
     """Puuids of every account in data.json. Used to bold them in lobbies."""
     return _tracked_puuid_cache.get()
+
+
+def teammate_puuids() -> frozenset[str]:
+    """Puuids added through ``/teammate``.
+
+    Bolded in completed-match announcements and ``/match`` alongside real
+    tracked players, but only when the same lobby also holds a data.json
+    account — a teammate never surfaces a match on their own.
+    """
+    return _teammate_puuid_cache.get()
 
 
 def puuid_for_discord_id(discord_id: int | str) -> str | None:
@@ -369,20 +512,66 @@ def save_tracker_state(state: dict[str, PlayerState]) -> None:
     )
 
 
-def load_guest_matches() -> list[str]:
-    """Load guest matches."""
-    raw = read_json(GUEST_STATE_PATH, {})
-    matches = raw.get("matches") if isinstance(raw, dict) else None
-    return dedupe_tail(matches or [])
+@dataclass
+class TftPlayerState:
+    """Per-TFT-account match history, first-poll migration, and last TFT rank.
+
+    ``rank`` is the account's most recently seen Ranked TFT standing, kept only
+    so a completed-match announcement can show the LP delta since the previous
+    ranked game the same way League announcements do.
+    """
+
+    matches: list[str] = field(default_factory=list)
+    initialized: bool = False
+    rank: RankSnapshot | None = None
+
+    @classmethod
+    def from_json(cls, raw: Any) -> "TftPlayerState":
+        """Decode one TFT tracker record."""
+        if not isinstance(raw, dict):
+            return cls()
+        return cls(
+            matches=dedupe_tail(raw.get("matches") or []),
+            initialized=bool(raw.get("initialized", False)),
+            rank=RankSnapshot.from_state(raw.get("rank")),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        """Encode one TFT tracker record."""
+        return {
+            "matches": self.matches,
+            "initialized": self.initialized,
+            "rank": self.rank.to_state() if self.rank else None,
+        }
+
+    def remember(self, match_ids: Iterable[str]) -> None:
+        """Remember completed TFT match ids."""
+        self.matches = dedupe_tail([*self.matches, *match_ids])
+        self.initialized = True
 
 
-def save_guest_matches(match_ids: Iterable[str]) -> None:
-    """Save guest matches."""
-    write_json(GUEST_STATE_PATH, {"matches": dedupe_tail(match_ids)})
+def load_tft_tracker_state() -> dict[str, TftPlayerState]:
+    """Load independent TFT completed-match deduplication state."""
+    raw = read_json(TFT_TRACKER_STATE_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): TftPlayerState.from_json(value) for key, value in raw.items()}
+
+
+def save_tft_tracker_state(state: dict[str, TftPlayerState]) -> None:
+    """Save independent TFT completed-match deduplication state."""
+    write_json(
+        TFT_TRACKER_STATE_PATH,
+        {key: value.to_json() for key, value in state.items()},
+    )
 
 
 def load_live_game_state() -> dict[str, str]:
-    """Tracked Discord id -> the live game most recently announced for it."""
+    """Tracked Discord id -> the live game it is currently in.
+
+    The live poller retires an entry as soon as the player is confirmed to be
+    in no game, so this maps only to lobbies still in progress.
+    """
     raw = read_json(LIVE_GAME_STATE_PATH, {})
     if not isinstance(raw, dict):
         return {}
@@ -394,6 +583,88 @@ def load_live_game_state() -> dict[str, str]:
 def save_live_game_state(state: dict[str, str]) -> None:
     """Save live game state."""
     write_json(LIVE_GAME_STATE_PATH, state)
+
+
+def load_live_game_messages() -> dict[str, list[list[int]]]:
+    """Live-game key (``platform:gameId``) -> the ``[channel_id, message_id]``
+    pairs of every automatic live-game announcement posted for that lobby.
+
+    These records let the match poller delete the "in a live game" post once the
+    game is over. ``/livegame`` responses are deliberately never recorded here.
+    """
+    raw = read_json(LIVE_GAME_MESSAGE_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, list[list[int]]] = {}
+    for key, pairs in raw.items():
+        if not isinstance(pairs, list):
+            continue
+        valid = [
+            [int(pair[0]), int(pair[1])]
+            for pair in pairs
+            if isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and all(isinstance(part, int) for part in pair)
+        ]
+        if valid:
+            cleaned[str(key)] = valid
+    return cleaned
+
+
+def save_live_game_messages(records: dict[str, list[list[int]]]) -> None:
+    """Atomically persist the posted live-game announcement message records."""
+    write_json(LIVE_GAME_MESSAGE_PATH, records)
+
+
+def remember_live_game_message(
+    game_key: str, channel_id: int, message_id: int
+) -> None:
+    """Record one posted live-game announcement message under its lobby key."""
+    if not (isinstance(channel_id, int) and isinstance(message_id, int)):
+        return
+    with _write_lock:
+        records = load_live_game_messages()
+        pairs = records.pop(game_key, [])
+        if [channel_id, message_id] not in pairs:
+            pairs.append([channel_id, message_id])
+        records[game_key] = pairs
+        if len(records) > LIVE_GAME_MESSAGE_LIMIT:
+            for stale in list(records)[: len(records) - LIVE_GAME_MESSAGE_LIMIT]:
+                del records[stale]
+        save_live_game_messages(records)
+
+
+def pop_live_game_messages(game_keys: Iterable[str]) -> list[tuple[int, int]]:
+    """Remove and return every ``(channel_id, message_id)`` recorded for ``game_keys``."""
+    wanted = {str(key) for key in game_keys}
+    if not wanted:
+        return []
+    with _write_lock:
+        records = load_live_game_messages()
+        popped: list[tuple[int, int]] = []
+        changed = False
+        for key in wanted:
+            for channel_id, message_id in records.pop(key, []):
+                popped.append((channel_id, message_id))
+                changed = True
+        if changed:
+            save_live_game_messages(records)
+        return popped
+
+
+def load_tft_live_game_state() -> dict[str, str]:
+    """Tracked Discord id -> the TFT lobby most recently announced for it."""
+    raw = read_json(TFT_LIVE_GAME_STATE_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(discord_id): str(game_id) for discord_id, game_id in raw.items() if game_id
+    }
+
+
+def save_tft_live_game_state(state: dict[str, str]) -> None:
+    """Atomically save TFT live-lobby deduplication state."""
+    write_json(TFT_LIVE_GAME_STATE_PATH, state)
 
 
 def load_guild_channels() -> dict[str, int]:

@@ -16,46 +16,65 @@ LOGGER = logging.getLogger(__name__)
 
 _COMMANDS = (
     (
+        "Command Guides",
+        "**`/leaguecommands`** — List every public League and general bot command.\n"
+        "Usage: run with no options; the list is generated from registered commands.\n\n"
+        "**`/tftcommands`** — List every public Teamfight Tactics command.\n"
+        "Usage: run with no options; the list is generated from registered commands.",
+    ),
+    (
         "Players",
         "**`/profile`** — Show level, ranks, and top champions.\n"
         "Usage: add `server` and `username` (accepts `Name#Tag`).\n\n"
         "**`/opgg`** — Get an OP.GG profile link.\n"
         "Usage: add a player/server.\n\n"
-        "**`/livegame`** — Show the current lobby, champions, ranks, and win rates.\n"
+        "**`/livegame`** — Show the current League lobby, champions, ranks, and win rates.\n"
         "Usage: uses your tracked account by default.\n\n"
         "**`/matchhistory`** — Show up to 10 recent games with results, stats, and a W/L score.\n"
-        "Usage: optionally filter by `game_mode` or `champion` (filters search recent games for up to 10 matches), or add a player/server.\n\n"
+        "Usage: optionally filter by `game_mode` or `champion` (filters search recent games for up to 10 matches), add a player/server, or use `position:1-10`.\n\n"
+        "**`/tftmatchhistory`** — Show up to 10 recent TFT placements with level, eliminations, mode, and a top-4/bottom-4 score.\n"
+        "Usage: optionally filter by `queue`, or add a TFT player/server; defaults to your tracked TFT account.\n\n"
         "**`/matchlist`** — Show recent match IDs.\n"
-        "Usage: add a player/server.",
+        "Usage: add a player/server or use `position:1-10`.",
     ),
     (
         "Matches & Champions",
-        "**`/match`** — Show a completed match like an automatic announcement.\n"
-        "Usage: optionally provide `match_id` or a player.\n\n"
+        "**`/match`** — Show a completed League match like an automatic announcement.\n"
+        "Usage: optionally provide `match_id`, a player, or `position:1-10`.\n\n"
+        "**`/tftmatch`** — Show a completed Teamfight Tactics match like an automatic announcement.\n"
+        "Usage: optionally provide a TFT `match_id` or player; defaults to your latest TFT game.\n\n"
         "**`/timeline`** — Show timeline-derived kills, deaths, damage, and economy.\n"
         "Usage: optionally provide `match_id` and `position`.\n\n"
         "**`/jungleproximity`** — Show both team junglers' lane proximity for a match.\n"
         "Usage: optionally provide `match_id` or a player.\n\n"
         "**`/laning`** — Show a player's Gold/XP/CS side by side with their lane opponent's.\n"
-        "Usage: optionally provide `match_id` or a player. Jungle has no lane opponent and is not supported.\n\n"
+        "Usage: optionally provide `match_id`, a player, or `position:1-10`. Jungle has no lane opponent and is not supported.\n\n"
         "**`/mastery`** — Show all champion mastery or details for one champion.\n"
-        "Usage: optionally provide `champion` or a player.\n\n"
-        "**`/today`** — Show today's saved LP movement.\n"
-        "Usage: optionally provide a player or `queue`.\n\n"
+        "Usage: optionally provide `champion`, a player, or `position:1-10` to use that slot from the player's latest match.\n\n"
+        "**`/today`** — Show saved LP movement for one or more recent days.\n"
+        "Usage: optionally provide a player, `queue`, or `days` (defaults to 1).\n\n"
         "**`/lpgraph`** — Graph saved LP history.\n"
         "Usage: optionally provide a player, `queue`, or `days`.\n\n"
         "**`/leaderboard`** — Rank tracked accounts from saved snapshots.\n"
         "Usage: optionally choose a `queue`.\n\n"
         "**`/duo`** — Show the cached record for two tracked players.\n"
-        "Usage: `teammate:<user>`; optionally provide the primary player or filter by `game_mode`.\n\n"
+        "Usage: `teammate:<user>`; optionally provide the primary player, use `position:1-10`, or filter by `game_mode`.\n\n"
         "**`/champ`** — Show live OP.GG champion stats, skill order, rune emotes, and item build emotes.\n"
         "Usage: `champion:<name>` (uses global stats by default); optionally choose `server` and `position`, or use the position buttons.\n\n"
         "**`/champstats`** — Show your cached record on one champion with rune, final-item, and boot breakdowns.\n"
-        "Usage: `champion:<name>`; optionally choose `queue`, `role`, `server`, `username`, or `filter`.\n\n"
+        "Usage: `champion:<name>`; optionally choose `queue`, `role`, `server`, `username`, `filter`, or `position:1-10`.\n\n"
         "**`/counterstats`** — Show a champion's win rate against every enemy champion.\n"
-        "Usage: `champion:<name> role:<role>`; optionally choose `queue`, `filter`, `server`, or `username`, then use the five role buttons.\n\n"
+        "Usage: `champion:<name> role:<role>`; optionally choose `queue`, `filter`, `server`, `username`, or `position:1-10`, then use the five role buttons.\n\n"
         "**`/coachless`** — Show Coachless.gg rune and item WPA recommendations.\n"
         "Usage: `champion:<name> role:<role>`.",
+    ),
+    (
+        "Meetups",
+        "**`/meetup`** — Poll the group on what to do and when, then lock a plan in and ping everyone to double-check.\n"
+        "Usage: `/meetup propose title:<name> activities:<a, b> times:<fri 7pm, sat 8pm>`; "
+        "optionally add `location` or `timezone`. Vote with the two dropdowns, press **Lock it in** to fix the winning "
+        "activity and time, then `/meetup confirm` to ping everyone the poll expects. "
+        "`/meetup list` shows this server's open meetups and `/meetup cancel` removes one.",
     ),
     (
         "Riot & Server",

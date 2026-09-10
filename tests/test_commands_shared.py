@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from bot_app.commands.shared import (
     _discord_user_id,
@@ -10,7 +10,11 @@ from bot_app.commands.shared import (
     log_command,
     not_found_embed,
     resolve_username,
+    resolve_tft_username,
     supplied_options_text,
+    Target,
+    target_at_latest_match_position,
+    target_at_match_position,
 )
 from bot_app.store import Account
 
@@ -23,6 +27,13 @@ class TargetResolutionTests(unittest.TestCase):
             "1": Account("1", "p1", "NA1", "One#NA1"),
             "2": Account("2", "p2", "EUW1", "Two#EUW"),
         }
+        self.teammates: dict[str, Account] = {}
+        patcher = patch(
+            "bot_app.commands.shared.load_teammates",
+            side_effect=lambda: self.teammates,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_defaults_to_callers_stored_account(self) -> None:
         """Verify that defaults to callers stored account."""
@@ -31,6 +42,18 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(
             (target.puuid, target.server, target.riot_id), ("p1", "NA1", "One#NA1")
         )
+
+    def test_tft_defaults_to_separate_tft_registry(self) -> None:
+        """A TFT command never inherits the caller's League PUUID."""
+        tft_accounts = {
+            "1": Account("1", "tft-p1", "NA1", "TftOne#NA1")
+        }
+        with patch(
+            "bot_app.commands.shared.load_tft_accounts", return_value=tft_accounts
+        ):
+            target = resolve_tft_username(self.ctx, None, None)
+        self.assertEqual(target.puuid, "tft-p1")
+        self.assertNotEqual(target.puuid, self.accounts["1"].puuid)
 
     def test_typed_tracked_and_untracked_mentions(self) -> None:
         """A mention resolves the mentioned user's tracked account, or nothing."""
@@ -43,6 +66,27 @@ class TargetResolutionTests(unittest.TestCase):
             "no tracked Riot account",
             not_found_embed("<@3>", None).description,
         )
+
+    def test_mention_resolves_a_teammate_when_not_tracked(self) -> None:
+        """A ``username`` mention of a teammate-only user still resolves."""
+        self.teammates = {
+            "tm-puuid": Account("9", "tm-puuid", "EUW1", "Mate#EUW"),
+        }
+        with patch("bot_app.commands.shared.load_accounts", return_value=self.accounts):
+            target = resolve_username(self.ctx, None, "<@9>", include_icon=False)
+        self.assertEqual(
+            (target.puuid, target.server, target.riot_id),
+            ("tm-puuid", "EUW1", "Mate#EUW"),
+        )
+
+    def test_default_target_falls_back_to_a_linked_teammate(self) -> None:
+        """With no username and no tracked account, the caller's teammate is used."""
+        self.teammates = {
+            "tm-puuid": Account("1", "tm-puuid", "NA1", "Mate#NA1"),
+        }
+        with patch("bot_app.commands.shared.load_accounts", return_value={}):
+            target = resolve_username(self.ctx, None, None, include_icon=False)
+        self.assertEqual(target.puuid, "tm-puuid")
 
     def test_combined_riot_id_and_embedded_platform_tag(self) -> None:
         """Verify that a combined Name#Tag summoner resolves, including a stray region tag."""
@@ -108,6 +152,27 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(_discord_user_id("123"), "123")
         self.assertIsNone(_discord_user_id("!!123"))
 
+    def test_match_position_builds_the_selected_player_target(self) -> None:
+        """A match slot carries the selected participant into later API calls."""
+        match = {
+            "info": {
+                "participants": [
+                    {
+                        "participantId": 5,
+                        "puuid": "blue-support",
+                        "riotIdGameName": "Supporter",
+                        "riotIdTagline": "BLUE",
+                    }
+                ]
+            }
+        }
+        target = target_at_match_position(match, 5, "NA1")
+        self.assertEqual(
+            (target.puuid, target.server, target.riot_id),
+            ("blue-support", "NA1", "Supporter#BLUE"),
+        )
+        self.assertIsNone(target_at_match_position(match, 6, "NA1"))
+
     def test_not_found_replies_echo_every_supplied_option(self) -> None:
         """A failed lookup names the platforms searched and the caller's own inputs."""
         ctx = SimpleNamespace(
@@ -148,3 +213,34 @@ class TargetResolutionTests(unittest.TestCase):
             log_command(ctx, champion="Ahri")
         self.assertEqual(len(logs.output), 1)
         self.assertIn("champion=Ahri", logs.output[0])
+
+
+class LatestMatchPositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_position_five_resolves_blue_support_from_latest_match(self) -> None:
+        """The shorthand used by /mastery follows the locator's latest match."""
+        locator = Target("locator", "NA1", "Locator#NA1")
+        client = Mock()
+        match = {
+            "info": {
+                "participants": [
+                    {
+                        "participantId": 5,
+                        "puuid": "support",
+                        "riotIdGameName": "Blue Support",
+                        "riotIdTagline": "NA1",
+                    }
+                ]
+            }
+        }
+        threaded = AsyncMock(side_effect=[["NA1_1"], match])
+        with (
+            patch("bot_app.commands.shared.get_client", return_value=client),
+            patch("bot_app.commands.shared.riot_to_thread", threaded),
+        ):
+            selected = await target_at_latest_match_position(locator, 5)
+
+        self.assertEqual(selected.puuid, "support")
+        self.assertEqual(selected.riot_id, "Blue Support#NA1")
+        self.assertEqual(threaded.await_args_list[0].args[1:], ("locator", "NA1"))
+        self.assertEqual(threaded.await_args_list[0].kwargs, {"count": 1})
+        self.assertEqual(threaded.await_args_list[1].args[1:], ("NA1_1", "NA1"))

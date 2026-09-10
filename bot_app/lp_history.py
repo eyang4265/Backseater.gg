@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .store import PlayerState
@@ -34,17 +34,36 @@ def since_local_midnight(
     *,
     now: datetime | None = None,
 ) -> list[dict]:
-    """Handle local midnight."""
+    """Return queue history recorded since the current local day began."""
+    return since_local_days(state, queue_id, timezone_name, days=1, now=now)
+
+
+def since_local_days(
+    state: PlayerState,
+    queue_id: int,
+    timezone_name: str,
+    *,
+    days: int,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Return history from today and the preceding local calendar days."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
     zone = ZoneInfo(timezone_name)
     current = now.astimezone(zone) if now else datetime.now(zone)
-    cutoff = current.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    local_midnight = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = (local_midnight - timedelta(days=days - 1)).timestamp()
     entries = [
         entry
         for entry in state.history.get(queue_id, [])
         if entry.get("t", 0) >= cutoff
     ]
     LOGGER.debug(
-        "LP history since local midnight (%s, queue_id=%s): %s entries", timezone_name, queue_id, len(entries)
+        "LP history for %s local day(s) (%s, queue_id=%s): %s entries",
+        days,
+        timezone_name,
+        queue_id,
+        len(entries),
     )
     return entries
 

@@ -7,6 +7,13 @@ from typing import Any
 
 from .commands.champ import ChampionPositionView
 from .commands.coachless import CoachlessView
+from .meetups.store import get_meetup_store
+from .meetups.views import (
+    CONFIRM_VIEW_KIND,
+    VIEW_KIND,
+    ConfirmationView,
+    build_meetup_view,
+)
 from .opgg import ChampionStats
 from .store import load_embed_button_states
 
@@ -23,8 +30,19 @@ def _champion_stats(payload: dict[str, Any]) -> ChampionStats:
     )
 
 
+def _meetup_view(payload: dict[str, Any]) -> Any:
+    """Rebuild a meetup's controls from its stored id.
+
+    Only the id is persisted, so the restored view always reflects the
+    meetup's current state and votes rather than a snapshot taken when the
+    message was last edited.
+    """
+    meetup = get_meetup_store().get(int(payload["meetup_id"]))
+    return build_meetup_view(meetup) if meetup is not None else None
+
+
 def register_persistent_command_views(bot: Any) -> int:
-    """Restore persistent ``/champ`` and ``/coachless`` component views."""
+    """Restore persistent ``/champ``, ``/coachless``, and ``/meetup`` views."""
     restored = 0
     states = load_embed_button_states()
     LOGGER.debug("Restoring persistent command views from %d stored states", len(states))
@@ -50,6 +68,12 @@ def register_persistent_command_views(bot: Any) -> int:
                     str(payload["role"]),
                     str(payload.get("selected", "runes")),
                 )
+            elif state["kind"] == VIEW_KIND:
+                view = _meetup_view(payload)
+                if view is None:
+                    continue
+            elif state["kind"] == CONFIRM_VIEW_KIND:
+                view = ConfirmationView(int(payload["meetup_id"]))
             else:
                 continue
             bot.add_view(view, message_id=state["message_id"])

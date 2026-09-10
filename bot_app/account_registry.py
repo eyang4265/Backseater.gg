@@ -38,8 +38,22 @@ class DuplicateAccountError(RegistryError):
         return str(self.args[0])
 
 
+def _next_unlinked_key(accounts: dict[str, Account]) -> str:
+    """Smallest free 18-digit sentinel key for an account tied to no user.
+
+    Matches the hand-written ``000000000000000001`` convention already in
+    ``data.json`` so an unlinked account still keys, polls, and announces
+    like any other; it simply never matches an ``<@id>`` mention.
+    """
+    used = set(accounts)
+    index = 1
+    while f"{index:018d}" in used:
+        index += 1
+    return f"{index:018d}"
+
+
 def track_account(
-    discord_id: int | str,
+    discord_id: int | str | None,
     summoner: str,
     tag: str,
     server: str,
@@ -53,6 +67,11 @@ def track_account(
     always swept afterwards, and the account is stored on whichever platform
     summoner-v4 says actually hosts it rather than on whichever regional
     account-v1 route happened to answer first.
+
+    ``discord_id`` may be ``None`` to track an account tied to no Discord
+    user: it is then keyed under a synthetic sentinel id, reusing the
+    existing key if that PUUID is already tracked so a re-add replaces it
+    in place rather than piling up sentinels.
     """
     LOGGER.info("Tracking account request: discord_id=%s summoner=%s#%s", discord_id, summoner, tag)
     client = get_client()
@@ -78,11 +97,18 @@ def track_account(
         raise RegistryError(f"Could not seed recent matches: {error}") from error
     LOGGER.debug("Seeded %d recent match ids for %s", len(match_ids), riot_id)
     ranks = fetch_ranks(puuid, server)
-    target_id = str(discord_id)
-    account = Account(target_id, puuid, server, riot_id)
+    target_id = None if discord_id is None else str(discord_id)
+    account: Account | None = None
 
     def mutate(accounts: dict[str, Account]) -> None:
         """Apply the requested state mutation."""
+        nonlocal target_id, account
+        if target_id is None:
+            existing = next(
+                (key for key, item in accounts.items() if item.puuid == puuid), None
+            )
+            target_id = existing or _next_unlinked_key(accounts)
+        account = Account(target_id, puuid, server, riot_id)
         duplicate = next(
             (
                 item
@@ -115,7 +141,10 @@ def track_account(
         accounts[target_id] = account
 
     update_accounts(mutate)
-    LOGGER.info("Tracked account %s for discord_id=%s on %s", riot_id, target_id, server)
+    assert account is not None
+    LOGGER.info(
+        "Tracked account %s for discord_id=%s on %s", riot_id, account.discord_id, server
+    )
     return account
 
 

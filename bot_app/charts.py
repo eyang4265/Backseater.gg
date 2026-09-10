@@ -112,8 +112,8 @@ def _build_damage_chart(
             if p.get("teamId") == 200
         )
         participants = [
-            {"participantId": 100, "teamId": 100, "championName": "Blue Team", "_stat": blue_total - red_total},
-            {"participantId": 200, "teamId": 200, "championName": "Red Team", "_stat": red_total - blue_total},
+            {"participantId": 100, "teamId": 100, "championName": "Blue", "_stat": blue_total - red_total},
+            {"participantId": 200, "teamId": 200, "championName": "Red", "_stat": red_total - blue_total},
         ]
 
     catalog = ddragon.catalog()
@@ -176,8 +176,12 @@ def _build_damage_chart(
         figure.patch.set_facecolor(_BACKGROUND)
         axes.set_facecolor(_BACKGROUND)
 
+        # Plot against numeric positions rather than the label strings: two
+        # players on the same champion share a label, and passing duplicate
+        # category strings to barh collapses both bars onto one row.
+        positions = list(range(len(labels)))
         bars = axes.barh(
-            labels,
+            positions,
             values,
             color=colors,
             edgecolor=edge_colors,
@@ -185,6 +189,8 @@ def _build_damage_chart(
             height=0.68,
             zorder=3,
         )
+        axes.set_yticks(positions)
+        axes.set_yticklabels(labels)
 
         axes.set_title(
             chart_title,
@@ -223,7 +229,7 @@ def _build_damage_chart(
                 plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_BLUE, edgecolor="none"),
                 plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_RED, edgecolor="none"),
             ],
-            ["Blue Team", "Red Team"],
+            ["Blue", "Red"],
             loc="lower right",
             frameon=False,
             fontsize=9,

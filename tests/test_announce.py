@@ -9,6 +9,7 @@ import discord
 from bot_app.announce import (
     MatchAnnouncement,
     LiveGameAnnouncement,
+    LiveGameAnnouncementView,
     TrackedPlayer,
     _ChartSelect,
     _InventoryChartSelect,
@@ -28,6 +29,8 @@ from bot_app.announce import (
     gold_embed,
     remember_match_view_state,
 )
+from bot_app.ranks import RankSnapshot
+from bot_app.store import Account
 from bot_app.queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID
 from bot_app.rating import PlayerRating, RatingBuckets
 from bot_app.riot import RiotAPIError
@@ -133,7 +136,7 @@ class GoldEmbedTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [field.name for field in embed.fields], ["Blue Team", "Red Team", "Diff"]
+            [field.name for field in embed.fields], ["Blue", "Red", "Diff"]
         )
         self.assertEqual(embed.fields[0].value, "22,459 gold\n16,830 gold")
         self.assertEqual(embed.fields[1].value, "13,202 gold\n17,832 gold")
@@ -184,6 +187,264 @@ class RelativeTimestampTests(unittest.TestCase):
         announcement = format_live_game(game, players)
         self.assertIsNotNone(announcement)
         self.assertIn("<t:1700000000:R>", announcement.text)
+
+    def test_tft_match_formats_placement_and_uses_tft_embed(self) -> None:
+        match = {
+            "info": {
+                "game_datetime": 1_700_000_000_000,
+                "game_length": 1800.0,
+                "queue_id": 1100,
+                "tft_game_type": "standard",
+                "participants": [
+                    {
+                        "puuid": "p1",
+                        "placement": 2,
+                        "level": 9,
+                        "players_eliminated": 3,
+                        "total_damage_to_players": 88,
+                        "riotIdGameName": "Name",
+                        "riotIdTagline": "TAG",
+                        "traits": [],
+                    }
+                ],
+            }
+        }
+        announcement = format_match(
+            match,
+            [TrackedPlayer("p1", "Name#TAG")],
+            require_ranked_queue=False,
+            game_type="tft",
+        )
+        self.assertEqual(announcement.game_type, "tft")
+        self.assertIn("#2", announcement.text)
+        embed, chart = self._run(build_announcement_embed(announcement))
+        self.assertIsNone(chart)
+        self.assertEqual([field.name for field in embed.fields][:3], ["Place", "Player", "Level"])
+
+    def test_tft_live_game_has_no_league_display_controls(self) -> None:
+        game = {
+            "gameStartTime": 1_700_000_000_000,
+            "gameLength": 300,
+            "gameQueueConfigId": 1100,
+            "participants": [{"puuid": "p1", "gameName": "Name"}],
+        }
+        announcement = format_live_game(
+            game, [TrackedPlayer("p1", "Name#TAG")], game_type="tft"
+        )
+        self.assertEqual(announcement.game_type, "tft")
+        async def children():
+            return LiveGameAnnouncementView(announcement).children
+
+        self.assertEqual(self._run(children()), [])
+
+    def test_tft_match_fields_use_real_matchv1_shape(self) -> None:
+        """Match-V1 carries no Riot ID fields and a PLATFORM_gameid match id."""
+        match = {
+            "metadata": {"match_id": "KR_5461417768"},
+            "info": {
+                "gameDatetime": 1_700_000_000_000,
+                "gameLength": 1800.0,
+                "queueId": 1100,
+                "participants": [
+                    {
+                        "puuid": "tracked",
+                        "placement": 1,
+                        "level": 10,
+                        "players_eliminated": 5,
+                        "total_damage_to_players": 142,
+                        "traits": [
+                            {"name": "TFT13_Emissary", "num_units": 3, "style": 2},
+                            {"name": "TFT13_Sorcerer", "num_units": 2, "style": 0},
+                        ],
+                    },
+                    {
+                        "puuid": "other",
+                        "placement": 8,
+                        "level": 7,
+                        "players_eliminated": 0,
+                        "total_damage_to_players": 11,
+                        "traits": [],
+                    },
+                ],
+            },
+        }
+        announcement = format_match(
+            match,
+            [TrackedPlayer("tracked", "Reg#KR1")],
+            require_ranked_queue=False,
+            game_type="tft",
+        )
+        self.assertIn("#1", announcement.text)
+        with patch(
+            "bot_app.announce.load_tft_accounts",
+            return_value={
+                "1": Account("1", "tracked", "KR", "Reg#KR1"),
+                "2": Account("2", "other", "KR", "Rival#KR1"),
+            },
+        ), patch("bot_app.announce.get_client") as get_client:
+            embed, chart = self._run(
+                build_announcement_embed(announcement, tft_display_mode="traits")
+            )
+        self.assertIsNone(chart)
+        get_client.assert_not_called()
+        by_name = {field.name: field.value for field in embed.fields}
+        # Traits mode replaces the Player column rather than trailing after Level.
+        self.assertNotIn("Player", by_name)
+        self.assertEqual(
+            [field.name for field in embed.fields], ["Place", "Top Traits", "Level"]
+        )
+        self.assertEqual(by_name["Place"].splitlines(), ["**#1**", "#8"])
+        self.assertEqual(by_name["Level"].splitlines(), ["**10**", "7"])
+        self.assertNotIn("Eliminations", by_name)
+        self.assertNotIn("Player Damage", by_name)
+        self.assertIn("Emissary 3", by_name["Top Traits"].splitlines()[0])
+
+        with patch(
+            "bot_app.announce.load_tft_accounts",
+            return_value={
+                "1": Account("1", "tracked", "KR", "Reg#KR1"),
+                "2": Account("2", "other", "KR", "Rival#KR1"),
+            },
+        ), patch("bot_app.announce.get_client"):
+            players_embed, _ = self._run(build_announcement_embed(announcement))
+        players_by_name = {f.name: f.value for f in players_embed.fields}
+        self.assertEqual(
+            [f.name for f in players_embed.fields], ["Place", "Player", "Level"]
+        )
+        # The tracked player's whole Place/Player/Level triple is bolded.
+        self.assertEqual(
+            players_by_name["Player"].splitlines(), ["**Reg#KR1**", "Rival#KR1"]
+        )
+
+    def test_tft_match_ended_timestamp_is_game_datetime_not_future(self) -> None:
+        """Match-V1 game_datetime is already the end time; nothing is added to it."""
+        match = {
+            "info": {
+                "game_datetime": 1_700_000_000_000,
+                "game_length": 1800.0,
+                "queue_id": 1100,
+                "participants": [{"puuid": "p1", "placement": 3, "level": 8}],
+            }
+        }
+        announcement = format_match(
+            match,
+            [TrackedPlayer("p1", "Name#TAG")],
+            require_ranked_queue=False,
+            game_type="tft",
+        )
+        self.assertIn("<t:1700000000:R>", announcement.text)
+        self.assertNotIn("<t:1700001800:R>", announcement.text)
+
+    def test_tft_match_line_shows_tracked_player_lp_change(self) -> None:
+        """The LP delta rides the announcement line only — there is no LP column."""
+        match = {
+            "info": {
+                "game_datetime": 1_700_000_000_000,
+                "game_length": 1800.0,
+                "queue_id": 1100,
+                "participants": [
+                    {
+                        "puuid": "p1",
+                        "placement": 2,
+                        "level": 9,
+                        "riotIdGameName": "Name",
+                        "riotIdTagline": "TAG",
+                    }
+                ],
+            }
+        }
+        announcement = format_match(
+            match,
+            [TrackedPlayer("p1", "Name#TAG", lp_change="+24 LP")],
+            require_ranked_queue=False,
+            game_type="tft",
+        )
+        self.assertIn("| +24 LP", announcement.text)
+        self.assertEqual(announcement.lp_changes, {"p1": "+24 LP"})
+        with patch("bot_app.announce.load_tft_accounts", return_value={}), patch(
+            "bot_app.announce.get_client"
+        ):
+            embed, _ = self._run(build_announcement_embed(announcement))
+        by_name = {field.name: field.value for field in embed.fields}
+        self.assertNotIn("LP", by_name)
+
+    def test_tft_live_embed_lists_every_player_with_a_rank_column(self) -> None:
+        """The live TFT lobby embed shows all eight members and their ranks."""
+        game = {
+            "platformId": "NA1",
+            "gameQueueConfigId": 1100,
+            "participants": [
+                {"puuid": "p1", "riotId": "Tracked#NA1"},
+                {"puuid": "p2", "riotId": "Rival#NA1"},
+                {"puuid": "p3", "riotId": "Nobody#NA1"},
+            ],
+        }
+        announcement = LiveGameAnnouncement("live", game, {"p1"}, "tft")
+        ranks = {
+            "p1": RankSnapshot("GOLD", "II", 40),
+            "p2": RankSnapshot(),
+            "p3": None,
+        }
+        with patch(
+            "bot_app.announce.fetch_tft_rank", side_effect=lambda puuid, server: ranks[puuid]
+        ), patch("bot_app.announce.load_tft_accounts", return_value={}):
+            embed = self._run(build_live_game_embed(announcement))
+        by_name = {field.name: field.value for field in embed.fields}
+        self.assertEqual(len(by_name["Player"].splitlines()), 3)
+        self.assertEqual(by_name["Player"].splitlines()[0], "**Tracked#NA1**")
+        rank_lines = by_name["Rank"].splitlines()
+        self.assertIn("Gold", rank_lines[0])
+        self.assertEqual(rank_lines[1], "Unranked")
+        self.assertEqual(rank_lines[2], "—")
+
+    def test_tft_match_has_a_traits_ranks_display_dropdown(self) -> None:
+        """The completed TFT view carries a Display dropdown like League's."""
+        from bot_app.announce import MatchAnnouncementView, _TftMatchDisplaySelect
+
+        match = {
+            "info": {
+                "game_datetime": 1_700_000_000_000,
+                "game_length": 1800.0,
+                "queue_id": 1100,
+                "participants": [
+                    {"puuid": "p1", "placement": 1, "level": 9, "traits": []},
+                    {"puuid": "p2", "placement": 8, "level": 7, "traits": []},
+                ],
+            }
+        }
+        announcement = format_match(
+            match,
+            [TrackedPlayer("p1", "Reg#NA1")],
+            require_ranked_queue=False,
+            game_type="tft",
+        )
+        async def _make_view():
+            return MatchAnnouncementView(announcement)
+
+        view = self._run(_make_view())
+        selects = [c for c in view.children if isinstance(c, _TftMatchDisplaySelect)]
+        self.assertEqual(len(selects), 1)
+        self.assertEqual(
+            [option.value for option in selects[0].options],
+            ["players", "ranks", "traits"],
+        )
+        ranks = {"p1": RankSnapshot("GOLD", "II", 40), "p2": None}
+        with patch(
+            "bot_app.announce.fetch_tft_rank",
+            side_effect=lambda puuid, server: ranks[puuid],
+        ), patch("bot_app.announce.load_tft_accounts", return_value={}):
+            embed, _ = self._run(
+                build_announcement_embed(announcement, tft_display_mode="ranks")
+            )
+        by_name = {field.name: field.value for field in embed.fields}
+        self.assertNotIn("Top Traits", by_name)
+        self.assertIn("Gold", by_name["Rank"].splitlines()[0])
+        self.assertEqual(by_name["Rank"].splitlines()[1], "—")
+
+    @staticmethod
+    def _run(awaitable):
+        import asyncio
+        return asyncio.run(awaitable)
 
 
 class ActiveChartFieldTests(unittest.IsolatedAsyncioTestCase):
@@ -454,7 +715,7 @@ class JungleProximityChartTests(unittest.IsolatedAsyncioTestCase):
         select = _ChartSelect(self._MATCH, highlight_puuids=set())
         interaction = _select_with_value(select, "jungleProximity")
         existing_embed = discord.Embed(title="Match")
-        existing_embed.add_field(name="Blue Team", value="Players...", inline=True)
+        existing_embed.add_field(name="Blue", value="Players...", inline=True)
         interaction.message = Mock(embeds=[existing_embed])
         chart_file = discord.File(io.BytesIO(b"png"), filename="jungleProximity.png")
         client = Mock()
@@ -474,7 +735,7 @@ class JungleProximityChartTests(unittest.IsolatedAsyncioTestCase):
             _CHART_CACHE.clear()
 
         kwargs = interaction.edit_original_response.call_args.kwargs
-        self.assertEqual([field.name for field in kwargs["embed"].fields], ["Blue Team"])
+        self.assertEqual([field.name for field in kwargs["embed"].fields], ["Blue"])
         self.assertEqual(kwargs["embed"].image.url, "attachment://jungleProximity.png")
         self.assertEqual(kwargs["file"].filename, "jungleProximity.png")
 
@@ -485,7 +746,7 @@ class JungleProximityChartTests(unittest.IsolatedAsyncioTestCase):
         select = _ChartSelect(self._MATCH, highlight_puuids=set())
         interaction = _select_with_value(select, "jungleProximity")
         existing_embed = discord.Embed(title="Match")
-        existing_embed.add_field(name="Blue Team", value="Players...", inline=True)
+        existing_embed.add_field(name="Blue", value="Players...", inline=True)
         interaction.message = Mock(embeds=[existing_embed])
         client = Mock()
         client.match_timeline.return_value = None
@@ -502,7 +763,7 @@ class JungleProximityChartTests(unittest.IsolatedAsyncioTestCase):
         kwargs = interaction.edit_original_response.call_args.kwargs
         self.assertIsNone(kwargs["file"])
         self.assertIsNone(kwargs["embed"].image)
-        self.assertEqual([field.name for field in kwargs["embed"].fields], ["Blue Team"])
+        self.assertEqual([field.name for field in kwargs["embed"].fields], ["Blue"])
 
 
 class FetchMatchTimelineTests(unittest.IsolatedAsyncioTestCase):
@@ -584,6 +845,49 @@ class RememberMatchViewStateTests(unittest.IsolatedAsyncioTestCase):
         with patch("bot_app.announce.remember_embed_button_state") as remember:
             await remember_match_view_state(message, 7, announcement)
         remember.assert_not_called()
+
+
+class LiveGameMessageCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_game_key_helpers_agree(self) -> None:
+        """A lobby payload and its finished match id map to the same key."""
+        from bot_app.announce import _live_game_key, live_game_key_from_match_id
+
+        self.assertEqual(
+            _live_game_key({"gameId": 123, "platformId": "EUW1"}), "EUW1:123"
+        )
+        self.assertEqual(live_game_key_from_match_id("EUW1_123"), "EUW1:123")
+        self.assertIsNone(_live_game_key({"gameId": 1}))
+        self.assertIsNone(live_game_key_from_match_id("garbage"))
+
+    async def test_delete_live_game_messages_deletes_and_swallows_errors(self) -> None:
+        """Every recorded post is deleted; a missing one is ignored."""
+        from bot_app.announce import delete_live_game_messages
+
+        good = Mock()
+        good.delete = AsyncMock()
+        channel = Mock()
+        channel.fetch_message = AsyncMock(
+            side_effect=[good, discord.NotFound(Mock(), "gone")]
+        )
+        bot = Mock()
+        bot.get_channel.return_value = channel
+        with patch(
+            "bot_app.announce.pop_live_game_messages",
+            return_value=[(7, 70), (7, 71)],
+        ) as pop:
+            await delete_live_game_messages(bot, ["NA1:1"])
+        pop.assert_called_once_with(["NA1:1"])
+        good.delete.assert_awaited_once()
+
+    async def test_delete_live_game_messages_no_records_is_a_noop(self) -> None:
+        from bot_app.announce import delete_live_game_messages
+
+        bot = Mock()
+        with patch(
+            "bot_app.announce.pop_live_game_messages", return_value=[]
+        ):
+            await delete_live_game_messages(bot, ["NA1:1"])
+        bot.get_channel.assert_not_called()
 
 
 if __name__ == "__main__":

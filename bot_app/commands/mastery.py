@@ -17,11 +17,13 @@ from ..render import make_embed, relative_time
 from ..services.riot_api import RiotAPIError, get_client
 from .shared import (
     GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
     SERVERS,
     Target,
     log_command,
     not_found_embed,
     set_player_author,
+    target_at_latest_match_position,
     target_for,
 )
 
@@ -142,10 +144,18 @@ class MasteryCommands(commands.Cog):
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option("champion", description="Champion", required=False)
-    async def mastery(self, ctx, server, username, champion):
-        """Every champion's mastery, or one champion's detail when named."""
+    @discord.option(
+        "position",
+        int,
+        description=MATCH_POSITION_DESCRIPTION,
+        min_value=1,
+        max_value=10,
+        required=False,
+    )
+    async def mastery(self, ctx, server, username, champion, position):
+        """Show mastery for a player directly or by their latest-match slot."""
         log_command(
-            ctx, server=server, username=username, champion=champion
+            ctx, server=server, username=username, champion=champion, position=position
         )
         await ctx.defer()
 
@@ -153,6 +163,30 @@ class MasteryCommands(commands.Cog):
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+
+        if position is not None:
+            try:
+                selected = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                LOGGER.info("Could not resolve /mastery match position: %s", error)
+                await ctx.respond(
+                    embed=make_embed(f"Could not fetch the latest match: {error}")
+                )
+                return
+            if selected is None:
+                await ctx.respond(
+                    embed=make_embed(
+                        f"The latest match has no player in position {position}."
+                    )
+                )
+                return
+            LOGGER.debug(
+                "/mastery position %d selected %s from %s's latest match",
+                position,
+                selected.riot_id,
+                target.riot_id,
+            )
+            target = selected
 
         if champion:
             await self._respond_single_champion(ctx, target, champion)

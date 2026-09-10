@@ -4,14 +4,23 @@ import unittest
 from unittest.mock import patch
 
 from bot_app.queues import (
+    ARENA_QUEUE_IDS,
+    ARENA_TEAM_SIZES,
     CURRENT_QUEUE_IDS,
     QUEUE_NAMES,
+    queue_name,
     current_queue_names,
     validate_current_queue_ids,
 )
 
 
 class CurrentQueueNamesTests(unittest.TestCase):
+    def test_bravery_arena_has_shared_three_player_team_metadata(self) -> None:
+        """Queue 1740 renders as six Arena teams instead of blue versus red."""
+        self.assertIn(1740, ARENA_QUEUE_IDS)
+        self.assertEqual(ARENA_TEAM_SIZES[1740], 3)
+        self.assertEqual(queue_name(1740), "Bravery Arena")
+
     def test_every_current_id_has_a_known_name(self) -> None:
         """Verify that the shipped allowlist has no stale/typo'd queue ids."""
         self.assertEqual(validate_current_queue_ids(), ())

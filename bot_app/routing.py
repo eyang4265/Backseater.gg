@@ -93,13 +93,21 @@ def match_route(code: str | None) -> str | None:
     return found.match_route if found else None
 
 
+# OP.GG localizes its pages to the viewer's browser language unless an explicit
+# ``hl`` query parameter forces one; pin every generated link to English.
+OPGG_LANG = "en_US"
+
+
 def opgg_url(code: str | None, riot_id: str | None) -> str | None:
     """Profile link for a ``Name#Tag`` riot id, or None when it can't be built."""
     found = platform(code)
     if found is None or found.opgg_slug is None or not riot_id or "#" not in riot_id:
         return None
     name, tag = riot_id.split("#", 1)
-    return f"https://op.gg/lol/summoners/{found.opgg_slug}/{quote(name)}-{quote(tag)}"
+    return (
+        f"https://op.gg/lol/summoners/{found.opgg_slug}/{quote(name)}-{quote(tag)}"
+        f"?hl={OPGG_LANG}"
+    )
 
 
 def opgg_champion_url(
@@ -112,14 +120,14 @@ def opgg_champion_url(
         path = f"https://op.gg/lol/champions/{quote(internal_id)}/build"
         if position and position != "all":
             path += f"/{quote(position)}"
-        return f"{path}?region=global"
+        return f"{path}?region=global&hl={OPGG_LANG}"
     found = platform(code)
     if found is None or found.opgg_slug is None or not internal_id:
         return None
     path = f"https://op.gg/lol/champions/{quote(internal_id)}/build"
     if position and position != "all":
         path += f"/{quote(position)}"
-    return f"{path}?region={found.opgg_slug}"
+    return f"{path}?region={found.opgg_slug}&hl={OPGG_LANG}"
 
 
 def split_riot_id(

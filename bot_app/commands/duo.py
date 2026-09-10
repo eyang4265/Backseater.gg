@@ -10,15 +10,18 @@ from discord.ext import commands
 
 from .shared import (
     GUILD_IDS,
+    MATCH_POSITION_DESCRIPTION,
     SERVERS,
     game_mode_choices,
     log_command,
     not_found_embed,
     supplied_options_text,
+    target_at_latest_match_position,
     target_for,
 )
 from ..match_cache import get_match_cache
 from ..render import make_embed
+from ..services.riot_api import RiotAPIError
 from ..store import load_accounts
 
 LOGGER = logging.getLogger(__name__)
@@ -49,14 +52,16 @@ class DuoCommands(commands.Cog):
         autocomplete=discord.utils.basic_autocomplete(game_mode_choices),
         required=False,
     )
-    async def duo(self, ctx, teammate, server=None, username=None, game_mode=None):
-        """Show the cached record for two tracked players, optionally filtered by game mode."""
+    @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    async def duo(self, ctx, teammate, server=None, username=None, game_mode=None, position=None):
+        """Show a teammate's record with a direct primary target or latest-match slot."""
         log_command(
             ctx,
             server=server,
             username=username,
             teammate=teammate,
             game_mode=game_mode,
+            position=position,
         )
         await ctx.defer()
         target = await target_for(ctx, server, username, include_icon=False)
@@ -65,6 +70,15 @@ class DuoCommands(commands.Cog):
         if target is None:
             await ctx.respond(embed=not_found_embed(username, server, ctx=ctx))
             return
+        if position is not None:
+            try:
+                target = await target_at_latest_match_position(target, position)
+            except RiotAPIError as error:
+                await ctx.respond(embed=make_embed(f"Could not fetch the latest match: {error}"))
+                return
+            if target is None:
+                await ctx.respond(embed=make_embed(f"The latest match has no player in position {position}."))
+                return
         if teammate_account is None:
             LOGGER.info("/duo teammate %s has no tracked Riot account", teammate.id)
             await ctx.respond(

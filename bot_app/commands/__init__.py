@@ -10,7 +10,30 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from . import add, admin, ai, champ, champstats, coachless, counterstats, duo, guilds, info, mastery, msg, player, rankings, registry
+from . import (
+    add,
+    admin,
+    ai,
+    champ,
+    champstats,
+    coachless,
+    counterstats,
+    duo,
+    guilds,
+    info,
+    leaguecommands,
+    mastery,
+    msg,
+    player,
+    rankings,
+    registry,
+    tftadd,
+    tftcommands,
+    tftmatch,
+    tftmatchhistory,
+    tftupdate,
+)
+from .meetup import setup_meetup
 from .match import setup_jungleproximity, setup_laning, setup_match, setup_timeline
 
 if TYPE_CHECKING:
@@ -30,10 +53,17 @@ _SETUPS = (
     coachless.setup,
     duo.setup,
     mastery.setup,
+    setup_meetup,
     setup_timeline,
     setup_jungleproximity,
     setup_laning,
     setup_match,
+    leaguecommands.setup,
+    tftadd.setup,
+    tftcommands.setup,
+    tftmatch.setup,
+    tftmatchhistory.setup,
+    tftupdate.setup,
     info.setup,
     admin.setup,
     ai.setup,

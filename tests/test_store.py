@@ -6,9 +6,13 @@ from unittest.mock import Mock, patch
 from bot_app.ranks import RankSnapshot
 from bot_app.store import (
     PlayerState,
+    TftPlayerState,
     dedupe_tail,
     load_embed_button_states,
+    load_live_game_messages,
     load_live_game_state,
+    pop_live_game_messages,
+    remember_live_game_message,
     save_live_game_state,
 )
 
@@ -78,13 +82,19 @@ class PlayerStateTests(unittest.TestCase):
     def test_round_trips_through_json(self) -> None:
         """Verify that round trips through json."""
         state = PlayerState(
-            matches=["NA1_1"], ranks={420: RankSnapshot("IRON", "IV", 1)}
+            matches=["NA1_1"],
+            ranks={420: RankSnapshot("IRON", "IV", 1)},
         )
-        self.assertEqual(PlayerState.from_json(state.to_json()).matches, state.matches)
+        restored = PlayerState.from_json(state.to_json())
+        self.assertEqual(restored.matches, state.matches)
         self.assertEqual(
-            PlayerState.from_json(state.to_json()).ranks[420],
+            restored.ranks[420],
             RankSnapshot("IRON", "IV", 1),
         )
+
+    def test_tft_state_round_trips_independently(self) -> None:
+        state = TftPlayerState(["NA1_TFT_1"], True)
+        self.assertEqual(TftPlayerState.from_json(state.to_json()), state)
 
     def test_remember_appends_and_caps(self) -> None:
         """Verify that remember appends and caps."""
@@ -110,6 +120,36 @@ class LiveGameStateTests(unittest.TestCase):
         ):
             save_live_game_state({"123": "NA1:456"})
             self.assertEqual(load_live_game_state(), {"123": "NA1:456"})
+
+
+class LiveGameMessageRecordTests(unittest.TestCase):
+    def test_remember_then_pop_round_trips_and_clears(self) -> None:
+        """Recorded posts come back once, keyed by lobby, then are gone."""
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pathlib import Path
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "bot_app.store.LIVE_GAME_MESSAGE_PATH",
+                Path(directory) / "live_messages.json",
+            ),
+        ):
+            remember_live_game_message("NA1:1", 10, 100)
+            remember_live_game_message("NA1:1", 11, 101)
+            remember_live_game_message("NA1:1", 10, 100)  # deduped
+            remember_live_game_message("NA1:2", 12, 102)
+
+            self.assertEqual(
+                load_live_game_messages(),
+                {"NA1:1": [[10, 100], [11, 101]], "NA1:2": [[12, 102]]},
+            )
+
+            popped = pop_live_game_messages(["NA1:1", "NA1:missing"])
+            self.assertCountEqual(popped, [(10, 100), (11, 101)])
+            self.assertEqual(load_live_game_messages(), {"NA1:2": [[12, 102]]})
+            self.assertEqual(pop_live_game_messages(["NA1:1"]), [])
 
 
 if __name__ == "__main__":

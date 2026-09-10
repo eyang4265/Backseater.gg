@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from bot_app.rating import PlayerRating, RatingBuckets
 from bot_app.render import (
-    NameStyle,
     RatingColumns,
     TeamColumns,
     _PlayerLookup,
@@ -15,6 +14,7 @@ from bot_app.render import (
     _columns_from_rows,
     add_rating_columns,
     add_team_columns,
+    build_lobby_columns,
     build_match_columns,
     _final_items_text,
     build_rating_columns,
@@ -230,12 +230,12 @@ class TeamColumnLayoutTests(unittest.TestCase):
         self.assertEqual(
             [field.name for field in embed.fields],
             [
-                "Blue Team | Unranked",
-                "Red Team | Unranked",
+                "Blue | Unranked",
+                "Red | Unranked",
                 "\u200b",
                 "\u200b",
-                "Blue Team Flex Rank",
-                "Red Team Flex Rank",
+                "Blue Flex Rank",
+                "Red Flex Rank",
                 "\u200b",
             ],
         )
@@ -276,6 +276,58 @@ class TeamColumnLayoutTests(unittest.TestCase):
         self.assertEqual([len(team[1]) for team in columns.arena_teams], [3] * 6)
 
     @patch("bot_app.render.tracked_puuids", return_value=())
+    @patch("bot_app.render.ddragon.champion_tags_by_internal_id", return_value={})
+    @patch("bot_app.render._positions_by_index")
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch("bot_app.render._resolve_concurrently")
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value=None)
+    def test_bravery_arena_match_and_livegame_use_three_player_subteams(
+        self,
+        _emoji: object,
+        resolve: object,
+        _catalog: object,
+        positions: object,
+        _tags: object,
+        _tracked: object,
+    ) -> None:
+        """Both shared announcement renderers group queue 1740 as six 3v3 teams."""
+        participants = [
+            {
+                "puuid": f"p{index}",
+                "participantId": index,
+                "championId": index,
+                "championName": f"Champion {index}",
+                "teamId": 100 if subteam <= 3 else 200,
+                "playerSubteamId": subteam,
+            }
+            for index, subteam in enumerate(
+                (4, 6, 6, 3, 3, 6, 4, 4, 5, 5, 1, 1, 1, 3, 5, 2, 2, 2),
+                start=1,
+            )
+        ]
+        positions.return_value = ["Top"] * len(participants)
+        resolve.side_effect = lambda items, _fetch: [
+            _PlayerLookup(f"Player {index}#NA1", None, False)
+            for index, _item in enumerate(items, start=1)
+        ]
+
+        match_columns = build_match_columns(participants, server="na1", queue_id=1740)
+        live_columns = build_lobby_columns(
+            {"gameQueueConfigId": 1740, "participants": participants}, "na1"
+        )
+
+        for columns in (match_columns, live_columns):
+            self.assertEqual(len(columns.arena_teams), 6)
+            self.assertEqual([len(team[1]) for team in columns.arena_teams], [3] * 6)
+            rendered_teams = ["\n".join(team[1]) for team in columns.arena_teams]
+            self.assertTrue(
+                all(f"Player {index}" in rendered_teams[0] for index in (11, 12, 13))
+            )
+            self.assertTrue(
+                all(f"Player {index}" in rendered_teams[1] for index in (16, 17, 18))
+            )
+
+    @patch("bot_app.render.tracked_puuids", return_value=())
     @patch("bot_app.render._positions_by_index", return_value=["Top"])
     @patch("bot_app.render.ddragon.catalog", return_value=None)
     @patch(
@@ -291,7 +343,6 @@ class TeamColumnLayoutTests(unittest.TestCase):
             [{"puuid": "player", "teamId": 100, "championName": "Ahri", "kills": 2,
               "deaths": 1, "assists": 3}],
             server="na1",
-            name_style=NameStyle.SUMMONER,
         )
 
         self.assertEqual(columns.blue_names, ["<:champ:1> Player · (2/1/3)"])
@@ -379,7 +430,7 @@ class RatingColumnLayoutTests(unittest.TestCase):
         add_rating_columns(embed, columns)
         self.assertEqual(
             [field.name for field in embed.fields],
-            ["Blue Team", "Score", "K/D/A", "Red Team", "Score", "K/D/A"],
+            ["Blue", "Score", "K/D/A", "Red", "Score", "K/D/A"],
         )
 
     def test_unrated_player_shows_an_em_dash(self) -> None:
