@@ -41,8 +41,8 @@ class DuplicateAccountError(RegistryError):
 def _next_unlinked_key(accounts: dict[str, Account]) -> str:
     """Smallest free 18-digit sentinel key for an account tied to no user.
 
-    Matches the hand-written ``000000000000000001`` convention already in
-    ``data.json`` so an unlinked account still keys, polls, and announces
+    Matches the established ``000000000000000001`` registry convention so an
+    unlinked account still keys, polls, and announces
     like any other; it simply never matches an ``<@id>`` mention.
     """
     used = set(accounts)

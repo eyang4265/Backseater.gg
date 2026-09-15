@@ -31,7 +31,8 @@ in). Required: `DISCORD_TOKEN`, `RIOT_API_KEY`, `DISCORD_OWNER_ID`,
 `ANNOUNCEMENT_CHANNEL_ID`. TFT commands additionally require `TFT_API_KEY`.
 Optional: `GUILD_IDS`,
 `POLL_INTERVAL_SECONDS`, `MAX_TRACKED_ACCOUNTS`, `TIMEZONE` (IANA name),
-`MATCH_CACHE_ENABLED`, `LOG_LEVEL`.
+`MATCH_CACHE_ENABLED`, `LOG_LEVEL`, and `VIBECODE_DATA_DIR` (defaults to the
+gitignored `data/` directory).
 
 ```bash
 /usr/bin/python3 main.py
@@ -43,12 +44,26 @@ Optional: `GUILD_IDS`,
 python3 -m unittest discover -s tests -t .
 ```
 
-The suite covers the pure logic, pollers, registry, LP history, guild routing,
-and SQLite match cache, and needs neither network access nor a Discord token.
+The suite covers pure logic, pollers, registry, LP history, guild routing, and
+SQLite storage. Network access is blocked unless `VIBECODE_TEST_NETWORK=1` is
+set explicitly, so ordinary discovery needs neither live services nor credentials.
+
+For focused test commands and a code map, see [the agent guide](AGENTS.md#verification).
+Documentation checks run with normal test discovery or on their own:
+
+```bash
+/usr/bin/python3 -m unittest tests.test_agent_docs
+```
+
+They check that editable `AGENTS.md`/`CLAUDE.md` sections match, each root guide
+stays within 12 KiB, and local Markdown links and section anchors resolve.
+The checks do not modify the protected hard rules.
 
 ## Layout
 
-`bot_app` is layered; each module only imports from the ones above it.
+`bot_app` uses explicit boundaries for domain values, services, adapters,
+presentation, and Discord handlers. Architecture tests keep pure modules free of
+I/O dependencies and prevent services from importing command modules.
 
 | Layer | Modules | Responsibility |
 | --- | --- | --- |
@@ -76,3 +91,9 @@ Two rules keep it that way:
   `render._lookup_player`, not calling it in the row loop.
 - Poller state files are written atomically. Anything persisted per player
   belongs on `store.PlayerState`.
+- Mutable accounts, poller state, caches, meetup records, and diagnostics live
+  under `data/`, never in source control. Legacy `json/` state is copied there
+  automatically when it is newer and retained as a local backup, which keeps
+  upgrades safe while the previous bot process is still running.
+- Edit `requirements.in` when dependencies change; `requirements.txt` is the
+  Python 3.9 production lock consumed by local setup and CI.

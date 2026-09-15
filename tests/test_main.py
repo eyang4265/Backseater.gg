@@ -45,6 +45,25 @@ class SyncAndRestoreViewsTests(unittest.IsolatedAsyncioTestCase):
         embed_views.assert_called_once_with(bot)
         command_views.assert_called_once_with(bot)
         self.assertTrue(state.persistent_views_restored)
+        self.assertFalse(state.commands_synced)
+
+    async def test_a_failed_command_sync_retries_on_reconnect(self) -> None:
+        """A transient Discord failure must not require a process restart."""
+        bot = Mock(
+            auto_sync_commands=True,
+            sync_commands=AsyncMock(
+                side_effect=[RuntimeError("Discord unavailable"), None]
+            ),
+        )
+        settings = Mock(sync_commands_enabled=True)
+        state = ConnectState()
+        with patch("main.register_persistent_embed_views", return_value=0), patch(
+            "main.register_persistent_command_views", return_value=0
+        ):
+            await sync_and_restore_views(bot, settings, state)
+            await sync_and_restore_views(bot, settings, state)
+        self.assertEqual(bot.sync_commands.await_count, 2)
+        self.assertTrue(state.commands_synced)
 
     async def test_view_restoration_runs_only_once_per_process(self) -> None:
         """Verify that a second connect (reconnect) does not re-restore views."""

@@ -505,7 +505,7 @@ class PlayerCommands(commands.Cog):
 
         embed = make_embed("\n".join(match_ids), title=f"Recent Matches — {target.riot_id}")
         set_player_author(embed, target)
-        LOGGER.info("Sent %d match ids for %s", len(match_ids), target.riot_id)
+        LOGGER.info("/matchlist | Sent %d match ids for %s", len(match_ids), target.riot_id)
         await ctx.respond(embed=embed)
 
     @discord.slash_command(

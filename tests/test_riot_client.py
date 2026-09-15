@@ -101,6 +101,37 @@ class RateLimiterTests(unittest.TestCase):
             client._get("americas", "/test")
         self.assertEqual(client._session.get.call_count, 2)
 
+    def test_http_error_includes_the_full_request_url(self) -> None:
+        """Operator-facing failures identify the exact Riot host and endpoint."""
+        client = object.__new__(RiotClient)
+        client._max_retries = 1
+        client._timeout = 1
+        client._limiter = Mock()
+        client._session = Mock()
+        client._session.get.return_value = Mock(
+            status_code=404,
+            url="https://americas.api.riotgames.com/lol/match/v5/matches/NA1_5642521571",
+        )
+        with self.assertRaisesRegex(
+            RiotAPIError,
+            r"GET https://americas\.api\.riotgames\.com/lol/match/v5/matches/NA1_5642521571 returned HTTP 404",
+        ):
+            client._get("americas", "/lol/match/v5/matches/NA1_5642521571")
+
+    def test_retry_error_includes_the_full_request_url(self) -> None:
+        """Transport failures also expose the resolved host, not only a path."""
+        client = object.__new__(RiotClient)
+        client._max_retries = 1
+        client._timeout = 1
+        client._limiter = Mock()
+        client._session = Mock()
+        client._session.get.side_effect = requests.ConnectionError("offline")
+        with patch("bot_app.riot.time.sleep"), self.assertRaisesRegex(
+            RiotAPIError,
+            r"GET https://americas\.api\.riotgames\.com/test failed after 1 attempts",
+        ):
+            client._get("americas", "/test")
+
     def test_tft_endpoints_use_match_and_spectator_v5_routes(self) -> None:
         """TFT history is regional while live games use the platform host."""
         client = object.__new__(RiotClient)

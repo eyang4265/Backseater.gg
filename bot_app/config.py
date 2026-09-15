@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import sqlite3
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -19,7 +22,66 @@ LOGGER = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JSON_DIR = REPO_ROOT / "json"
+DATA_DIR = Path(
+    os.environ.get("VIBECODE_DATA_DIR", str(REPO_ROOT / "data"))
+).expanduser()
 SECRETS_PATH = JSON_DIR / "secrets.json"
+
+_migration_lock = threading.Lock()
+
+
+def migrate_legacy_runtime_file(target: Path, legacy: Path) -> Path:
+    """Copy one legacy runtime file to its private data location once.
+
+    The source is deliberately retained as a backup. Repositories upgrading
+    from the former ``json/`` layout therefore keep all operational state even
+    after those files are removed from Git tracking.
+    """
+    if not legacy.exists():
+        return target
+    with _migration_lock:
+        if not legacy.exists():
+            return target
+        if target.exists() and target.stat().st_mtime >= legacy.stat().st_mtime:
+            return target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".migrating")
+        shutil.copy2(legacy, temporary)
+        temporary.replace(target)
+        LOGGER.info(
+            "Migrated runtime data from %s to %s",
+            legacy,
+            target,
+            extra={"category": "STARTUP"},
+        )
+    return target
+
+
+def migrate_legacy_sqlite_file(target: Path, legacy: Path) -> Path:
+    """Take a consistent SQLite backup when the legacy database is newer."""
+    if not legacy.exists():
+        return target
+    with _migration_lock:
+        if not legacy.exists():
+            return target
+        if target.exists() and target.stat().st_mtime >= legacy.stat().st_mtime:
+            return target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".migrating")
+        if temporary.exists():
+            temporary.unlink()
+        with sqlite3.connect(str(legacy)) as source, sqlite3.connect(
+            str(temporary)
+        ) as destination:
+            source.backup(destination)
+        temporary.replace(target)
+        LOGGER.info(
+            "Migrated SQLite runtime data from %s to %s",
+            legacy,
+            target,
+            extra={"category": "STARTUP"},
+        )
+    return target
 
 
 class ConfigError(RuntimeError):
@@ -55,12 +117,26 @@ def _load_secrets_file() -> dict[str, object]:
         with SECRETS_PATH.open(encoding="utf-8") as secrets_file:
             data = json.load(secrets_file)
     except FileNotFoundError:
-        LOGGER.debug("No secrets file found at %s; using environment only", SECRETS_PATH)
+        LOGGER.debug(
+            "No secrets file found at %s; using environment only",
+            SECRETS_PATH,
+            extra={"category": "STARTUP"},
+        )
         return {}
     except (json.JSONDecodeError, OSError) as error:
-        LOGGER.warning("Ignoring unreadable %s: %s", SECRETS_PATH, error)
+        LOGGER.warning(
+            "Ignoring unreadable %s: %s",
+            SECRETS_PATH,
+            error,
+            extra={"category": "STARTUP"},
+        )
         return {}
-    LOGGER.debug("Loaded %d secret keys from %s", len(data) if isinstance(data, dict) else 0, SECRETS_PATH)
+    LOGGER.debug(
+        "Loaded %d secret keys from %s",
+        len(data) if isinstance(data, dict) else 0,
+        SECRETS_PATH,
+        extra={"category": "STARTUP"},
+    )
     return data if isinstance(data, dict) else {}
 
 
@@ -150,7 +226,7 @@ def _timezone(file_values: dict[str, object]) -> str:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Resolve settings once per process."""
-    LOGGER.debug("Resolving process settings")
+    LOGGER.debug("Resolving process settings", extra={"category": "STARTUP"})
     file_values = _load_secrets_file()
     settings = Settings(
         discord_token=_require(file_values, "discord_token"),
@@ -177,6 +253,9 @@ def get_settings() -> Settings:
     )
     LOGGER.info(
         "Loaded settings from %s (poll_interval=%ss, log_level=%s)",
-        settings._source, settings.poll_interval_seconds, settings.log_level,
+        settings._source,
+        settings.poll_interval_seconds,
+        settings.log_level,
+        extra={"category": "STARTUP"},
     )
     return settings

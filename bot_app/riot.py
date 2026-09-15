@@ -265,7 +265,7 @@ class RiotClient:
 
             if response.status_code >= 400:
                 raise RiotAPIError(
-                    f"GET {path} returned HTTP {response.status_code}",
+                    f"GET {response.url or url} returned HTTP {response.status_code}",
                     status_code=response.status_code,
                 )
 
@@ -273,7 +273,7 @@ class RiotClient:
                 payload = response.json()
             except ValueError as error:
                 raise RiotAPIError(
-                    f"GET {path} returned malformed JSON: {error}"
+                    f"GET {response.url or url} returned malformed JSON: {error}"
                 ) from error
             LOGGER.debug(
                 "GET %s -> %d in %.2fs (attempt %d)",
@@ -285,7 +285,7 @@ class RiotClient:
             return payload
 
         raise RiotAPIError(
-            f"GET {path} failed after {self._max_retries} attempts: {last_error}"
+            f"GET {url} failed after {self._max_retries} attempts: {last_error}"
         )
 
     @staticmethod

@@ -188,3 +188,19 @@ def build_preview_embed(meetup: Meetup, recipients: Sequence[int]) -> discord.Em
     embed.add_field(name="Recipients", value=_mentions(recipients), inline=False)
     embed.set_footer(text="Nothing has been sent yet.")
     return embed
+
+
+def build_meetup_list_page(meetups: Sequence[Meetup], page: int, pages: int) -> discord.Embed:
+    """Render up to five open meetups per page with aligned, bounded columns."""
+    embed = make_embed("", title="📅 Open meetups")
+    embed.description = None
+    columns = (
+        ("Meetup", [f"`#{item.meetup_id}` {item.title[:100]}" for item in meetups]),
+        ("State", [item.state.title() for item in meetups]),
+        ("When", [discord_timestamp(item.locked_time, "f") if item.locked_time else "—"
+                  for item in meetups]),
+    )
+    for name, values in columns:
+        embed.add_field(name=name, value="\n".join(values) or _EMPTY, inline=True)
+    embed.set_footer(text=f"Page {page + 1}/{pages}")
+    return embed

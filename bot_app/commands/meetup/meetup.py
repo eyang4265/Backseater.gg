@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 
 from ...config import get_settings
-from ...meetups.render import build_meetup_embed, build_preview_embed
+from ...meetups.render import build_meetup_embed, build_meetup_list_page, build_preview_embed
 from ...meetups.store import (
     AXES,
     Meetup,
@@ -19,7 +19,6 @@ from ...meetups.store import (
 )
 from ...meetups.timeparse import (
     TimeParseError,
-    discord_timestamp,
     parse_activities,
     parse_slots,
 )
@@ -31,6 +30,7 @@ from ...meetups.views import (
     send_confirmation,
     wind_down_thread,
 )
+from ...paginator import Paginator
 from ...render import make_embed
 from ..shared import GUILD_IDS, log_command
 
@@ -114,10 +114,14 @@ class MeetupCommands(commands.Cog):
         self.store = get_meetup_store()
 
     async def _resolve(self, ctx, meetup_id: int | None) -> Meetup | None:
-        """Return the requested meetup, or the channel's most recent one."""
+        """Resolve a meetup only within the invoking server."""
+        if ctx.guild_id is None:
+            return None
         if meetup_id is not None:
-            return await asyncio.to_thread(self.store.get, meetup_id)
-        return await asyncio.to_thread(self.store.latest_open_in_channel, ctx.channel.id)
+            meetup = await asyncio.to_thread(self.store.get, meetup_id)
+        else:
+            meetup = await asyncio.to_thread(self.store.latest_open_in_channel, ctx.channel.id)
+        return meetup if meetup is not None and meetup.guild_id == ctx.guild_id else None
 
     @meetup.command(name="propose", description="Poll the group on what to do and when")
     @discord.option("title", description="What to call this meetup", required=True)
@@ -267,7 +271,7 @@ class MeetupCommands(commands.Cog):
 
     @meetup.command(name="list", description="Show this server's open meetups")
     async def list_meetups(self, ctx) -> None:
-        """List every meetup in this server that has not closed yet."""
+        """Page through this server's open meetups in aligned, bounded columns."""
         log_command(ctx)
         if ctx.guild_id is None:
             await ctx.respond(
@@ -281,27 +285,17 @@ class MeetupCommands(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        embed = make_embed("", title="📅 Open meetups")
-        embed.description = None
-        embed.add_field(
-            name="Meetup",
-            value="\n".join(f"`#{item.meetup_id}` {item.title}" for item in meetups),
-            inline=True,
+        paginator = Paginator(
+            meetups,
+            author_id=ctx.author.id,
+            render_page=build_meetup_list_page,
+            page_size=5,
         )
-        embed.add_field(
-            name="State",
-            value="\n".join(item.state.title() for item in meetups),
-            inline=True,
+        paginator.message = await ctx.respond(
+            embed=paginator.render(),
+            view=paginator if paginator.max_page else None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
-        embed.add_field(
-            name="When",
-            value="\n".join(
-                discord_timestamp(item.locked_time, "f") if item.locked_time else "—"
-                for item in meetups
-            ),
-            inline=True,
-        )
-        await ctx.respond(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @meetup.command(name="cancel", description="Cancel a meetup and archive its thread")
     @discord.option("meetup_id", int, description=_MEETUP_ID_DESCRIPTION, required=False)

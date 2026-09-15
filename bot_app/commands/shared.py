@@ -8,12 +8,12 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Any
 
 import discord
 
 from ..config import ConfigError, get_settings
+from ..domain.players import Target
 from ..queues import current_queue_names
 from ..render import make_embed, profile_author_icon
 from ..services.riot_api import get_client
@@ -160,21 +160,6 @@ def match_reference_index(reference: str | None) -> int | None:
     return number - 1 if 1 <= number <= 20 else None
 
 
-@dataclass(frozen=True)
-class Target:
-    """The player a command should act on."""
-
-    puuid: str
-    server: str
-    riot_id: str = "Unknown player"
-    icon_url: str | None = None
-
-    @property
-    def opgg_url(self) -> str | None:
-        """Handle url."""
-        return opgg_url(self.server, self.riot_id)
-
-
 def tracked_players_in_lobby(game: dict[str, Any], target: Target) -> list[Any]:
     """Build tracked-player descriptors for either live-game command."""
     from ..announce import TrackedPlayer
@@ -266,7 +251,7 @@ def _discord_user_id(user: Any) -> str | None:
 def _linked_target(identifier: str | None, *, include_icon: bool = True) -> Target | None:
     """Resolve a stored account by Discord user id.
 
-    A tracked ``data.json`` account wins; failing that, a teammate PUUID tied
+    A tracked account wins; failing that, a teammate PUUID tied
     to the same Discord user is used, so a ``username`` mention of a teammate
     resolves even though the pollers never track them.
     """

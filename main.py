@@ -20,6 +20,7 @@ from bot_app.commands.shared import (
 )
 from bot_app.config import Settings, get_settings
 from bot_app.http_debug import install_rate_limit_debug_logging
+from bot_app.logging_config import configure_logging
 from bot_app.match_cache import get_match_cache
 from bot_app.meetups import poll_and_close_meetups
 from bot_app.queues import validate_current_queue_ids
@@ -71,7 +72,7 @@ class ConnectState:
 
 
 async def sync_and_restore_views(bot: discord.Bot, settings: Settings, state: ConnectState) -> None:
-    """Sync slash commands and restore persistent views once per process.
+    """Sync slash commands until successful and restore views once per process.
 
     These two are independent: a failed command sync (a bad option
     definition, a Discord API hiccup) must not stop button state from being
@@ -79,23 +80,39 @@ async def sync_and_restore_views(bot: discord.Bot, settings: Settings, state: Co
     until the next successful sync.
     """
     if bot.auto_sync_commands and not state.commands_synced:
-        state.commands_synced = True
         if settings.sync_commands_enabled:
             try:
                 await bot.sync_commands()
-                LOGGER.info("Synchronized application commands")
+                state.commands_synced = True
+                LOGGER.info(
+                    "Synchronized application commands", extra={"category": "STARTUP"}
+                )
             except Exception:
-                LOGGER.exception("Could not synchronize application commands")
+                LOGGER.exception(
+                    "Could not synchronize application commands",
+                    extra={"category": "STARTUP"},
+                )
         else:
-            LOGGER.warning("Skipping command sync (sync_commands_enabled is false)")
+            state.commands_synced = True
+            LOGGER.warning(
+                "Skipping command sync (sync_commands_enabled is false)",
+                extra={"category": "STARTUP"},
+            )
     if state.persistent_views_restored:
         return
     try:
         restored = register_persistent_embed_views(bot) + register_persistent_command_views(bot)
     except Exception:
-        LOGGER.exception("Could not restore persistent embed views")
+        LOGGER.exception(
+            "Could not restore persistent embed views",
+            extra={"category": "STARTUP"},
+        )
         return
-    LOGGER.info("Registered %d persistent embed views", restored)
+    LOGGER.info(
+        "Registered %d persistent embed views",
+        restored,
+        extra={"category": "STARTUP"},
+    )
     state.persistent_views_restored = True
 
 
@@ -149,15 +166,7 @@ def make_poller(
 def main() -> None:
     """Handle main."""
     settings = get_settings()
-    log_format = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
-    logging.basicConfig(
-        level=settings.log_level,
-        format=log_format,
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("bot.log", encoding="utf-8"),
-        ],
-    )
+    configure_logging(settings.log_level)
     # These libraries log their own request/event traffic at DEBUG (every HTTP
     # request line, every raw gateway payload); cap them so LOG_LEVEL=DEBUG
     # still surfaces this bot's own diagnostics without that firehose.
@@ -165,6 +174,13 @@ def main() -> None:
         logging.getLogger(noisy_logger).setLevel(logging.INFO)
     install_rate_limit_debug_logging()
     acquire_singleton_lock()
+    LOGGER.info(
+        "Starting bot | poll interval=%ss | log level=%s | match cache=%s",
+        settings.poll_interval_seconds,
+        settings.log_level.upper(),
+        "enabled" if settings.match_cache_enabled else "disabled",
+        extra={"category": "STARTUP"},
+    )
 
     stale_queue_ids = validate_current_queue_ids()
     if stale_queue_ids:
@@ -172,6 +188,7 @@ def main() -> None:
             "CURRENT_QUEUE_IDS in bot_app/queues.py has ids with no matching"
             " QUEUE_NAMES entry: %s",
             stale_queue_ids,
+            extra={"category": "STARTUP"},
         )
 
     bot = build_bot(settings)
@@ -211,26 +228,46 @@ def main() -> None:
     async def on_ready() -> None:
         """Handle ready."""
         LOGGER.info(
-            "Logged in as %s (%dms latency)", bot.user, round(bot.latency * 1000)
+            "Logged in as %s (%dms latency)",
+            bot.user,
+            round(bot.latency * 1000),
+            extra={"category": "STARTUP"},
         )
 
         if not pollers[0].is_running():
             await asyncio.to_thread(ddragon.recent_patch_prefixes, 6)
             updated, failed = await asyncio.to_thread(update_all_rank_snapshots)
-            LOGGER.info("Rank snapshots updated: %d | failed: %d", updated, failed)
+            LOGGER.info(
+                "Rank snapshots updated: %d | failed: %d",
+                updated,
+                failed,
+                extra={"category": "STARTUP"},
+            )
             tft_seeded, tft_failed = await asyncio.to_thread(
                 update_all_tft_rank_snapshots
             )
             LOGGER.info(
-                "TFT rank baselines seeded: %d | failed: %d", tft_seeded, tft_failed
+                "TFT rank baselines seeded: %d | failed: %d",
+                tft_seeded,
+                tft_failed,
+                extra={"category": "STARTUP"},
             )
             if settings.match_cache_enabled:
                 pruned = await asyncio.to_thread(get_match_cache().prune)
-                LOGGER.info("Pruned %d expired matches from the cache", pruned)
+                LOGGER.info(
+                    "Pruned %d expired matches from the cache",
+                    pruned,
+                    extra={"category": "STARTUP"},
+                )
 
         for poller in pollers:
             if not poller.is_running():
                 poller.start()
+        LOGGER.info(
+            "Background pollers running (%d)",
+            len(pollers),
+            extra={"category": "STARTUP"},
+        )
 
     @bot.event
     async def on_guild_remove(guild: discord.Guild) -> None:
@@ -244,7 +281,10 @@ def main() -> None:
             return
         log_command_error(ctx, error)
 
-    bot.run(settings.discord_token)
+    try:
+        bot.run(settings.discord_token)
+    finally:
+        LOGGER.info("Bot process stopped", extra={"category": "SHUTDOWN"})
 
 
 if __name__ == "__main__":

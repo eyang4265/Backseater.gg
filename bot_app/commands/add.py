@@ -3,7 +3,7 @@
 With ``teammate: True`` the same command instead registers a *teammate* — a
 bare PUUID that the pollers never fetch and that never triggers an
 announcement of its own.  A teammate exists only so that a completed-match
-announcement or ``/match`` for a real ``data.json`` account also bolds a
+announcement or ``/match`` for a real tracked account also bolds a
 teammate who happened to share that lobby.
 
 Called with a ``user`` but no ``summoner``, ``/add`` switches that user's

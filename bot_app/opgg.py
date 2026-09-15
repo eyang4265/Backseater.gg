@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import requests
@@ -66,9 +67,34 @@ class ChampionStats:
     situational_item_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ChampionTrend:
+    """One champion's win rate at an OP.GG game-length timestamp."""
+
+    name: str
+    internal_id: str
+    win_rate: float
+
+
+_TREND_ROLES = frozenset(("top", "jungle", "mid", "adc", "support"))
+_ROLE_CHAMPION_PATTERN = re.compile(
+    r'\\?"key\\?":\\?"([^"\\]+)\\?",'
+    r'\\?"name\\?":\\?"([^"\\]+)\\?",'
+    r'.{0,300}?\\?"positionName\\?":\\?"([A-Z]+)\\?"',
+    re.DOTALL,
+)
+_GAME_LENGTH_PATTERN = re.compile(
+    r'\\?"game_length\\?":(\d+),\\?"rate\\?":([0-9.]+),'
+    r'\\?"average\\?":[0-9.]+,\\?"rank\\?":\d+'
+)
+
+
 _cache: dict[str, tuple[float, ChampionStats]] = {}
 _cache_lock = threading.Lock()
 _fetch_locks: dict[str, threading.Lock] = {}
+_trend_cache: dict[
+    str, tuple[float, dict[int, tuple[ChampionTrend, ...]]]
+] = {}
 
 
 def _fetch_lock(key: str) -> threading.Lock:
@@ -321,3 +347,133 @@ def fetch_champion_stats(
         with _cache_lock:
             _cache[cache_key] = (now, stats)
         return stats
+
+
+def opgg_trends_url(role: str) -> str:
+    """Return OP.GG's global champion listing for one role."""
+    if role not in _TREND_ROLES:
+        raise ValueError("Unsupported OP.GG trends role")
+    return f"https://op.gg/lol/champions?position={role}&region=global&hl=en_US"
+
+
+def parse_role_champions(html: str, role: str) -> tuple[tuple[str, str], ...]:
+    """Extract every champion in the selected OP.GG role table."""
+    expected = role.upper()
+    champions = {
+        internal_id: name
+        for internal_id, name, position in _ROLE_CHAMPION_PATTERN.findall(html)
+        if position == expected
+    }
+    if not champions:
+        raise OPGGError("OP.GG returned a role page without champions")
+    return tuple((name, internal_id) for internal_id, name in champions.items())
+
+
+def parse_game_length_win_rates(html: str) -> dict[int, float]:
+    """Extract a champion's win rate at every OP.GG game-length timestamp."""
+    rates = {
+        int(game_length): float(rate)
+        for game_length, rate in _GAME_LENGTH_PATTERN.findall(html)
+    }
+    if not rates:
+        raise OPGGError("OP.GG returned no win rates by game length")
+    return rates
+
+
+def _fetch_champion_time_curve(
+    role: str, name: str, internal_id: str
+) -> tuple[str, str, dict[int, float]]:
+    """Fetch one champion's Trends tab, retrying one transient failure."""
+    url = (
+        f"https://op.gg/lol/champions/{internal_id}/trends/{role}"
+        "?region=global&hl=en_US"
+    )
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                url,
+                timeout=_TIMEOUT_SECONDS,
+                headers={"User-Agent": "VibeCode Bot/1.0"},
+            )
+            response.raise_for_status()
+            return name, internal_id, parse_game_length_win_rates(response.text)
+        except (requests.RequestException, OPGGError):
+            if attempt:
+                raise
+    raise OPGGError("OP.GG champion trend request failed")
+
+
+def fetch_champion_trends(role: str) -> dict[int, tuple[ChampionTrend, ...]]:
+    """Scan every champion in a role and rank win rates at every game length."""
+    url = opgg_trends_url(role)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _trend_cache.get(url)
+        if cached and now - cached[0] < _CACHE_SECONDS:
+            return cached[1]
+
+    with _fetch_lock(url):
+        now = time.monotonic()
+        with _cache_lock:
+            cached = _trend_cache.get(url)
+            if cached and now - cached[0] < _CACHE_SECONDS:
+                return cached[1]
+        LOGGER.info("Fetching OP.GG champion trends from %s", url)
+        try:
+            response = requests.get(
+                url,
+                timeout=_TIMEOUT_SECONDS,
+                headers={"User-Agent": "VibeCode Bot/1.0"},
+            )
+            response.raise_for_status()
+            champions = parse_role_champions(response.text, role)
+        except (requests.RequestException, OPGGError, ValueError) as error:
+            LOGGER.warning("Could not fetch OP.GG champion trends from %s: %s", url, error)
+            if isinstance(error, OPGGError):
+                raise
+            raise OPGGError("OP.GG did not respond with a usable role list") from error
+
+        results: dict[int, list[ChampionTrend]] = {}
+        failures = 0
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(_fetch_champion_time_curve, role, name, internal_id): name
+                for name, internal_id in champions
+            }
+            for future in as_completed(futures):
+                try:
+                    name, internal_id, rates = future.result()
+                except (requests.RequestException, OPGGError, ValueError) as error:
+                    failures += 1
+                    LOGGER.warning(
+                        "Could not fetch OP.GG time trends for %s: %s",
+                        futures[future],
+                        error,
+                    )
+                    continue
+                for game_length, win_rate in rates.items():
+                    results.setdefault(game_length, []).append(
+                        ChampionTrend(name, internal_id, win_rate)
+                    )
+        if failures:
+            raise OPGGError(
+                f"OP.GG returned incomplete game-length data for {failures} champion(s)"
+            )
+        if not results:
+            raise OPGGError("OP.GG returned no champion win rates by game length")
+        trends = {
+            game_length: tuple(
+                sorted(rows, key=lambda row: (-row.win_rate, row.name))[:10]
+            )
+            for game_length, rows in results.items()
+        }
+        LOGGER.info(
+            "Scanned %d/%d OP.GG %s champions across %d timestamps",
+            len(champions) - failures,
+            len(champions),
+            role,
+            len(trends),
+        )
+        with _cache_lock:
+            _trend_cache[url] = (now, trends)
+        return trends

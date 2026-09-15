@@ -16,7 +16,7 @@ from ..champstats import (
     ROLE_POSITION_IDS,
     queue_ids_for_scope,
 )
-from ..config import JSON_DIR
+from ..config import DATA_DIR
 from ..counterstats import CounterStatsReport, aggregate
 from ..match_cache import MatchCache
 from ..render import make_embed
@@ -27,12 +27,14 @@ from .shared import (
     SERVERS,
     log_command,
     not_found_embed,
+    remember_view_state,
     target_at_latest_match_position,
     target_for,
 )
 
 LOGGER = logging.getLogger(__name__)
-_CACHE_PATH = JSON_DIR / "matches.sqlite"
+VIEW_KIND = "counterstats"
+_CACHE_PATH = DATA_DIR / "matches.sqlite"
 _SCAN_PAGE_SIZE = 100
 _MATCHUP_PAGE_SIZE = 15
 _ROLES = ("Top", "Jungle", "Mid", "ADC", "Support")
@@ -90,10 +92,12 @@ class CounterStatsView(discord.ui.View):
     def __init__(
         self, payloads, puuid: str, champion: str, queue_scope: str,
         player_role: str, usage_filter: bool, player_name: str, author_id: int,
-        *, timelines=None, laning: bool = False,
+        *, timelines=None, laning: bool = False, server: str = "NA1",
+        enemy_role: str = ALL_ROLES, page: int = 0,
     ) -> None:
         super().__init__(timeout=None)
-        self.payloads = payloads
+        self.payloads = payloads or []
+        self._loaded = payloads is not None
         self.champion = champion
         self.queue_scope = queue_scope
         self.player_name = player_name
@@ -103,13 +107,53 @@ class CounterStatsView(discord.ui.View):
         self.usage_filter = usage_filter
         self.timelines = timelines or {}
         self.laning = laning
-        self.enemy_role = ALL_ROLES
-        self.page = 0
+        self.server = server
+        self.enemy_role = enemy_role if enemy_role in {ALL_ROLES, *_ROLES} else ALL_ROLES
+        self.page = max(int(page), 0)
         self._buttons: dict[str, discord.ui.Button] = {}
         self._previous = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="counterstats:previous")
         self._next = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, custom_id="counterstats:next")
         self._previous.callback = self._go_previous
         self._next.callback = self._go_next
+
+    def state_payload(self) -> dict:
+        """Persist query inputs, never the potentially large match payloads."""
+        return {
+            "puuid": self.puuid,
+            "server": self.server,
+            "champion": self.champion,
+            "queue_scope": self.queue_scope,
+            "player_role": self.player_role,
+            "usage_filter": self.usage_filter,
+            "player_name": self.player_name,
+            "author_id": self.author_id,
+            "laning": self.laning,
+            "enemy_role": self.enemy_role,
+            "page": self.page,
+        }
+
+    async def _ensure_loaded(self) -> None:
+        """Reload cached inputs lazily after a process restart."""
+        if self._loaded:
+            return
+        self.payloads = await asyncio.to_thread(
+            _load_payloads, self.puuid, self.server, scan_riot=False
+        )
+        if self.laning:
+            self.timelines = await asyncio.to_thread(
+                _load_timelines,
+                self.payloads,
+                self.puuid,
+                self.champion,
+                self.queue_scope,
+                self.player_role,
+                self.server,
+                fetch_missing=False,
+            )
+        self._loaded = True
+
+    async def _remember(self, interaction: discord.Interaction) -> None:
+        await remember_view_state(interaction.message, VIEW_KIND, self.state_payload())
 
     def add_role_buttons(self) -> None:
         """Add the five role controls."""
@@ -126,11 +170,13 @@ class CounterStatsView(discord.ui.View):
                 await interaction.response.send_message("Only the command author can use these controls.", ephemeral=True)
                 return
             await interaction.response.defer()
+            await self._ensure_loaded()
             self.enemy_role = role
             self.page = 0
             self._refresh()
             report = self._report(enemy_role=role)
             await interaction.edit_original_response(embed=_counter_embed(report, self.player_name, self.page), view=self)
+            await self._remember(interaction)
         return callback
 
     async def _check(self, interaction: discord.Interaction) -> bool:
@@ -145,19 +191,23 @@ class CounterStatsView(discord.ui.View):
         """Show the previous matchup page."""
         if not await self._check(interaction):
             return
+        await self._ensure_loaded()
         self.page = max(self.page - 1, 0)
         self._refresh()
         report = self._report()
         await interaction.edit_original_response(embed=_counter_embed(report, self.player_name, self.page), view=self)
+        await self._remember(interaction)
 
     async def _go_next(self, interaction: discord.Interaction) -> None:
         """Show the next matchup page."""
         if not await self._check(interaction):
             return
+        await self._ensure_loaded()
         report = self._report()
         self.page = min(self.page + 1, _counter_page_count(report) - 1)
         self._refresh()
         await interaction.edit_original_response(embed=_counter_embed(report, self.player_name, self.page), view=self)
+        await self._remember(interaction)
 
     def _refresh(self) -> None:
         report = self._report()
@@ -344,12 +394,14 @@ class CounterStatsCommands(commands.Cog):
         view = CounterStatsView(
             payloads, target.puuid, found.name, queue, role, bool(filter),
             target.riot_id, ctx.author.id, timelines=timelines, laning=laning,
+            server=target.server,
         )
         view.add_role_buttons()
         embed = _counter_embed(report, target.riot_id, view.page)
         embed.description += "\n\nScanning Riot match history; this message will refresh when it finishes."
         message = await ctx.respond(embed=embed, view=view)
         if message is not None:
+            await remember_view_state(message, VIEW_KIND, view.state_payload())
             task = asyncio.create_task(self._finish_scan(message, view, target.puuid, target.server))
             self._scan_tasks.add(task)
             task.add_done_callback(self._scan_tasks.discard)

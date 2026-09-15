@@ -23,11 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from ..config import JSON_DIR
+from ..config import DATA_DIR, JSON_DIR, migrate_legacy_sqlite_file
 
 LOGGER = logging.getLogger(__name__)
 
-MEETUP_DB_PATH = JSON_DIR / "meetups.sqlite"
+MEETUP_DB_PATH = DATA_DIR / "meetups.sqlite"
+LEGACY_MEETUP_DB_PATH = JSON_DIR / "meetups.sqlite"
 CURRENT_SCHEMA_VERSION = 1
 
 AXIS_ACTIVITY = "activity"
@@ -126,6 +127,8 @@ class MeetupStore:
 
     def __init__(self, path: Path | str = MEETUP_DB_PATH) -> None:
         """Initialize the instance."""
+        if Path(path) == MEETUP_DB_PATH:
+            migrate_legacy_sqlite_file(MEETUP_DB_PATH, LEGACY_MEETUP_DB_PATH)
         self.path = str(path)
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
@@ -297,18 +300,20 @@ class MeetupStore:
                 [(meetup_id, user_id, axis, key) for key in keys],
             )
 
-    def lock(self, meetup_id: int, activity: str, moment: int) -> None:
-        """Fix the winning activity and time, moving the meetup to LOCKED."""
+    def lock(self, meetup_id: int, activity: str, moment: int) -> bool:
+        """Atomically lock an open poll; reject stale pickers without changing it."""
         with self._lock, self._database() as db:
-            db.execute(
+            changed = db.execute(
                 """
                 UPDATE meetups
                    SET state = ?, locked_activity = ?, locked_time = ?
-                 WHERE meetup_id = ?
+                 WHERE meetup_id = ? AND state = ?
                 """,
-                (STATE_LOCKED, activity, int(moment), meetup_id),
-            )
-        LOGGER.info("Locked meetup %d to %s @ %d", meetup_id, activity, moment)
+                (STATE_LOCKED, activity, int(moment), meetup_id, STATE_POLLING),
+            ).rowcount > 0
+        if changed:
+            LOGGER.info("Locked meetup %d to %s @ %d", meetup_id, activity, moment)
+        return changed
 
     def set_state(self, meetup_id: int, state: str) -> None:
         """Move a meetup to another lifecycle state."""

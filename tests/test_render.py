@@ -262,7 +262,7 @@ class TeamColumnLayoutTests(unittest.TestCase):
 
         self.assertEqual(
             [field.name.split(" | ")[0] for field in embed.fields],
-            ["Arena Team 1", "Arena Team 2", "Arena Team 3"],
+            ["Team 1", "Team 2", "Team 3"],
         )
         self.assertIn("C", embed.fields[2].value)
         self.assertIn("D", embed.fields[2].value)
@@ -326,6 +326,22 @@ class TeamColumnLayoutTests(unittest.TestCase):
             self.assertTrue(
                 all(f"Player {index}" in rendered_teams[1] for index in (16, 17, 18))
             )
+
+        self.assertEqual(
+            [team[0] for team in match_columns.arena_teams],
+            [
+                "🔵 Team 1",
+                "🔴 Team 2",
+                "🟢 Team 3",
+                "🟡 Team 4",
+                "🟣 Team 5",
+                "🟠 Team 6",
+            ],
+        )
+        self.assertEqual(
+            [team[0] for team in live_columns.arena_teams],
+            [f"Team {number}" for number in range(1, 7)],
+        )
 
     @patch("bot_app.render.tracked_puuids", return_value=())
     @patch("bot_app.render._positions_by_index", return_value=["Top"])
@@ -443,7 +459,8 @@ class RatingColumnLayoutTests(unittest.TestCase):
                 ],
             }
         }
-        columns = build_rating_columns(match, {})
+        with patch("bot_app.render.ddragon.catalog", return_value=None):
+            columns = build_rating_columns(match, {})
         self.assertEqual(columns.blue_scores, ["—"])
 
     def test_empty_lobby_produces_no_columns(self) -> None:

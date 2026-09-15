@@ -8,6 +8,21 @@ json/secrets.json
 # Runtime state, rewritten by the pollers.
 json/*.tmp
 json/*.sqlite
+data/
+boots.log
+
+# Legacy runtime JSON retained locally as a one-time migration source.
+json/data.json
+json/embed_button_state.json
+json/flake_ranks.json
+json/guilds.json
+json/live_game_messages.json
+json/live_game_state.json
+json/match_tracker_state.json
+json/teammates.json
+json/tft_data.json
+json/tft_live_game_state.json
+json/tft_match_tracker_state.json
 
 # Bot logs.
 *.log

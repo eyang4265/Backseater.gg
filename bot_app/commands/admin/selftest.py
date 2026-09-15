@@ -47,7 +47,7 @@ def _load_sample(filename: str) -> dict[str, Any] | None:
 
 
 def _tracked_players_in(match: dict[str, Any]) -> list[TrackedPlayer]:
-    """Every data.json account that played in a match — the same selection
+    """Every tracked account that played in a match — the same selection
     rule the live poller uses."""
     match_puuids = {
         participant.get("puuid")
@@ -267,7 +267,7 @@ class AdminCommands(commands.Cog):
     ) -> None:
         """Render a match exactly as the poller would, and reply with it.
 
-        Recency and ranked-queue gates are off so any match can be rendered.
+        The recency gate is off; the shared formatter never filters by queue.
         """
         announcement = format_match(
             match,

@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .ddragon import ItemMetadata, rune_name
-from .config import REPO_ROOT
+from .config import DATA_DIR
 from .queues import FLEX_QUEUE_ID, RANKED_QUEUE_IDS, SOLO_QUEUE_ID
 
 LOGGER = logging.getLogger(__name__)
-_BOOTS_LOG_PATH = REPO_ROOT / "boots.log"
+_BOOTS_LOG_PATH = DATA_DIR / "boots.log"
 _BOOTS_LOG_LOCK = threading.Lock()
 _LOGGED_NO_BOOT_MATCHES: set[str] = set()
 
@@ -202,6 +202,7 @@ def _record_no_boot_game(info: Mapping[str, Any], participant: Mapping[str, Any]
             f"length={duration // 60}:{duration % 60:02d}\n"
         )
         try:
+            _BOOTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with _BOOTS_LOG_PATH.open("a", encoding="utf-8") as log_file:
                 log_file.write(line)
             _LOGGED_NO_BOOT_MATCHES.add(match_id)

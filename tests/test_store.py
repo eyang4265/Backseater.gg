@@ -1,6 +1,11 @@
 """Poller state: match-id retention and the legacy on-disk formats."""
 
 import unittest
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from unittest.mock import Mock, patch
 
 from bot_app.ranks import RankSnapshot
@@ -14,7 +19,91 @@ from bot_app.store import (
     pop_live_game_messages,
     remember_live_game_message,
     save_live_game_state,
+    league_state_transaction,
 )
+from bot_app.config import migrate_legacy_runtime_file, migrate_legacy_sqlite_file
+
+
+class RuntimeStorageTests(unittest.TestCase):
+    def test_legacy_file_is_copied_without_removing_its_backup(self) -> None:
+        """An upgrade preserves both the live copy and its migration source."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "json" / "state.json"
+            target = root / "data" / "state.json"
+            legacy.parent.mkdir()
+            legacy.write_text('{"match": 1}', encoding="utf-8")
+
+            migrate_legacy_runtime_file(target, legacy)
+
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"match": 1}')
+            self.assertTrue(legacy.exists())
+
+    def test_newer_legacy_file_wins_during_running_bot_cutover(self) -> None:
+        """The old process may keep writing JSON until the upgraded restart."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "json" / "state.json"
+            target = root / "data" / "state.json"
+            legacy.parent.mkdir()
+            target.parent.mkdir()
+            target.write_text("old", encoding="utf-8")
+            legacy.write_text("new", encoding="utf-8")
+            target.touch()
+            legacy.touch()
+            # Ensure a strict timestamp order even on coarse filesystems.
+            import os
+            os.utime(target, (1, 1))
+            os.utime(legacy, (2, 2))
+
+            migrate_legacy_runtime_file(target, legacy)
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+
+    def test_sqlite_migration_uses_a_consistent_backup(self) -> None:
+        """Database migration copies committed rows through SQLite itself."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "json" / "state.sqlite"
+            target = root / "data" / "state.sqlite"
+            legacy.parent.mkdir()
+            with sqlite3.connect(str(legacy)) as database:
+                database.execute("CREATE TABLE state (value TEXT NOT NULL)")
+                database.execute("INSERT INTO state VALUES ('kept')")
+
+            migrate_legacy_sqlite_file(target, legacy)
+
+            with sqlite3.connect(str(target)) as database:
+                self.assertEqual(
+                    database.execute("SELECT value FROM state").fetchone()[0],
+                    "kept",
+                )
+
+    def test_league_state_transactions_do_not_overlap(self) -> None:
+        """Concurrent pollers cannot commit stale League state snapshots."""
+        first_entered = Event()
+        release_first = Event()
+        second_entered = Event()
+
+        def first() -> None:
+            with league_state_transaction():
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def second() -> None:
+            first_entered.wait(timeout=2)
+            with league_state_transaction():
+                second_entered.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(first)
+            second_future = executor.submit(second)
+            self.assertTrue(first_entered.wait(timeout=2))
+            self.assertFalse(second_entered.wait(timeout=0.05))
+            release_first.set()
+            first_future.result(timeout=2)
+            second_future.result(timeout=2)
+        self.assertTrue(second_entered.is_set())
 
 
 class ComponentStateMigrationTests(unittest.TestCase):

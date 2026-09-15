@@ -12,12 +12,20 @@ import io
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 import discord
 
 from . import ddragon, emoji as emoji_lookup
+from .announcement_models import (
+    LiveGameAnnouncement,
+    MatchAnnouncement,
+    TrackedPlayer,
+    live_game_announcement_from_payload,
+    live_game_announcement_payload,
+    match_announcement_from_payload,
+    match_announcement_payload,
+)
 from .charts import (
     DAMAGE_CHART_FILENAME,
     build_damage_chart,
@@ -68,82 +76,6 @@ DEFEAT = "Defeat"
 _TFT_MATCH_DISPLAY_PLAYERS = "players"
 _TFT_MATCH_DISPLAY_RANKS = "ranks"
 _TFT_MATCH_DISPLAY_TRAITS = "traits"
-
-
-@dataclass(frozen=True)
-class TrackedPlayer:
-    """A player an announcement should call out by name."""
-
-    puuid: str
-    riot_id: str
-    server: str | None = None
-    lp_change: str | None = None
-    rank: RankSnapshot | None = None
-
-
-@dataclass(frozen=True)
-class MatchAnnouncement:
-    text: str
-    outcome: str | None
-    match: dict[str, Any]
-    highlight_puuids: set[str]
-    game_type: str = "lol"
-    # puuid -> already-formatted LP delta (e.g. "+24 LP"), tracked players only.
-    lp_changes: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class LiveGameAnnouncement:
-    """A lobby posted once when one or more tracked players enter a game."""
-
-    text: str
-    game: dict[str, Any]
-    highlight_puuids: set[str]
-    game_type: str = "lol"
-
-
-def _announcement_payload(announcement: MatchAnnouncement) -> dict[str, Any]:
-    """Serialize the data needed to rebuild a completed-match view."""
-    return {
-        "text": announcement.text,
-        "outcome": announcement.outcome,
-        "match": announcement.match,
-        "highlight_puuids": sorted(announcement.highlight_puuids),
-        "game_type": announcement.game_type,
-        "lp_changes": dict(announcement.lp_changes),
-    }
-
-
-def _live_game_payload(announcement: LiveGameAnnouncement) -> dict[str, Any]:
-    """Serialize the data needed to rebuild a live-game view."""
-    return {
-        "text": announcement.text,
-        "game": announcement.game,
-        "highlight_puuids": sorted(announcement.highlight_puuids),
-        "game_type": announcement.game_type,
-    }
-
-
-def _announcement_from_payload(payload: dict[str, Any]) -> MatchAnnouncement:
-    """Restore a completed-match announcement from JSON state."""
-    return MatchAnnouncement(
-        text=str(payload.get("text", "")),
-        outcome=payload.get("outcome"),
-        match=payload.get("match", {}),
-        highlight_puuids=set(payload.get("highlight_puuids", [])),
-        game_type=str(payload.get("game_type", "lol")),
-        lp_changes=dict(payload.get("lp_changes", {}) or {}),
-    )
-
-
-def _live_game_from_payload(payload: dict[str, Any]) -> LiveGameAnnouncement:
-    """Restore a live-game announcement from JSON state."""
-    return LiveGameAnnouncement(
-        text=str(payload.get("text", "")),
-        game=payload.get("game", {}),
-        highlight_puuids=set(payload.get("highlight_puuids", [])),
-        game_type=str(payload.get("game_type", "lol")),
-    )
 
 
 def _live_game_key(game: dict[str, Any]) -> str | None:
@@ -225,7 +157,7 @@ async def remember_match_view_state(
             message_id,
             channel_id,
             "match",
-            _announcement_payload(announcement),
+            match_announcement_payload(announcement),
         )
 
 
@@ -246,7 +178,7 @@ async def remember_live_game_view_state(
             message_id,
             channel_id,
             "live_game",
-            _live_game_payload(announcement),
+            live_game_announcement_payload(announcement),
         )
 
 
@@ -258,9 +190,9 @@ def register_persistent_embed_views(bot: Any) -> int:
     for state in states:
         try:
             view = (
-                MatchAnnouncementView(_announcement_from_payload(state["payload"]))
+                MatchAnnouncementView(match_announcement_from_payload(state["payload"]))
                 if state["kind"] == "match"
-                else LiveGameAnnouncementView(_live_game_from_payload(state["payload"]))
+                else LiveGameAnnouncementView(live_game_announcement_from_payload(state["payload"]))
                 if state["kind"] == "live_game"
                 else None
             )
@@ -293,16 +225,16 @@ def format_match(
     players: Sequence[TrackedPlayer],
     *,
     require_finished: bool = True,
-    require_ranked_queue: bool = True,
+    require_ranked_queue: bool = False,
     game_type: str = "lol",
 ) -> MatchAnnouncement | None:
     """One announcement covering every tracked player in a match.
 
-    ``require_finished`` and ``require_ranked_queue`` gate the two checks that
-    restrict an announcement to a finished ranked game. ``require_ranked_queue``
-    defaults to True for callers that only ever want ranked games, but both the
-    match poller and the slash commands pass ``False`` so every queue a tracked
-    player finishes is rendered through this same code path.
+    ``require_finished`` gates incomplete games. Queue ids are deliberately not
+    filtered: every completed game containing a tracked player is eligible,
+    including rotating, custom, and as-yet unmapped queues. The legacy
+    ``require_ranked_queue`` argument remains for call compatibility but is
+    ignored so no caller can accidentally restore an announcement filter.
 
     The full lobby isn't part of this text — callers add it as embed fields
     via :func:`build_match_columns`, so the rows line up in real columns.
@@ -319,9 +251,6 @@ def format_match(
         return None
 
     queue_id = info.get("queueId")
-    if require_ranked_queue and queue_id not in RANKED_QUEUE_IDS:
-        LOGGER.debug("Skipping format_match: queue_id=%s is not ranked", queue_id)
-        return None
 
     participants = info.get("participants", []) or []
     duration = format_duration(info.get("gameDuration", 0))
@@ -403,6 +332,11 @@ def format_match(
         match=match,
         highlight_puuids={player.puuid for player in players},
         game_type="lol",
+        lp_changes={
+            player.puuid: player.lp_change
+            for player in players
+            if player.lp_change
+        },
     )
 
 

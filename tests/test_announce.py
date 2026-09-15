@@ -144,6 +144,43 @@ class GoldEmbedTests(unittest.TestCase):
 
 
 class RelativeTimestampTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Keep formatting tests independent of live Data Dragon metadata."""
+        catalog = patch("bot_app.announce.ddragon.catalog", return_value=None)
+        catalog.start()
+        self.addCleanup(catalog.stop)
+
+    def test_unknown_queue_is_not_filtered_even_with_legacy_ranked_flag(self) -> None:
+        """Completed announcements never apply a queue allowlist."""
+        match = {
+            "info": {
+                "gameEndTimestamp": 1_700_000_000_000,
+                "gameDuration": 900,
+                "queueId": 9999,
+                "participants": [
+                    {
+                        "puuid": "p1",
+                        "win": True,
+                        "championName": "Ahri",
+                        "championId": 103,
+                        "kills": 1,
+                        "deaths": 0,
+                        "assists": 2,
+                        "teamId": 100,
+                    }
+                ],
+            }
+        }
+        with patch("bot_app.announce.ddragon.catalog", return_value=None):
+            announcement = format_match(
+                match,
+                [TrackedPlayer("p1", "Player#NA1")],
+                require_ranked_queue=True,
+            )
+
+        self.assertIsNotNone(announcement)
+        self.assertIn("Queue 9999", announcement.text)
+
     """The how-long-ago timers on match and live-game announcements."""
 
     def test_format_match_includes_a_relative_end_timestamp(self) -> None:
@@ -187,6 +224,37 @@ class RelativeTimestampTests(unittest.TestCase):
         announcement = format_live_game(game, players)
         self.assertIsNotNone(announcement)
         self.assertIn("<t:1700000000:R>", announcement.text)
+
+    def test_league_match_line_shows_teammate_lp_change(self) -> None:
+        """League LP deltas are visible and retained in persistent view state."""
+        match = {
+            "info": {
+                "gameEndTimestamp": 1_700_000_000_000,
+                "gameDuration": 1800,
+                "queueId": SOLO_QUEUE_ID,
+                "participants": [
+                    {
+                        "puuid": "mate",
+                        "win": True,
+                        "championName": "Ahri",
+                        "championId": 103,
+                        "kills": 5,
+                        "deaths": 2,
+                        "assists": 7,
+                        "teamId": 100,
+                    }
+                ],
+            }
+        }
+        with patch("bot_app.announce.ddragon.catalog", return_value=None):
+            announcement = format_match(
+                match,
+                [TrackedPlayer("mate", "Mate#NA1", lp_change="+18 LP")],
+                require_ranked_queue=False,
+            )
+
+        self.assertIn("+18 LP", announcement.text)
+        self.assertEqual(announcement.lp_changes, {"mate": "+18 LP"})
 
     def test_tft_match_formats_placement_and_uses_tft_embed(self) -> None:
         match = {
@@ -429,10 +497,17 @@ class RelativeTimestampTests(unittest.TestCase):
             ["players", "ranks", "traits"],
         )
         ranks = {"p1": RankSnapshot("GOLD", "II", 40), "p2": None}
+        client = Mock()
+        client.tft_riot_id.side_effect = lambda puuid, _server: {
+            "p1": "Reg#NA1",
+            "p2": "Rival#NA1",
+        }[puuid]
         with patch(
             "bot_app.announce.fetch_tft_rank",
             side_effect=lambda puuid, server: ranks[puuid],
-        ), patch("bot_app.announce.load_tft_accounts", return_value={}):
+        ), patch("bot_app.announce.load_tft_accounts", return_value={}), patch(
+            "bot_app.announce.get_client", return_value=client
+        ):
             embed, _ = self._run(
                 build_announcement_embed(announcement, tft_display_mode="ranks")
             )

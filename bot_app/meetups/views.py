@@ -1,8 +1,7 @@
 """Component views and lifecycle transitions for meetups.
 
-Every interaction here does only local SQLite work before replying, so
-the response always lands inside Discord's interaction deadline without
-needing a deferral.
+Most controls reply after local SQLite work. The lock-in picker defers
+before reading or changing storage, then atomically locks only an open poll.
 
 The poll message lives in its parent channel, never inside the thread it
 spawns: an archived thread cannot have its messages edited, so a meetup
@@ -295,21 +294,29 @@ class LockView(discord.ui.View):
         self.add_item(select)
 
     async def _confirm(self, interaction: discord.Interaction) -> None:
-        """Apply the lock and re-render the public poll message."""
-        meetup = self._store.get(self.meetup_id)
+        """Acknowledge first, then lock only an open poll and update its message."""
+        await interaction.response.defer()
+        meetup = await asyncio.to_thread(self._store.get, self.meetup_id)
         if meetup is None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="This meetup is gone.", embed=None, view=None
             )
             return
         if self.activity is None or self.moment is None:
-            await interaction.response.send_message(
-                "Pick both an activity and a time first.", ephemeral=True
+            await interaction.edit_original_response(
+                content="Pick both an activity and a time first."
             )
             return
-        self._store.lock(meetup.meetup_id, self.activity, int(self.moment))
-        locked = self._store.get(meetup.meetup_id) or meetup
-        await interaction.response.edit_message(
+        changed = await asyncio.to_thread(
+            self._store.lock, meetup.meetup_id, self.activity, int(self.moment)
+        )
+        if not changed:
+            await interaction.edit_original_response(
+                content="This poll is no longer open.", embed=None, view=None
+            )
+            return
+        locked = await asyncio.to_thread(self._store.get, meetup.meetup_id) or meetup
+        await interaction.edit_original_response(
             content=(
                 f"Locked in. **{len(locked.expected_attendees())}** "
                 "poll respondents match both choices — run `/meetup confirm` to ping them."

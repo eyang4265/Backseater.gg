@@ -15,3 +15,5 @@ The required `role` selects the selected champion's role. The initial table
 compares against enemies in every role. After the result appears, use the five buttons
 for Top, Jungle, Mid, ADC, and Support to switch the enemy role. Large matchup lists include
 Previous/Next buttons so every result stays within Discord's embed limits.
+The role and pagination controls remain usable after a bot restart; restored
+controls rebuild their inputs from the local match cache without scanning Riot.

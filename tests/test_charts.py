@@ -531,7 +531,9 @@ class DamageChartTests(unittest.TestCase):
             seen.append(axes)
             return figure, axes
 
-        with patch.object(charts.plt, "subplots", side_effect=capture):
+        with patch.object(charts.plt, "subplots", side_effect=capture), patch(
+            "bot_app.charts.ddragon.catalog", return_value=None
+        ):
             result = _build_damage_chart(self._match())
 
         self.assertIsNotNone(result)

@@ -19,6 +19,8 @@ from . import (
     coachless,
     counterstats,
     duo,
+    flake,
+    flakerank,
     guilds,
     info,
     leaguecommands,
@@ -32,6 +34,7 @@ from . import (
     tftmatch,
     tftmatchhistory,
     tftupdate,
+    trends,
 )
 from .meetup import setup_meetup
 from .match import setup_jungleproximity, setup_laning, setup_match, setup_timeline
@@ -52,6 +55,8 @@ _SETUPS = (
     counterstats.setup,
     coachless.setup,
     duo.setup,
+    flake.setup,
+    flakerank.setup,
     mastery.setup,
     setup_meetup,
     setup_timeline,
@@ -64,6 +69,7 @@ _SETUPS = (
     tftmatch.setup,
     tftmatchhistory.setup,
     tftupdate.setup,
+    trends.setup,
     info.setup,
     admin.setup,
     ai.setup,
@@ -75,7 +81,11 @@ def register_all(bot: "discord.Bot") -> None:
     """Install every command cog on the client."""
     for setup in _SETUPS:
         setup(bot)
-    LOGGER.info("Registered %d command modules", len(_SETUPS))
+    LOGGER.info(
+        "Registered %d command modules",
+        len(_SETUPS),
+        extra={"category": "STARTUP"},
+    )
 
 
 __all__ = ["register_all"]

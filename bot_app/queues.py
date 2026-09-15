@@ -116,7 +116,15 @@ def validate_current_queue_ids() -> tuple[int, ...]:
     """
     stale = tuple(sorted(queue_id for queue_id in CURRENT_QUEUE_IDS if queue_id not in QUEUE_NAMES))
     if stale:
-        LOGGER.warning("CURRENT_QUEUE_IDS has unmapped queue ids: %s", stale)
+        LOGGER.warning(
+            "CURRENT_QUEUE_IDS has unmapped queue ids: %s",
+            stale,
+            extra={"category": "STARTUP"},
+        )
     else:
-        LOGGER.debug("CURRENT_QUEUE_IDS validated: %d queue ids all mapped", len(CURRENT_QUEUE_IDS))
+        LOGGER.debug(
+            "CURRENT_QUEUE_IDS validated: %d queue ids all mapped",
+            len(CURRENT_QUEUE_IDS),
+            extra={"category": "STARTUP"},
+        )
     return stale

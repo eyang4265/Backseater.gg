@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Iterable
 
@@ -26,7 +27,7 @@ from ..champstats import (
 )
 from ..match_cache import MatchCache
 from ..render import make_embed
-from ..config import JSON_DIR
+from ..config import DATA_DIR
 from ..services.riot_api import RiotAPIError, get_client
 from .shared import (
     GUILD_IDS,
@@ -34,14 +35,16 @@ from .shared import (
     SERVERS,
     log_command,
     not_found_embed,
+    remember_view_state,
     target_at_latest_match_position,
     target_for,
 )
 
-_CACHE_PATH = JSON_DIR / "matches.sqlite"
+_CACHE_PATH = DATA_DIR / "matches.sqlite"
 _PAGE_SIZE = 10
 _MATCH_SCAN_PAGE_SIZE = 100
 LOGGER = logging.getLogger(__name__)
+VIEW_KIND = "champstats"
 
 
 async def _patch_autocomplete(ctx: discord.AutocompleteContext) -> list[str]:
@@ -147,14 +150,16 @@ class ChampStatsView(discord.ui.View):
         player_name: str,
         author_id: int,
         apply_filter: bool = False,
+        selected: str = "Runes",
+        page: int = 0,
     ) -> None:
         super().__init__(timeout=None)
         self.report = report
         self.player_name = player_name
         self.author_id = author_id
         self.apply_filter = apply_filter
-        self.selected = "Runes"
-        self.page = 0
+        self.selected = selected if selected in {"Runes", "Final Items", "Boots"} else "Runes"
+        self.page = max(int(page), 0)
         self._select = discord.ui.Select(
             placeholder="Choose a breakdown",
             options=[discord.SelectOption(label=label, value=label, default=label == self.selected) for label in ("Runes", "Final Items", "Boots")],
@@ -167,6 +172,21 @@ class ChampStatsView(discord.ui.View):
         self._previous.callback = self._go_previous
         self._next.callback = self._go_next
         self._refresh_buttons()
+
+    def state_payload(self) -> dict:
+        """Return the compact persistent state for this report view."""
+        return {
+            "report": asdict(self.report),
+            "player_name": self.player_name,
+            "author_id": self.author_id,
+            "apply_filter": self.apply_filter,
+            "selected": self.selected,
+            "page": self.page,
+        }
+
+    async def _remember(self, interaction: discord.Interaction) -> None:
+        """Persist the current selection after a successful edit."""
+        await remember_view_state(interaction.message, VIEW_KIND, self.state_payload())
 
     def _records(self) -> tuple[ChoiceRecord, ...]:
         if self.selected == "Runes":
@@ -214,6 +234,7 @@ class ChampStatsView(discord.ui.View):
         self.page = 0
         self._refresh_buttons()
         await interaction.edit_original_response(embed=_stats_embed(self.report, self.player_name, self.selected, self.page, self.apply_filter), view=self)
+        await self._remember(interaction)
 
     async def _go_previous(self, interaction: discord.Interaction) -> None:
         if not await self._check(interaction):
@@ -221,6 +242,7 @@ class ChampStatsView(discord.ui.View):
         self.page = max(self.page - 1, 0)
         self._refresh_buttons()
         await interaction.edit_original_response(embed=_stats_embed(self.report, self.player_name, self.selected, self.page, self.apply_filter), view=self)
+        await self._remember(interaction)
 
     async def _go_next(self, interaction: discord.Interaction) -> None:
         if not await self._check(interaction):
@@ -228,6 +250,7 @@ class ChampStatsView(discord.ui.View):
         self.page += 1
         self._refresh_buttons()
         await interaction.edit_original_response(embed=_stats_embed(self.report, self.player_name, self.selected, self.page, self.apply_filter), view=self)
+        await self._remember(interaction)
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -409,7 +432,8 @@ class ChampStatsCommands(commands.Cog):
         player_name = target.riot_id
         view = ChampStatsView(report, player_name, ctx.author.id, apply_filter)
         embed = _stats_embed(report, player_name, view.selected, 0, apply_filter)
-        await ctx.respond(embed=embed, view=view)
+        message = await ctx.respond(embed=embed, view=view)
+        await remember_view_state(message, VIEW_KIND, view.state_payload())
 
 
 def setup(bot: discord.Bot) -> None:

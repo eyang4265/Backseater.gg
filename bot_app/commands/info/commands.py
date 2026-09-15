@@ -57,10 +57,14 @@ _COMMANDS = (
         "Usage: optionally provide a player, `queue`, or `days`.\n\n"
         "**`/leaderboard`** — Rank tracked accounts from saved snapshots.\n"
         "Usage: optionally choose a `queue`.\n\n"
+        "**`/flake`** — Show this server's flake tier list.\n"
+        "Usage: run with no options; tiers run from S (most flaky) through F (least flaky), followed by Unknown.\n\n"
         "**`/duo`** — Show the cached record for two tracked players.\n"
         "Usage: `teammate:<user>`; optionally provide the primary player, use `position:1-10`, or filter by `game_mode`.\n\n"
         "**`/champ`** — Show live OP.GG champion stats, skill order, rune emotes, and item build emotes.\n"
         "Usage: `champion:<name>` (uses global stats by default); optionally choose `server` and `position`, or use the position buttons.\n\n"
+        "**`/trends`** — Compare every OP.GG champion in a role by game-length win rate.\n"
+        "Usage: `role:<role>`; use the buttons to show the top 10 at each game-time range.\n\n"
         "**`/champstats`** — Show your cached record on one champion with rune, final-item, and boot breakdowns.\n"
         "Usage: `champion:<name>`; optionally choose `queue`, `role`, `server`, `username`, `filter`, or `position:1-10`.\n\n"
         "**`/counterstats`** — Show a champion's win rate against every enemy champion.\n"
@@ -74,7 +78,7 @@ _COMMANDS = (
         "Usage: `/meetup propose title:<name> activities:<a, b> times:<fri 7pm, sat 8pm>`; "
         "optionally add `location` or `timezone`. Vote with the two dropdowns, press **Lock it in** to fix the winning "
         "activity and time, then `/meetup confirm` to ping everyone the poll expects. "
-        "`/meetup list` shows this server's open meetups and `/meetup cancel` removes one.",
+        "`/meetup list` pages through this server's open meetups; `/meetup cancel` removes one. Explicit meetup IDs must belong to this server.",
     ),
     (
         "Riot & Server",

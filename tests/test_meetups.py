@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -345,6 +347,121 @@ class MeetupClosingTests(unittest.TestCase):
         bot = _FakeBot(_FakeMessage(), _FakeThread())
         self.assertEqual(asyncio.run(poll_and_close_meetups(bot, store)), 0)
         self.assertEqual(store.get(meetup_id).state, STATE_POLLING)
+
+
+class MeetupRegressionTests(unittest.IsolatedAsyncioTestCase):
+    """Exercise server isolation, large lists, and stale organizer pickers."""
+
+    def setUp(self) -> None:
+        self.store = MeetupStore(":memory:")
+        self.meetup_id = self.create_meetup()
+
+    def create_meetup(self) -> int:
+        return self.store.create(
+            guild_id=1, channel_id=2, organizer_id=3, title="x" * 100,
+            location="", timezone=ZONE, activities=["Bowling", "Games"],
+            times=[(2_000_000_000, "future")],
+        )
+
+    async def test_explicit_ids_cannot_escape_the_invoking_server(self) -> None:
+        from bot_app.commands.meetup.meetup import MeetupCommands
+
+        cog = SimpleNamespace(store=self.store)
+        for guild_id in (999, None):
+            ctx = SimpleNamespace(guild_id=guild_id, channel=SimpleNamespace(id=2))
+            self.assertIsNone(await MeetupCommands._resolve(cog, ctx, self.meetup_id))
+        ctx = SimpleNamespace(guild_id=1, channel=SimpleNamespace(id=999))
+        self.assertEqual(
+            (await MeetupCommands._resolve(cog, ctx, self.meetup_id)).meetup_id,
+            self.meetup_id,
+        )
+
+    async def test_cross_server_manager_cannot_cancel_or_preview_pings(self) -> None:
+        from bot_app.commands.meetup.meetup import MeetupCommands
+
+        with patch("bot_app.commands.meetup.meetup.get_meetup_store", return_value=self.store):
+            cog = MeetupCommands(SimpleNamespace())
+        self.store.lock(self.meetup_id, "Bowling", 2_000_000_000)
+        ctx = SimpleNamespace(
+            guild_id=999, channel=SimpleNamespace(id=888), respond=AsyncMock(),
+            interaction=SimpleNamespace(user=SimpleNamespace(
+                id=444, guild_permissions=SimpleNamespace(manage_guild=True)
+            )),
+        )
+        with patch("bot_app.commands.meetup.meetup.log_command"):
+            await MeetupCommands.cancel.callback(cog, ctx, self.meetup_id)
+            await MeetupCommands.confirm.callback(cog, ctx, self.meetup_id, None)
+        self.assertEqual(self.store.get(self.meetup_id).state, STATE_LOCKED)
+        self.assertEqual(ctx.respond.await_count, 2)
+        self.assertTrue(all("view" not in call.kwargs for call in ctx.respond.call_args_list))
+
+    async def test_large_list_keeps_every_row_in_safe_aligned_pages(self) -> None:
+        from bot_app.commands.meetup.meetup import MeetupCommands
+
+        ids = [self.meetup_id] + [self.create_meetup() for _ in range(100)]
+        ctx = SimpleNamespace(guild_id=1, author=SimpleNamespace(id=3), respond=AsyncMock())
+        with patch("bot_app.commands.meetup.meetup.log_command"):
+            await MeetupCommands.list_meetups.callback(SimpleNamespace(store=self.store), ctx)
+        paginator = ctx.respond.call_args.kwargs["view"]
+        seen = []
+        for page in range(paginator.max_page + 1):
+            paginator.page = page
+            embed = paginator.render()
+            self.assertEqual([f.name for f in embed.fields], ["Meetup", "State", "When"])
+            lengths = [len(f.value.splitlines()) for f in embed.fields]
+            self.assertEqual(len(set(lengths)), 1)
+            self.assertTrue(all(f.inline and len(f.value) <= 1024 for f in embed.fields))
+            self.assertLessEqual(len(embed), 6000)
+            seen.extend(int(row.split("`")[1][1:]) for row in embed.fields[0].value.splitlines())
+        self.assertCountEqual(seen, ids)
+        paginator.stop()
+
+    async def test_stale_picker_cannot_reopen_or_replace_a_locked_plan(self) -> None:
+        from bot_app.meetups.views import LockView
+
+        for state in (STATE_CLOSED, STATE_LOCKED):
+            with self.subTest(state=state):
+                meetup_id = self.create_meetup()
+                picker = LockView(self.store.get(meetup_id), self.store)
+                self.store.lock(meetup_id, "Games", 2_000_000_000)
+                if state == STATE_CLOSED:
+                    self.store.set_state(meetup_id, STATE_CLOSED)
+                original = self.store.get(meetup_id)
+                interaction = SimpleNamespace(
+                    response=SimpleNamespace(defer=AsyncMock()),
+                    edit_original_response=AsyncMock(), client=SimpleNamespace(),
+                )
+                with patch("bot_app.meetups.views._edit_meetup_message", new_callable=AsyncMock) as edit:
+                    await picker._confirm(interaction)
+                current = self.store.get(meetup_id)
+                self.assertEqual((current.state, current.locked_activity, current.closed_at),
+                                 (original.state, original.locked_activity, original.closed_at))
+                interaction.response.defer.assert_awaited_once()
+                self.assertIn("no longer open", interaction.edit_original_response.call_args.kwargs["content"])
+                edit.assert_not_awaited()
+                picker.stop()
+
+    async def test_fresh_picker_acknowledges_before_locking_and_updates_message(self) -> None:
+        from bot_app.meetups.views import LockView
+
+        picker = LockView(self.store.get(self.meetup_id), self.store)
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            edit_original_response=AsyncMock(), client=SimpleNamespace(),
+        )
+        original_lock = self.store.lock
+
+        def lock(*args):
+            interaction.response.defer.assert_awaited_once()
+            return original_lock(*args)
+
+        with patch.object(self.store, "lock", side_effect=lock), patch(
+            "bot_app.meetups.views._edit_meetup_message", new_callable=AsyncMock
+        ) as edit:
+            await picker._confirm(interaction)
+        self.assertEqual(self.store.get(self.meetup_id).state, STATE_LOCKED)
+        edit.assert_awaited_once()
+        picker.stop()
 
 
 if __name__ == "__main__":

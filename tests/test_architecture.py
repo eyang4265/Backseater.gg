@@ -10,11 +10,22 @@ import discord
 from bot_app.commands.command_directory import is_owner_only, public_commands
 from bot_app.commands import register_all
 from bot_app.domain.ranks import RankSnapshot
+from bot_app.domain.players import Target
 from bot_app.repositories.accounts import Account
 from bot_app.services.riot_api import RiotClient
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Give py-cord a test-local event loop."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def tearDown(self) -> None:
+        """Close the loop so the suite emits no resource warning."""
+        self.loop.close()
+        asyncio.set_event_loop(None)
+
     @staticmethod
     def _flatten(commands):
         """Yield every leaf slash command, descending into command groups."""
@@ -29,7 +40,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         """Prevent Discord from rejecting the entire bulk command sync."""
         # Constructing a client needs a live event loop, and an earlier
         # asyncio.run() in the same process leaves the thread without one.
-        asyncio.set_event_loop(asyncio.new_event_loop())
         bot = discord.Bot()
         register_all(bot)
         for command in self._flatten(bot.pending_application_commands):
@@ -45,7 +55,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
     def test_player_specific_match_commands_offer_role_slots(self) -> None:
         """Keep the shared blue/red 1-10 player selector on each surface."""
-        asyncio.set_event_loop(asyncio.new_event_loop())
         bot = discord.Bot()
         register_all(bot)
         commands_by_name = {
@@ -73,7 +82,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
     def test_tft_commands_are_explicitly_prefixed(self) -> None:
         """TFT surfaces stay separate from the League command names."""
-        asyncio.set_event_loop(asyncio.new_event_loop())
         bot = discord.Bot()
         register_all(bot)
         commands_by_name = {
@@ -95,7 +103,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
     def test_game_command_directories_cover_every_public_command(self) -> None:
         """Keep both directories synchronized with live registration metadata."""
-        asyncio.set_event_loop(asyncio.new_event_loop())
         bot = discord.Bot()
         register_all(bot)
         league = set(public_commands(bot, tft=False))
@@ -123,7 +130,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         as a string option and then raises ``TypeError`` at invoke time.
         Declaring options with ``@discord.option(...)`` avoids this.
         """
-        asyncio.set_event_loop(asyncio.new_event_loop())
         bot = discord.Bot()
         register_all(bot)
         for command in self._flatten(bot.pending_application_commands):
@@ -140,6 +146,19 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertEqual(RankSnapshot.__name__, "RankSnapshot")
         self.assertEqual(Account.__name__, "Account")
         self.assertEqual(RiotClient.__name__, "RiotClient")
+        self.assertEqual(Target.__name__, "Target")
+
+    def test_services_do_not_import_command_modules(self) -> None:
+        """Keep the reusable service layer independent of Discord handlers."""
+        root = Path(__file__).resolve().parents[1] / "bot_app" / "services"
+        offenders = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and "commands" in (node.module or "").split("."):
+                    offenders.append(path.name)
+                    break
+        self.assertEqual(offenders, [])
 
     def test_requests_is_owned_by_network_adapters(self) -> None:
         """Verify that requests is owned by network adapters."""

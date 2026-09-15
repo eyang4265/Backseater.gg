@@ -11,6 +11,8 @@ from bot_app.riot import RiotAPIError
 from bot_app.store import Account, PlayerState, TftPlayerState
 from bot_app.tracker import (
     _AccountPoll,
+    _fetch_matches,
+    _poll_accounts,
     collect_new_live_games,
     collect_new_matches,
     collect_new_tft_live_games,
@@ -33,6 +35,173 @@ def _match(match_id: str, *, finished: bool = True, queue_id: int = SOLO_QUEUE_I
 
 
 class MatchPollTests(unittest.TestCase):
+    def test_match_fetch_failure_names_every_source_account(self) -> None:
+        """A failed shared match lookup says whose histories surfaced its id."""
+        first = Account("1", "p1", "NA1", "Player#NA1")
+        second = Account("2", "p2", "NA1", "Friend#NA1")
+        polls = [
+            _AccountPoll(first, PlayerState(), ["NA1_5642521571"]),
+            _AccountPoll(second, PlayerState(), ["NA1_5642521571"]),
+        ]
+        client = Mock()
+        client.match.side_effect = RiotAPIError(
+            "GET https://americas.api.riotgames.com/lol/match/v5/matches/NA1_5642521571 returned HTTP 404",
+            status_code=404,
+        )
+
+        with patch("bot_app.tracker.get_client", return_value=client), self.assertLogs(
+            "bot_app.tracker", level="WARNING"
+        ) as logs:
+            self.assertEqual(_fetch_matches(polls), {})
+
+        self.assertIn(
+            "Could not fetch match NA1_5642521571 for Player#NA1, Friend#NA1: GET https://americas.api.riotgames.com/",
+            logs.output[0],
+        )
+        client.match.assert_called_once_with("NA1_5642521571", "NA1")
+
+    def test_live_lobby_id_supplements_match_history_for_mayhem(self) -> None:
+        """A Spectator game id surfaces modes omitted by the by-PUUID history."""
+        account = Account("1", "p1", "NA1", "Player#NA1")
+        state = PlayerState()
+        client = Mock()
+        client.match_ids.return_value = []
+
+        with (
+            patch("bot_app.tracker.get_client", return_value=client),
+            patch("bot_app.tracker.load_live_game_state", return_value={"1": "NA1:123"}),
+            patch("bot_app.tracker.load_live_game_messages", return_value={}),
+        ):
+            polls = _poll_accounts({"1": account}, {"1": state})
+
+        self.assertEqual(polls[0].new_match_ids, ["NA1_123"])
+
+    def test_live_lobby_candidate_is_only_attributed_to_mapped_accounts(self) -> None:
+        """An active fallback id must not appear to originate from the whole roster."""
+        playing = Account("1", "p1", "NA1", "Player#NA1")
+        unrelated = Account("2", "p2", "NA1", "Other#NA1")
+        client = Mock()
+        client.match_ids.return_value = []
+
+        with (
+            patch("bot_app.tracker.get_client", return_value=client),
+            patch(
+                "bot_app.tracker.load_live_game_state",
+                return_value={"1": "NA1:123"},
+            ),
+            patch("bot_app.tracker.load_live_game_messages", return_value={"NA1:123": []}),
+        ):
+            polls = _poll_accounts(
+                {"1": playing, "2": unrelated},
+                {"1": PlayerState(), "2": PlayerState()},
+            )
+
+        self.assertEqual(polls[0].new_match_ids, ["NA1_123"])
+        self.assertEqual(polls[0].match_sources, {"NA1_123": "Player#NA1"})
+        self.assertEqual(polls[0].expected_pending_match_ids, {"NA1_123"})
+        self.assertEqual(polls[1].new_match_ids, [])
+
+    def test_stale_live_announcement_is_labeled_without_inventing_players(self) -> None:
+        """Message-only recovery has an honest source when its players are unknown."""
+        account = Account("1", "p1", "NA1", "Player#NA1")
+        client = Mock()
+        client.match_ids.return_value = []
+
+        with (
+            patch("bot_app.tracker.get_client", return_value=client),
+            patch("bot_app.tracker.load_live_game_state", return_value={}),
+            patch("bot_app.tracker.load_live_game_messages", return_value={"NA1:123": []}),
+        ):
+            polls = _poll_accounts({"1": account}, {"1": PlayerState()})
+
+        client.match.side_effect = RiotAPIError("HTTP 404", status_code=404)
+        with patch("bot_app.tracker.get_client", return_value=client), self.assertLogs(
+            "bot_app.tracker", level="DEBUG"
+        ) as logs:
+            _fetch_matches(polls)
+        self.assertIn(
+            "Match NA1_123 for saved live-game announcement is not published yet: HTTP 404",
+            logs.output[0],
+        )
+
+    def test_normal_history_404_remains_a_warning(self) -> None:
+        """A listed completed match disappearing from Match-V5 is unexpected."""
+        account = Account("1", "p1", "NA1", "Player#NA1")
+        polls = [_AccountPoll(account, PlayerState(), ["NA1_123"])]
+        client = Mock()
+        client.match.side_effect = RiotAPIError("HTTP 404", status_code=404)
+
+        with patch("bot_app.tracker.get_client", return_value=client), self.assertLogs(
+            "bot_app.tracker", level="WARNING"
+        ) as logs:
+            _fetch_matches(polls)
+
+        self.assertIn("Could not fetch match NA1_123 for Player#NA1", logs.output[0])
+
+    def test_live_lobby_candidate_only_attributes_actual_participants(self) -> None:
+        """A shared fallback candidate is not routed through unrelated accounts."""
+        playing = Account("1", "p1", "NA1", "Player#NA1")
+        unrelated = Account("2", "p2", "NA1", "Other#NA1")
+        states = {"1": PlayerState(), "2": PlayerState()}
+        match = _match("NA1_123", queue_id=2400)
+        polls = [
+            _AccountPoll(playing, states["1"], ["NA1_123"]),
+            _AccountPoll(unrelated, states["2"], ["NA1_123"]),
+        ]
+
+        with (
+            patch("bot_app.tracker.load_accounts", return_value={"1": playing, "2": unrelated}),
+            patch("bot_app.tracker.load_teammates", return_value={}),
+            patch("bot_app.tracker.load_tracker_state", return_value=states),
+            patch("bot_app.tracker._poll_accounts", return_value=polls),
+            patch("bot_app.tracker._fetch_matches", return_value={"NA1_123": match}),
+            patch("bot_app.tracker.save_tracker_state"),
+            patch("bot_app.announce.ddragon.catalog", return_value=None),
+        ):
+            announcements = collect_new_matches()
+
+        self.assertEqual(len(announcements), 1)
+        self.assertEqual(announcements[0].highlight_puuids, {"p1"})
+
+    def test_ranked_match_attributes_live_baseline_lp_change_to_teammate(self) -> None:
+        """A teammate in a tracked lobby gets the LP delta captured at game start."""
+        account = Account("1", "p1", "NA1", "Player#NA1")
+        teammate = Account("2", "mate", "NA1", "Mate#NA1")
+        teammate_state = PlayerState(
+            ranks={SOLO_QUEUE_ID: RankSnapshot("GOLD", "II", 20, 5, 4)}
+        )
+        state = {"1": PlayerState(), "teammate:mate": teammate_state}
+        match = _match("NA1_1")
+        match["info"]["participants"].append({"puuid": "mate", "win": True})
+        poll = _AccountPoll(account, state["1"], ["NA1_1"])
+        captured = []
+
+        def formatted(match, players, **kwargs):
+            captured.extend(players)
+            return MatchAnnouncement("ok", "Victory", match, {p.puuid for p in players})
+
+        with (
+            patch("bot_app.tracker.load_accounts", return_value={"1": account}),
+            patch("bot_app.tracker.load_teammates", return_value={"mate": teammate}),
+            patch("bot_app.tracker.load_tracker_state", return_value=state),
+            patch("bot_app.tracker._poll_accounts", return_value=[poll]),
+            patch("bot_app.tracker._fetch_matches", return_value={"NA1_1": match}),
+            patch(
+                "bot_app.tracker.fetch_ranks",
+                side_effect=[
+                    {SOLO_QUEUE_ID: RankSnapshot("GOLD", "II", 35, 6, 4)},
+                    {SOLO_QUEUE_ID: RankSnapshot("GOLD", "II", 38, 6, 4)},
+                ],
+            ),
+            patch("bot_app.tracker.format_match", side_effect=formatted),
+            patch("bot_app.tracker.save_tracker_state"),
+        ):
+            collect_new_matches()
+
+        mate = next(player for player in captured if player.puuid == "mate")
+        self.assertEqual(mate.lp_change, "+18 LP")
+        self.assertEqual(teammate_state.ranks[SOLO_QUEUE_ID].lp, 38)
+
     def test_non_ranked_queues_announced_without_rank_changes(self) -> None:
         """Every non-ranked queue uses the real formatter without LP writes."""
         account = Account("1", "p1", "NA1", "Player#NA1")
@@ -42,6 +211,8 @@ class MatchPollTests(unittest.TestCase):
             (400, 1, "Normal (Draft)"),
             (430, 1, "Normal (Blind)"),
             (450, 1, "ARAM"),
+            (2400, 1, "ARAM: Mayhem"),
+            (9999, 1, "Queue 9999"),
         ):
             with self.subTest(queue_id=queue_id):
                 state = PlayerState()
@@ -54,6 +225,7 @@ class MatchPollTests(unittest.TestCase):
                     patch("bot_app.tracker._fetch_matches", return_value={"NA1_1": match}),
                     patch("bot_app.tracker.fetch_ranks") as ranks,
                     patch("bot_app.tracker.save_tracker_state"),
+                    patch("bot_app.announce.ddragon.catalog", return_value=None),
                 ):
                     announcements = collect_new_matches()
                 self.assertEqual(len(announcements), expected_count)
@@ -199,6 +371,50 @@ class MatchPollTests(unittest.TestCase):
 
 
 class LivePollTests(unittest.TestCase):
+    def test_ranked_live_lobby_saves_teammate_lp_baseline(self) -> None:
+        """A teammate's starting LP is persisted when the shared lobby is announced."""
+        account = Account("1", "p1", "NA1", "Player#NA1")
+        teammate = Account("2", "mate", "NA1", "Mate#NA1")
+        game = {
+            "gameId": 123,
+            "gameQueueConfigId": SOLO_QUEUE_ID,
+            "participants": [{"puuid": "p1"}, {"puuid": "mate"}],
+        }
+        client = Mock()
+        client.active_game.return_value = game
+        client.match.return_value = None
+        saved = {}
+
+        def formatted(game, players):
+            self.assertEqual({player.puuid for player in players}, {"p1", "mate"})
+            return Mock()
+
+        with (
+            patch("bot_app.tracker.load_accounts", return_value={"1": account}),
+            patch("bot_app.tracker.load_teammates", return_value={"mate": teammate}),
+            patch("bot_app.tracker.load_live_game_state", return_value={}),
+            patch("bot_app.tracker.load_tracker_state", return_value={}),
+            patch("bot_app.tracker.get_client", return_value=client),
+            patch(
+                "bot_app.tracker.fetch_ranks",
+                return_value={
+                    SOLO_QUEUE_ID: RankSnapshot("GOLD", "II", 20, 5, 4)
+                },
+            ),
+            patch("bot_app.tracker.save_live_game_state"),
+            patch(
+                "bot_app.tracker.save_tracker_state",
+                side_effect=lambda value: saved.update(value),
+            ),
+            patch("bot_app.tracker.format_live_game", side_effect=formatted),
+        ):
+            self.assertEqual(len(collect_new_live_games()), 1)
+
+        self.assertEqual(
+            saved["teammate:mate"].ranks[SOLO_QUEUE_ID].lp,
+            20,
+        )
+
     def test_shared_new_lobby_is_verified_only_once(self) -> None:
         """Several tracked players in one lobby share one completion check."""
         accounts = {

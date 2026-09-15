@@ -4,10 +4,39 @@ import unittest
 from unittest.mock import Mock, patch
 
 from bot_app.commands.champ import _situational_icons
-from bot_app.opgg import ChampionStats, fetch_champion_stats, parse_champion_stats
+from bot_app.opgg import (
+    ChampionStats,
+    fetch_champion_stats,
+    opgg_trends_url,
+    parse_game_length_win_rates,
+    parse_champion_stats,
+    parse_role_champions,
+)
 
 
 class OPGGStatsTests(unittest.TestCase):
+    def test_parse_role_champions_and_game_length_rates(self) -> None:
+        """Extract the selected role list and every game-length curve point."""
+        role_html = (
+            r'\"key\":\"jinx\",\"name\":\"Jinx\",\"image_url\":\"x\",'
+            r'\"positionName\":\"ADC\" '
+            r'\"key\":\"garen\",\"name\":\"Garen\",\"image_url\":\"x\",'
+            r'\"positionName\":\"TOP\"'
+        )
+        self.assertEqual(parse_role_champions(role_html, "adc"), (("Jinx", "jinx"),))
+        curve_html = (
+            r'\"game_length\":0,\"rate\":52.34,\"average\":50,\"rank\":14,'
+            r'\"game_length\":25,\"rate\":52.37,\"average\":50,\"rank\":10'
+        )
+        self.assertEqual(parse_game_length_win_rates(curve_html), {0: 52.34, 25: 52.37})
+
+    def test_trends_url_has_role_and_english(self) -> None:
+        """Keep the aggregate scan pointed at the matching OP.GG role list."""
+        self.assertEqual(
+            opgg_trends_url("support"),
+            "https://op.gg/lol/champions?position=support&region=global&hl=en_US",
+        )
+
     def test_parse_headline_stats(self) -> None:
         """Verify that headline values are extracted from the page response."""
         html = (

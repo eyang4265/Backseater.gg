@@ -41,9 +41,20 @@ BLUE_TEAM_ID = 100
 RED_TEAM_ID = 200
 TEAM_IDS = (BLUE_TEAM_ID, RED_TEAM_ID)
 
+# Discord does not support per-field text colors, so Arena teams use distinct
+# color emoji in their field headings. The current Arena queues have six teams;
+# the extra markers keep the helper useful if an eight-team payload is rendered.
+_ARENA_TEAM_MARKERS = ("🔵", "🔴", "🟢", "🟡", "🟣", "🟠", "🟤", "⚪")
+
 
 _LOOKUP_WORKERS = 10
 _MASTERY_CACHE = TTLCache(ttl_seconds=6 * 3600, max_entries=4096)
+
+
+def _arena_team_label(number: int) -> str:
+    """Return a concise Arena team heading with a distinct color marker."""
+    marker = _ARENA_TEAM_MARKERS[(number - 1) % len(_ARENA_TEAM_MARKERS)]
+    return f"{marker} Team {number}"
 
 
 def make_embed(
@@ -286,7 +297,8 @@ def build_rating_columns(
 
     Follows the same Top/Jungle/Mid/Bottom/Support ordering, and the same
     Arena-subteam grouping by ``playerSubteamId``, as :func:`build_match_columns`
-    so the two embeds read consistently.
+    so the two embeds read consistently. Arena headings use a distinct color
+    marker followed by ``Team N``.
     """
     info = match.get("info", {})
     participants = info.get("participants", []) or []
@@ -316,7 +328,7 @@ def build_rating_columns(
             groups.setdefault(key, []).append(participant)
         arena_teams = [
             (
-                f"Arena Team {number}",
+                _arena_team_label(number),
                 [label_for(p) for p in group],
                 [score_for(p) for p in group],
                 [kda_text(p) for p in group],
@@ -531,7 +543,8 @@ def build_inventory_columns(
 
     Follows the same Top/Jungle/Mid/Bottom/Support ordering, and the same
     Arena-subteam grouping by ``playerSubteamId``, as :func:`build_match_columns`
-    so the embed reads consistently with the other Display views.
+    so the embed reads consistently with the other Display views. Arena headings
+    use a distinct color marker followed by ``Team N``.
     """
     info = match.get("info", {})
     participants = info.get("participants", []) or []
@@ -557,7 +570,7 @@ def build_inventory_columns(
             groups.setdefault(key, []).append(participant)
         arena_teams = [
             (
-                f"Arena Team {number}",
+                _arena_team_label(number),
                 [label_for(p) for p in group],
                 [_final_items_text(p, timeline) for p in group],
             )
@@ -658,12 +671,15 @@ def _columns_from_rows(
     rank_header: str = "Rank:",
     arena: bool = False,
     arena_team_size: int | None = None,
+    colored_arena_headings: bool = False,
 ) -> TeamColumns:
     """Build standard sides or Arena subteams from normalized player rows.
 
     Arena rows normally carry ``playerSubteamId`` as their team id. Spectator
     payloads can omit it and collapse the lobby into one or two shared ids; in
     that case, recover the subteams from Riot's team-contiguous player order.
+    Completed-match callers can request a distinct color marker on each concise
+    ``Team N`` heading; live-game callers leave the headings uncolored.
     """
 
     def team(team_id: int) -> tuple[list[str], list[str], float | None]:
@@ -711,7 +727,14 @@ def _columns_from_rows(
             names = [row.name for row in group]
             ranks = [row.rank for row in group]
             average = average_value([row.value for row in group if row.value is not None])
-            arena_teams.append((f"Arena Team {number}", names, ranks, average_rank_text(average)))
+            label = (
+                _arena_team_label(number)
+                if colored_arena_headings
+                else f"Team {number}"
+            )
+            arena_teams.append(
+                (label, names, ranks, average_rank_text(average))
+            )
         return TeamColumns(arena_teams=arena_teams, rank_header=rank_header,
                            debug_lines=[row.debug for row in rows if row.debug])
 
@@ -843,13 +866,13 @@ def build_match_columns(
 ) -> TeamColumns:
     """Columns for a finished match, ordered Top/Jungle/Mid/Bottom/Support.
 
-    Names are bolded for any player tracked in data.json — not just the ones
+    Names are bolded for any player in the tracked-account registry — not just the ones
     this announcement is about — so a tracked player who happened to be in the
     lobby still stands out. ``queue_id`` selects which ranked queue's standing
     is shown: a Flex match shows Flex rank.
 
     Arena matches use Riot's ``playerSubteamId`` rather than the broad
-    blue/red ``teamId`` so each Arena party gets its own column.
+    blue/red ``teamId`` so each Arena party gets its own color-coded column.
 
     ``show_rank_names`` swaps the name column's label for each player's rank
     text, for a compact toggle between "who's playing" and "what rank are
@@ -868,7 +891,7 @@ def build_match_columns(
     arena = queue_id in ARENA_QUEUE_IDS
     highlighted = set(highlight_puuids) | set(tracked_puuids())
     # A /teammate puuid is bolded like a tracked player, but only when this
-    # lobby also holds a real data.json account — teammates never surface a
+    # lobby also holds a real tracked account — teammates never surface a
     # match on their own, so an all-teammate lobby stays unhighlighted.
     if highlighted & {participant.get("puuid") for participant in participants}:
         highlighted |= set(teammate_puuids())
@@ -930,7 +953,12 @@ def build_match_columns(
             )
         )
 
-    return _columns_from_rows(rows, arena=arena, arena_team_size=ARENA_TEAM_SIZES.get(queue_id))
+    return _columns_from_rows(
+        rows,
+        arena=arena,
+        arena_team_size=ARENA_TEAM_SIZES.get(queue_id),
+        colored_arena_headings=True,
+    )
 
 
 def build_lobby_columns(
@@ -944,7 +972,8 @@ def build_lobby_columns(
     """Columns for a live game from the Spectator API.
 
     Arena lobbies use ``playerSubteamId`` when Spectator supplies it and fall
-    back to the shared Arena team-size recovery when it does not.
+    back to the shared Arena team-size recovery when it does not. Live headings
+    remain plain ``Team N`` labels; color markers are reserved for completed matches.
 
     The lobby's own queue picks which ranked standing is shown — a Flex game
     shows Flex rank — and the column header names that queue, so a Flex rank

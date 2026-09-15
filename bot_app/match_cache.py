@@ -14,12 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import JSON_DIR
+from .config import DATA_DIR, JSON_DIR, migrate_legacy_sqlite_file
 from .lane_matchups.extract import LaneOutcome
 from .queues import queue_name
 
 LOGGER = logging.getLogger(__name__)
-MATCH_CACHE_PATH = JSON_DIR / "matches.sqlite"
+MATCH_CACHE_PATH = DATA_DIR / "matches.sqlite"
+LEGACY_MATCH_CACHE_PATH = JSON_DIR / "matches.sqlite"
 
 CURRENT_SCHEMA_VERSION = 5
 
@@ -151,6 +152,8 @@ class ChampionStats:
 class MatchCache:
     def __init__(self, path: Path | str = MATCH_CACHE_PATH) -> None:
         """Initialize the instance."""
+        if Path(path) == MATCH_CACHE_PATH:
+            migrate_legacy_sqlite_file(MATCH_CACHE_PATH, LEGACY_MATCH_CACHE_PATH)
         self.path = str(path)
         self._lock = threading.RLock()
         self._usable = True

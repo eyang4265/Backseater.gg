@@ -1,9 +1,10 @@
-"""JSON-backed persistence for accounts and poller state.
+"""Private runtime persistence for accounts and poller state.
 
 Every writer goes through :func:`write_json`, which writes to a sibling temp
 file and renames, so a crash mid-write can't truncate a state file.
 Persistent Discord component records are delegated to incremental SQLite
-storage, with the former JSON file retained only as a backward import/fallback.
+storage. Legacy ``json/`` files are copied into the gitignored runtime directory
+on first use and retained only as migration backups.
 """
 
 from __future__ import annotations
@@ -13,26 +14,42 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .config import JSON_DIR
+from .config import DATA_DIR, JSON_DIR, migrate_legacy_runtime_file
 from .queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID
 from .ranks import RankSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
-DATA_PATH = JSON_DIR / "data.json"
-TFT_DATA_PATH = JSON_DIR / "tft_data.json"
-TEAMMATE_DATA_PATH = JSON_DIR / "teammates.json"
-TRACKER_STATE_PATH = JSON_DIR / "match_tracker_state.json"
-TFT_TRACKER_STATE_PATH = JSON_DIR / "tft_match_tracker_state.json"
-LIVE_GAME_STATE_PATH = JSON_DIR / "live_game_state.json"
-LIVE_GAME_MESSAGE_PATH = JSON_DIR / "live_game_messages.json"
-TFT_LIVE_GAME_STATE_PATH = JSON_DIR / "tft_live_game_state.json"
-GUILD_STATE_PATH = JSON_DIR / "guilds.json"
-EMBED_BUTTON_STATE_PATH = JSON_DIR / "embed_button_state.json"
+DATA_PATH = DATA_DIR / "accounts.json"
+TFT_DATA_PATH = DATA_DIR / "tft_accounts.json"
+TEAMMATE_DATA_PATH = DATA_DIR / "teammates.json"
+TRACKER_STATE_PATH = DATA_DIR / "match_tracker_state.json"
+TFT_TRACKER_STATE_PATH = DATA_DIR / "tft_match_tracker_state.json"
+LIVE_GAME_STATE_PATH = DATA_DIR / "live_game_state.json"
+LIVE_GAME_MESSAGE_PATH = DATA_DIR / "live_game_messages.json"
+TFT_LIVE_GAME_STATE_PATH = DATA_DIR / "tft_live_game_state.json"
+GUILD_STATE_PATH = DATA_DIR / "guilds.json"
+FLAKE_RANKS_PATH = DATA_DIR / "flake_ranks.json"
+EMBED_BUTTON_STATE_PATH = DATA_DIR / "embed_button_state.json"
+
+_LEGACY_RUNTIME_PATHS = {
+    DATA_PATH: JSON_DIR / "data.json",
+    TFT_DATA_PATH: JSON_DIR / "tft_data.json",
+    TEAMMATE_DATA_PATH: JSON_DIR / "teammates.json",
+    TRACKER_STATE_PATH: JSON_DIR / "match_tracker_state.json",
+    TFT_TRACKER_STATE_PATH: JSON_DIR / "tft_match_tracker_state.json",
+    LIVE_GAME_STATE_PATH: JSON_DIR / "live_game_state.json",
+    LIVE_GAME_MESSAGE_PATH: JSON_DIR / "live_game_messages.json",
+    TFT_LIVE_GAME_STATE_PATH: JSON_DIR / "tft_live_game_state.json",
+    GUILD_STATE_PATH: JSON_DIR / "guilds.json",
+    FLAKE_RANKS_PATH: JSON_DIR / "flake_ranks.json",
+    EMBED_BUTTON_STATE_PATH: JSON_DIR / "embed_button_state.json",
+}
 
 
 MATCH_HISTORY_LIMIT = 100
@@ -47,10 +64,30 @@ LIVE_GAME_MESSAGE_LIMIT = 200
 _QUEUE_STATE_KEYS = {SOLO_QUEUE_ID: "solo", FLEX_QUEUE_ID: "flex"}
 
 _write_lock = threading.RLock()
+_flake_write_lock = threading.RLock()
+_league_state_lock = threading.RLock()
+_tft_state_lock = threading.RLock()
+
+
+@contextmanager
+def league_state_transaction():
+    """Serialize a complete League state read-modify-write operation."""
+    with _league_state_lock:
+        yield
+
+
+@contextmanager
+def tft_state_transaction():
+    """Serialize a complete TFT state read-modify-write operation."""
+    with _tft_state_lock:
+        yield
 
 
 def read_json(path: Path, default: Any) -> Any:
     """Read json."""
+    legacy = _LEGACY_RUNTIME_PATHS.get(path)
+    if legacy is not None:
+        migrate_legacy_runtime_file(path, legacy)
     try:
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -73,6 +110,56 @@ def write_json(path: Path, payload: Any, *, indent: int = 2) -> None:
             json.dump(payload, handle, indent=indent)
         temporary.replace(path)
         LOGGER.debug("Wrote %s", path)
+
+
+def load_flake_ranks() -> dict[str, dict[str, dict[str, str]]]:
+    """Load server-scoped Discord-user flake rankings."""
+    raw = read_json(FLAKE_RANKS_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(guild_id): {
+            str(user_id): entry
+            for user_id, entry in entries.items()
+            if isinstance(entry, dict)
+            and entry.get("tier") in {"S", "A", "B", "C", "D", "F", "Unknown"}
+        }
+        for guild_id, entries in raw.items()
+        if isinstance(entries, dict)
+    }
+
+
+def set_flake_rank(
+    guild_id: int | str, user_id: int | str, display_name: str, tier: str
+) -> dict[str, dict[str, str]]:
+    """Atomically assign one Discord user to one flake tier for a server."""
+    return set_flake_ranks(guild_id, ((user_id, display_name),), tier)
+
+
+def set_flake_ranks(
+    guild_id: int | str,
+    users: Iterable[tuple[int | str, str]],
+    tier: str,
+) -> dict[str, dict[str, str]]:
+    """Atomically assign multiple Discord users to one server flake tier."""
+    normalized_tier = "Unknown" if tier.casefold() == "unknown" else tier.upper()
+    if normalized_tier not in {"S", "A", "B", "C", "D", "F", "Unknown"}:
+        raise ValueError(f"Unknown flake tier: {tier}")
+    with _flake_write_lock:
+        rankings = load_flake_ranks()
+        server_rankings = rankings.setdefault(str(guild_id), {})
+        for user_id, display_name in users:
+            server_rankings[str(user_id)] = {
+                "display_name": display_name,
+                "tier": normalized_tier,
+            }
+        temporary = FLAKE_RANKS_PATH.with_suffix(FLAKE_RANKS_PATH.suffix + ".tmp")
+        FLAKE_RANKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(rankings, handle, indent=2)
+        temporary.replace(FLAKE_RANKS_PATH)
+        LOGGER.debug("Wrote %s", FLAKE_RANKS_PATH)
+        return dict(server_rankings)
 
 
 def load_embed_button_states() -> list[dict[str, Any]]:
@@ -173,7 +260,7 @@ def load_accounts() -> dict[str, Account]:
     accounts: dict[str, Account] = {}
     for discord_id, entry in raw.items() if isinstance(raw, dict) else ():
         if not isinstance(entry, dict) or not entry.get("puuid"):
-            LOGGER.warning("Skipping malformed data.json entry for %s", discord_id)
+            LOGGER.warning("Skipping malformed account entry for %s", discord_id)
             continue
         accounts[str(discord_id)] = Account(
             discord_id=str(discord_id),
@@ -200,7 +287,7 @@ def load_teammates() -> dict[str, Account]:
 
     Teammates are not tracked accounts: the pollers never fetch their games
     and they never trigger an announcement of their own.  They exist only so
-    that a completed-match announcement or ``/match`` for a real data.json
+    that a completed-match announcement or ``/match`` for a tracked account
     account also bolds a teammate who happened to share that lobby.  The
     ``discord_id`` field is optional — it is only set when ``/teammate`` was
     told which Discord user the PUUID belongs to — and is left blank
@@ -244,7 +331,7 @@ def update_teammates(
     mutate: Callable[[dict[str, Account]], None],
 ) -> dict[str, Account]:
     """Atomically read, mutate, and persist the teammate PUUID registry."""
-    with _write_lock:
+    with _league_state_lock, _write_lock:
         teammates = load_teammates()
         mutate(teammates)
         save_teammates(teammates)
@@ -257,7 +344,7 @@ def load_tft_accounts() -> dict[str, Account]:
     accounts: dict[str, Account] = {}
     for discord_id, entry in raw.items() if isinstance(raw, dict) else ():
         if not isinstance(entry, dict) or not entry.get("puuid"):
-            LOGGER.warning("Skipping malformed tft_data.json entry for %s", discord_id)
+            LOGGER.warning("Skipping malformed TFT account entry for %s", discord_id)
             continue
         accounts[str(discord_id)] = Account(
             discord_id=str(discord_id),
@@ -282,7 +369,7 @@ def update_tft_accounts(
     mutate: Callable[[dict[str, Account]], None],
 ) -> dict[str, Account]:
     """Atomically read, mutate, and persist the TFT account registry."""
-    with _write_lock:
+    with _tft_state_lock, _write_lock:
         accounts = load_tft_accounts()
         mutate(accounts)
         save_tft_accounts(accounts)
@@ -291,7 +378,7 @@ def update_tft_accounts(
 
 def update_accounts(mutate: Callable[[dict[str, Account]], None]) -> dict[str, Account]:
     """Atomically read, mutate, and persist the tracked-account registry."""
-    with _write_lock:
+    with _league_state_lock, _write_lock:
         accounts = load_accounts()
         mutate(accounts)
         save_accounts(accounts)
@@ -299,7 +386,7 @@ def update_accounts(mutate: Callable[[dict[str, Account]], None]) -> dict[str, A
 
 
 class _TrackedPuuidCache:
-    """Caches the tracked-puuid set, invalidated by data.json's mtime.
+    """Caches the tracked-puuid set, invalidated by the registry's mtime.
 
     Column builders ask for this once per participant; without the cache that
     was a JSON parse per player per embed.
@@ -365,7 +452,7 @@ _teammate_puuid_cache = _TeammatePuuidCache()
 
 
 def tracked_puuids() -> frozenset[str]:
-    """Puuids of every account in data.json. Used to bold them in lobbies."""
+    """PUUIDs of every tracked account, used to bold them in lobbies."""
     return _tracked_puuid_cache.get()
 
 
@@ -373,7 +460,7 @@ def teammate_puuids() -> frozenset[str]:
     """Puuids added through ``/teammate``.
 
     Bolded in completed-match announcements and ``/match`` alongside real
-    tracked players, but only when the same lobby also holds a data.json
+    tracked players, but only when the same lobby also holds a registered
     account — a teammate never surfaces a match on their own.
     """
     return _teammate_puuid_cache.get()
