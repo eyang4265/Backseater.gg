@@ -27,7 +27,9 @@ class GuildRoutingTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"1": Account("1", "p1", "NA1", "One#NA1")},
             ),
         ):
-            channels = await resolve_announcement_channels(bot, {"p1"})
+            channels = await resolve_announcement_channels(
+                bot, {"p1"}, global_channel=None
+            )
         self.assertEqual(channels, [channel])
 
     async def test_legacy_channel_is_fallback_without_guild_config(self) -> None:
