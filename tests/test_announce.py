@@ -180,6 +180,8 @@ class RelativeTimestampTests(unittest.TestCase):
 
         self.assertIsNotNone(announcement)
         self.assertIn("Queue 9999", announcement.text)
+        self.assertIn(" (1/0/2)", announcement.text)
+        self.assertNotIn(" — (1/0/2)", announcement.text)
 
     """The how-long-ago timers on match and live-game announcements."""
 
@@ -600,8 +602,9 @@ class RatingDisplayTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """Verify that picking Ratings computes and displays scores."""
+        summary = "**Normal (Draft) - Victory** (24:10) • 8 minutes ago • 33-16\nPlayer One (8/3/13)"
         announcement = MatchAnnouncement(
-            "text", "Victory", {"info": {"participants": []}}, set()
+            summary, "Victory", {"info": {"participants": []}}, set()
         )
         select = _MatchDisplaySelect(announcement)
         interaction = _select_with_value(select, "ratings")
@@ -618,6 +621,7 @@ class RatingDisplayTests(unittest.IsolatedAsyncioTestCase):
         kwargs = interaction.edit_original_response.call_args.kwargs
         self.assertEqual(kwargs["attachments"], [])
         self.assertIsInstance(kwargs["embed"], discord.Embed)
+        self.assertTrue(kwargs["embed"].description.startswith(summary))
         self.assertIsInstance(kwargs["view"], _MatchRatingView)
 
     async def test_display_select_ratings_keeps_the_currently_shown_chart(self) -> None:
@@ -693,8 +697,9 @@ class ItemsDisplayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_items_option_keeps_the_currently_shown_chart(self) -> None:
         """Verify that entering Items renders the active chart behind the columns."""
+        summary = "**Normal (Draft) - Victory** (24:10) • 8 minutes ago • 33-16\nPlayer One (8/3/13)"
         announcement = MatchAnnouncement(
-            "text", "Victory", {"info": {"participants": []}}, set()
+            summary, "Victory", {"info": {"participants": []}}, set()
         )
         select = _MatchDisplaySelect(announcement, active_field="visionScore")
         interaction = _select_with_value(select, "inventory")
@@ -707,6 +712,7 @@ class ItemsDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(build_chart.call_args.args[1], "visionScore")
         kwargs = interaction.edit_original_response.call_args.kwargs
         self.assertEqual(kwargs["embed"].image.url, "attachment://visionScore.png")
+        self.assertEqual(kwargs["embed"].description, summary)
         self.assertIs(kwargs["file"], chart_file)
         view = interaction.edit_original_response.call_args.kwargs["view"]
         self.assertTrue(

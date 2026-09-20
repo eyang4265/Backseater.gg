@@ -4,11 +4,17 @@ import ast
 import asyncio
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import discord
 
-from bot_app.commands.command_directory import is_owner_only, public_commands
+from bot_app.commands.command_directory import (
+    build_game_command_directory,
+    is_owner_only,
+    public_commands,
+)
 from bot_app.commands import register_all
+from bot_app.commands.admin.ownercommands import owner_only_commands
 from bot_app.domain.ranks import RankSnapshot
 from bot_app.domain.players import Target
 from bot_app.repositories.accounts import Account
@@ -120,6 +126,48 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertTrue(
             all(command.qualified_name.startswith("tft") for command in tft)
         )
+
+    def test_game_directories_group_commands_without_losing_new_names(self) -> None:
+        """Topic headings retain live metadata and give unknown names a home."""
+        bot = discord.Bot()
+        register_all(bot)
+        # Pending registrations are the pre-sync equivalent of the runtime tree.
+        registered = SimpleNamespace(
+            application_commands=list(bot.pending_application_commands)
+        )
+        for tft, known_category in ((False, "Matches & Analysis"), (True, "Matches")):
+            embed = build_game_command_directory(registered, tft=tft)
+            self.assertIn(known_category, [field.name for field in embed.fields])
+            entries = "\n".join(field.value for field in embed.fields)
+            for command in public_commands(registered, tft=tft):
+                expected = 0 if not tft and command.qualified_name in {"meetup", "flake"} else 1
+                self.assertEqual(entries.count(f"**`/{command.qualified_name}`** —"), expected)
+            self.assertTrue(all(len(field.value) <= 1024 for field in embed.fields))
+
+        async def new_feature(ctx):
+            """Stand in for a future public command."""
+
+        extra = discord.SlashCommand(
+            new_feature, name="tftnewfeature", description="New feature"
+        )
+        registered.application_commands.append(extra)
+        embed = build_game_command_directory(registered, tft=True)
+        self.assertIn(
+            "**`/tftnewfeature`** — New feature",
+            next(field.value for field in embed.fields if field.name == "Other"),
+        )
+
+    def test_owner_directory_deduplicates_guild_registrations(self) -> None:
+        """A command registered for multiple guilds appears only once."""
+        bot = discord.Bot()
+        register_all(bot)
+        pending = list(bot.pending_application_commands)
+        registered = SimpleNamespace(application_commands=pending + pending)
+        owner = owner_only_commands(registered)
+        names = [command.qualified_name for command in owner]
+        self.assertIn("ownercommands", names)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(names, sorted(names))
 
     def test_slash_command_options_resolved_to_real_types(self) -> None:
         """Catch options declared as annotations under postponed evaluation.

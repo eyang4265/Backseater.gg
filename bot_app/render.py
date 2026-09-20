@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
@@ -200,6 +201,13 @@ def _summoner_label(riot_id: str, game_name_counts: dict[str, int]) -> str:
     """Game name alone, unless another player in this game shares it — then Name#Tag."""
     game_name = riot_id.split("#", 1)[0]
     return riot_id if game_name_counts.get(game_name, 0) > 1 else game_name
+
+
+def _ltr_player_row(row: str, label: str) -> str:
+    """Keep an RTL player name from reversing the icon and Latin stats."""
+    if any(unicodedata.bidirectional(char) in {"R", "AL"} for char in label):
+        return f"\u2066{row}\u2069"
+    return row
 
 
 def add_team_columns(
@@ -433,11 +441,13 @@ def _is_boot_item(item_id: Any) -> bool:
 
 
 def _item_icon(item_id: Any) -> Any | None:
-    """Resolve an item emoji, retaining a visible fallback for known boots."""
+    """Resolve an item emoji, retaining visible fallbacks for Stormrazor and boots."""
     name = ddragon.item_name(item_id) or _KNOWN_BOOT_NAMES.get(int(item_id)) if item_id else None
     icon = emoji_lookup.item_emoji(name, item_id=item_id)
     if icon is None and _is_boot_item(item_id):
         return "🥾"
+    if icon is None and str(item_id) in {"3095", "3097"}:
+        return "Stormrazor"
     return icon
 
 
@@ -497,14 +507,14 @@ def _final_items_text(
     """Icon-only row of a participant's end-of-game item slots, trinket included.
 
     Purchased items are left-packed (an empty slot mid-inventory, from an
-    unsold item or no boots, doesn't leave a gap), then padded with ⬛ up to
-    six icons so every player's row lines up at the same width. The
-    trinket/ward icon follows directly, with no separator.
+    unsold item or no boots, doesn't leave a gap), then padded with ⬛ to
+    seven core slots for ADCs or six for other roles. The trinket follows.
     """
     core_item_ids = [participant.get(slot) for slot in _ITEM_SLOTS[:-1]]
     has_final_boot = any(_is_boot_item(item_id) for item_id in core_item_ids)
     position = str(participant.get("teamPosition") or "").upper()
-    if position in {"BOTTOM", "BOT", "ADC"} and not has_final_boot:
+    is_adc = position in {"BOTTOM", "BOT", "ADC"}
+    if is_adc and not has_final_boot:
         fallback_boot = _last_purchased_boot(timeline, participant.get("participantId"))
         if fallback_boot:
             LOGGER.debug(
@@ -521,7 +531,8 @@ def _final_items_text(
         icon = _item_icon(item_id)
         if icon is not None:
             core_icons.append(str(icon))
-    core_icons.extend(_EMPTY_ITEM_SLOT for _ in range(len(_ITEM_SLOTS) - 1 - len(core_icons)))
+    core_slot_count = len(_ITEM_SLOTS) - 1 + int(is_adc)
+    core_icons.extend(_EMPTY_ITEM_SLOT for _ in range(max(0, core_slot_count - len(core_icons))))
 
     trinket_id = participant.get(_ITEM_SLOTS[-1])
     trinket_icon = (
@@ -876,7 +887,8 @@ def build_match_columns(
 
     ``show_rank_names`` swaps the name column's label for each player's rank
     text, for a compact toggle between "who's playing" and "what rank are
-    they" views. Each label is separated from its KDA by a centered dot.
+    they" views. Player rows append parenthesized K/D/A without a separator
+    to reduce wrapping in Discord's narrow team columns.
     ``show_mastery`` replaces the label with end-of-game champion mastery
     points, using the shared live-game cache before making any new lookup.
     """
@@ -935,7 +947,10 @@ def build_match_columns(
 
         entry = emoji_lookup.prefixed(icon, label)
         if not show_rank_names:
-            entry = f"{entry} · ({kda_text(participant)})"
+            # Omitting the old separator saves width in Discord's narrow
+            # side-by-side team fields while retaining parenthesized K/D/A.
+            entry = f"{entry} ({kda_text(participant)})"
+        entry = _ltr_player_row(entry, label)
         if participant.get("puuid") in highlighted:
             entry = f"**{entry}**"
 

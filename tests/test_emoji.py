@@ -3,7 +3,18 @@
 import unittest
 from unittest.mock import patch
 
-from bot_app.emoji import rune_emoji, summoner_spell_emoji
+from bot_app.emoji import item_emoji, rune_emoji, summoner_spell_emoji
+
+
+class ItemEmojiTests(unittest.TestCase):
+    """Historical match ids can use the configured current item asset."""
+
+    def test_old_stormrazor_id_uses_3097_icon(self) -> None:
+        """Final items with id 3095 render the existing 3097 emoji."""
+        current_icon = object()
+        with patch("bot_app.emoji._emoji_index", return_value={"3097": current_icon}):
+            self.assertIs(item_emoji("Stormrazor", item_id=3095), current_icon)
+
 
 
 class RuneEmojiTests(unittest.TestCase):

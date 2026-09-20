@@ -17,12 +17,18 @@ in commits. The protected hard rules remain in the root instruction files.
   Spectator lobby ids supplement the by-PUUID Match-V5 history for rotating modes
   such as ARAM: Mayhem, whose completed games can be omitted from that history.
 - Embeds show team columns, tracked-player highlights, duration, and a relative
-  end timestamp. Arena queues 1740 (Bravery 3v3) and 1750 (3v3) use team-aware
-  layouts with concise `Team 1`, `Team 2`, etc. headings. Completed-match
+  end timestamp. The tracked-player summary shows parenthesized K/D/A directly
+  after the player name. Team rows use the same `name (K/D/A)` format, omitting
+  the former centered-dot separator to reduce wrapping in the two-column layout.
+  Right-to-left names keep the champion
+  icon and Latin stats in their intended order. Arena queues 1740 (Bravery 3v3)
+  and 1750 (3v3) use team-aware layouts with concise `Team 1`, `Team 2`, etc.
+  headings. Completed-match
   Players, Ratings, and Items views prefix each team with a distinct color marker;
   live-game announcements keep the headings uncolored.
   Rank displays include Solo/Duo win rates and replace player names, omitting the
-  KDA suffix from centered-dot-separated labels while ranks occupy that column.
+  K/D/A suffix while ranks occupy that column.
+  Displayed Emerald standings use `Em` to keep rank labels compact.
 - Ranked teammate LP is snapshotted when a shared live lobby is first announced.
   When that lobby later surfaces through a tracked account's completed-match poll,
   the shared match announcement includes the teammate's current rank and LP change.
@@ -30,20 +36,26 @@ in commits. The protected hard rules remain in the root instruction files.
 - Display choices are Players, Ranked Solo, Ratings, Items, and Mastery; Flex
   replaces Ranked Solo with Ranked Flex and adds Solo Rank. Mastery reuses the
   same player/champion data from an earlier live announcement when available,
-  otherwise fetching on demand.
+  otherwise fetching on demand. Ratings and Items retain the completed-match
+  header and tracked-player summary above their columns, including after chart
+  changes; Ratings retains the outcome color as well.
 - Chart choices are Damage Done, Gold Graph, Gold Difference Graph, Jungle
   Proximity, Damage Taken, Healing and Shielding, and Vision Score. Display changes
   retain the selected chart, including Items and Ratings; each mode retains
   Display/Chart controls. Jungle Proximity changes only the chart, preserving the
   selected columns, and shares `jungle_proximity_render` with the standalone command.
-- Items render blue/red name/items columns with six core icon slots (⬛ for empty
-  slots) followed immediately by the trinket. They retain the base win/loss color.
+- Items render blue/red name/items columns with seven core icon slots for ADCs
+  and six for other roles (⬛ for empty slots), followed by the trinket. They
+  retain the base win/loss color.
   The final inventory is authoritative. If an ADC/BOTTOM boot is absent, timeline
   purchase history supplies the latest still-held boot: sales and undo events clear
   it, while a bot-lane role-quest `ITEM_DESTROYED` preserves it because the boot moves
   into a dedicated quest slot. Detection uses Data Dragon metadata plus conservative
   IDs, including boots `3008`/`3172`; Manamune `3004` is not a boot. Missing metadata
-  or emotes still allow a name or 🥾 fallback.
+  or emotes still allow a name or 🥾 fallback. Stormrazor (`3097`, and older
+  `3095`) keeps its name when absent from Data Dragon. Older `3095` match slots
+  use the configured `3097` emoji when available; the legacy `Stormrazer`
+  spelling also resolves. Text is the fallback when neither emoji exists.
 
 ### Live games and lifecycle
 
@@ -178,9 +190,22 @@ in commits. The protected hard rules remain in the root instruction files.
   Commands also cover PUUID, mastery, timelines, rotation, status, match lists,
   and OP.GG links. Profile/build URLs use `routing.opgg_url` /
   `opgg_champion_url` with `hl=en_US` to stay in English.
+- `/patchnotes` reads the five newest dated entries in `PATCH_NOTES.md` on each
+  invocation. The maintained file records user-facing bot changes as they are
+  made, including before commit. The command defers before reading and reports
+  missing or empty notes gracefully.
 - `/matchhistory` filters by champion and mode (Normal Draft, Ranked Flex,
   Ranked Solo/Duo, Arena, ARAM), shows up to ten matching results, and totals W/L.
   `/duo` uses the same mode autocomplete and team-aware cached results.
+- `/championpool` scans the latest 100 Match-V5 IDs, reading cached payloads
+  first, then fetching missing matches. It groups non-remake standard
+  Summoner's Rift games longer than 15 minutes by recorded role and champion,
+  with optional All SR, Ranked Solo/Duo, or Ranked Flex scope. Each role shows
+  up to five champions ordered by sample size, with emoji-backed champion names,
+  record, and win rate in aligned role rows without a footer. Missing emoji
+  leave the champion name visible. The player title links to the resolved
+  account's OP.GG profile. Unavailable
+  match details and the eligible sample size are disclosed in the embed.
 - `/champ` uses live OP.GG tier, win/pick/ban rates, patch, skill order, grouped
   primary/secondary/shard runes, and item builds. It defaults to global and the
   most-picked available role, with other-role buttons. Icon-only rune/item rows
@@ -200,13 +225,17 @@ in commits. The protected hard rules remain in the root instruction files.
   Usage/Options, combining `_COMMANDS` descriptions with registered option metadata.
   `/commands` has public usage documentation. `/leaguecommands` and `/tftcommands`
   derive directories from the registered tree, partitioning non-owner commands by
-  TFT prefix; entries split at command boundaries before embed field limits.
-- Owner-only `/ownercommands` introspects `@commands.is_owner()` checks. Owner
+  TFT prefix. They group known commands by purpose, place newly registered names
+  under Other, and split entries at command boundaries before embed field limits.
+  `/leaguecommands` omits `/meetup` and `/flake` from display while leaving both
+  public commands registered and available directly.
+- Owner-only `/ownercommands` introspects `@commands.is_owner()` checks and
+  lists each command once across guild-specific registrations. Owner
   self-tests and `/msg` (send as the bot to a chosen channel, defaulting to the
   invoking channel) are excluded from public directories. Shared behavior includes
   pagination, mention-safe responses, deferred slow work, ephemeral permission
-  errors, and bot-mention latency replies. `/mastery` pages are clickable by anyone;
-  other author-scoped paginators retain their restriction.
+  errors, and bot-mention latency replies. Anyone who can see a command result
+  can use its display and page controls, including the shared paginator.
 - Owner-only `/flakerank user:<member> category:<tier>` privately assigns one
   member selected with Discord's native user picker to a separate tier list for
   each Discord server.
@@ -219,10 +248,13 @@ in commits. The protected hard rules remain in the root instruction files.
 
 ### Champion and counter reports
 
-- `/champstats` waits for all available Riot history and required timeline-backed
-  data, merges the local 180-day cache, and falls back to cached results on scan
-  failure. Timelines are fetched only for deduplicated eligible champion games
-  after queue/role/patch/duration/remake filtering.
+- `/champstats` posts a scan status message before loading all available Riot
+  history and required timeline-backed data. It edits that channel message
+  with the complete report after the scan, even if the interaction token has
+  expired. A removed message ends the refresh quietly. The scan merges the
+  local 180-day cache and falls back to cached results on Riot failure.
+  Timelines are fetched only for deduplicated eligible champion games after
+  queue/role/patch/duration/remake filtering.
 - Filters include All Games/Ranked/Solo-Duo/Flex, Top/Jungle/Mid/ADC/Support,
   full or major/minor patch, and `since_patch` through newer patches. No patch
   means all available history. The report includes record and oldest-match time,
@@ -230,7 +262,8 @@ in commits. The protected hard rules remain in the root instruction files.
 - Default `filter:true` hides choices below 1% usage or with at most two games;
   exactly 1% remains visible with at least three picks. False shows all choices.
   Games of 15 minutes or less are excluded. Breakdown state stays synchronized
-  when returning to Runes, pages clamp on report changes, and controls never expire.
+  when returning to Runes, pages clamp on report changes, and anyone can use
+  the controls. They never expire.
 - Every role has a `No Boots` W-L/win-rate row. ADC/BOTTOM no-boot classification
   requires timeline confirmation using the shared boot classifier and quest-slot
   handling described above. Metadata tags are case-insensitive, boot names provide
@@ -244,7 +277,10 @@ in commits. The protected hard rules remain in the root instruction files.
   instead measures gold leads over the direct role opponent at 15:00, excluding
   ties/unavailable checkpoints. Five role buttons and persistent paginated rows
   retain the selected player and queue. Both statistics commands persist their
-  author, selection, and page so controls survive process restarts.
+  author, selection, and page so controls survive process restarts. The background
+  history scan edits the channel message directly, so interaction-token expiry
+  cannot prevent the refresh; a deleted message ends the refresh quietly.
+  Anyone viewing the result can use its role and page controls.
 - Rank history persists snapshots with LP attribution, promotion and season-reset
   handling. `/today` uses configurable recent local-calendar days (one by default),
   `/lpgraph` annotates rank/LP points, and the leaderboard paginates. The versioned
@@ -266,7 +302,9 @@ in commits. The protected hard rules remain in the root instruction files.
   proximity is split between the adjacent outer lane and Mid.
 - `/laning [server] [username] [match_id] [position]` uses
   `bot_app/laning_render.py` and `MatchTimeline.stats_at` for Gold/XP/CS comparisons
-  at 5/10/15 minutes in separate inline columns. `build_laning_comparison_chart`
+  at 5/10/15 minutes in separate inline columns. Previous/Next buttons advance
+  through later five-minute marks in groups of up to three, including End using
+  the last timeline frame; buttons acknowledge before chart rendering. `build_laning_comparison_chart`
   plots grouped Gold/XP bars colored by side. Jungle has no supported lane opponent.
 
 ### Lane corpus and rating baselines
@@ -381,6 +419,10 @@ in commits. The protected hard rules remain in the root instruction files.
   404s and other request failures remain warnings.
   Discord 429 debug logging includes `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
   `X-RateLimit-Reset-After`, `X-RateLimit-Bucket`, and `Retry-After`.
+- Unexpected command, poller, synchronization, persistent-view, and Discord-event
+  failures send sanitized DMs to the configured owner. Identical source/error pairs
+  are suppressed for 15 minutes, known credentials are redacted, and DM failures
+  are swallowed so notification problems cannot recurse into bot failures.
 - Exclusive `bot.lock` rejects duplicate processes. `run_bot.command` stops prior
   instances and starts system Python. `sync_commands_enabled` defaults true;
   false skips startup command sync while tracking and announcements continue.
@@ -398,7 +440,8 @@ in commits. The protected hard rules remain in the root instruction files.
   rate limits, caches, chart fallbacks, and startup errors. A suite-wide socket
   guard blocks accidental requests unless an integration run explicitly opts in;
   Matplotlib uses a temporary cache and test-created event loops are closed.
-  GitHub CI installs the Python 3.9 lock and runs full discovery. Documentation checks
-  also enforce synchronized editable root sections, a 12 KiB budget per root
+  Pull-request CI installs the Python 3.9 lock and runs full discovery; ordinary
+  pushes do not trigger the workflow. Documentation checks also enforce
+  synchronized editable root sections, a 12 KiB budget per root
   file, and existing local link targets/Markdown anchors. Exact commands are in
   [AGENTS.md](../AGENTS.md#verification).

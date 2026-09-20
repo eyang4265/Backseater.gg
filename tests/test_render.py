@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from bot_app import ddragon, emoji
 from bot_app.rating import PlayerRating, RatingBuckets
 from bot_app.render import (
     RatingColumns,
@@ -26,6 +27,19 @@ from bot_app.ranks import RankSnapshot
 
 class InventoryBootFallbackTests(unittest.TestCase):
     """ADC inventory rows recover boots omitted from final Match-V5 slots."""
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.ddragon.item_name", return_value="Item")
+    @patch("bot_app.render.emoji_lookup.item_emoji", side_effect=lambda _name, item_id=None: f"<{item_id}>")
+    def test_adc_rows_have_seven_core_slots_before_the_trinket(
+        self, *_mocks: object
+    ) -> None:
+        """Unused ADC slots are black squares; other roles retain six slots."""
+        adc = _final_items_text({"teamPosition": "BOTTOM", "item0": 3031, "item6": 3340}).split()
+        top = _final_items_text({"teamPosition": "TOP", "item0": 3031, "item6": 3340}).split()
+
+        self.assertEqual(adc, ["<3031>", *(["⬛"] * 6), "<3340>"])
+        self.assertEqual(top, ["<3031>", *(["⬛"] * 5), "<3340>"])
 
     @patch("bot_app.render.ddragon.item_metadata", return_value={})
     @patch("bot_app.render.ddragon.item_name", return_value="Item")
@@ -58,6 +72,7 @@ class InventoryBootFallbackTests(unittest.TestCase):
 
         self.assertIn("<3020>", text)
         self.assertNotIn("<3006>", text)
+        self.assertEqual(len(text.split()), 8)
 
     @patch("bot_app.render.ddragon.item_metadata", return_value={})
     @patch("bot_app.render.ddragon.item_name", return_value="Item")
@@ -201,6 +216,42 @@ class InventoryBootFallbackTests(unittest.TestCase):
 
         self.assertIn("🥾", text)
 
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.render.emoji_lookup.item_emoji", return_value=None)
+    def test_stormrazor_remains_visible_without_custom_emoji(
+        self, *_mocks: object
+    ) -> None:
+        """A final Stormrazor slot remains visible without current assets."""
+        participant = {
+            "teamPosition": "BOTTOM", "item0": 1055, "item1": 3095,
+            "item2": 3031, "item3": 3035, "item6": 3363,
+        }
+
+        self.assertEqual(ddragon.item_name(3095), "Stormrazor")
+        self.assertEqual(ddragon.item_name(3097), "Stormrazor")
+        self.assertIsNone(ddragon.item_name(3094))
+        self.assertIn("Stormrazor", _final_items_text(participant))
+        participant["item1"] = 3097
+        self.assertIn("Stormrazor", _final_items_text(participant))
+
+    @patch("bot_app.emoji._emoji_index", return_value={"stormrazer": "<stormrazer>"})
+    def test_stormrazor_uses_legacy_emoji_spelling(self, *_mocks: object) -> None:
+        """The existing misspelled asset can render both Stormrazor ids."""
+        self.assertEqual(emoji.item_emoji("Stormrazor", item_id=3095), "<stormrazer>")
+        self.assertEqual(emoji.item_emoji("Stormrazor", item_id=3097), "<stormrazer>")
+        self.assertIsNone(emoji.item_emoji("Rapid Firecannon", item_id=3094))
+
+    @patch("bot_app.render.ddragon.item_metadata", return_value={})
+    @patch("bot_app.emoji._emoji_index", return_value={"3097": "<:3097:123>"})
+    def test_final_stormrazor_row_uses_icon_instead_of_text(self, *_mocks: object) -> None:
+        """An older final slot stays one icon wide when the 3097 asset exists."""
+        participant = {"teamPosition": "TOP", "item0": 3153, "item1": 3047, "item2": 3095}
+
+        row = _final_items_text(participant)
+
+        self.assertIn("<:3097:123>", row)
+        self.assertNotIn("Stormrazor", row)
+
 
 class TeamColumnLayoutTests(unittest.TestCase):
     def test_ranked_solo_text_includes_win_rate(self) -> None:
@@ -211,6 +262,16 @@ class TeamColumnLayoutTests(unittest.TestCase):
                 with_winrate=True,
             ),
             "Gold II (42 LP) · 58%",
+        )
+
+    def test_emerald_rank_uses_short_display_label(self) -> None:
+        """Individual and team-average rank displays share the Em label."""
+        from bot_app.render import average_rank_text
+
+        self.assertEqual(rank_text(RankSnapshot("EMERALD", "II", 42)), "Em II (42 LP)")
+        self.assertEqual(
+            average_rank_text(RankSnapshot("EMERALD", "II", 42).value),
+            "Em II (42 LP)",
         )
 
     def test_places_team_names_then_team_ranks_in_aligned_rows(self) -> None:
@@ -348,20 +409,35 @@ class TeamColumnLayoutTests(unittest.TestCase):
     @patch("bot_app.render.ddragon.catalog", return_value=None)
     @patch(
         "bot_app.render._resolve_concurrently",
-        return_value=[_PlayerLookup("Player#NA1", None, False)],
+        return_value=[_PlayerLookup("victorwembanyama#NA1", None, False)],
     )
     @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
-    def test_match_rows_separate_name_or_rank_from_kda_with_centered_dot(
+    def test_match_rows_keep_full_name_and_compact_kda(
         self, *_mocks: object
     ) -> None:
-        """Finished-match player labels use a centered dot before their KDA."""
+        """Finished-match rows save width without dropping a Riot ID or K/D/A."""
         columns = build_match_columns(
             [{"puuid": "player", "teamId": 100, "championName": "Ahri", "kills": 2,
               "deaths": 1, "assists": 3}],
             server="na1",
         )
 
-        self.assertEqual(columns.blue_names, ["<:champ:1> Player · (2/1/3)"])
+        self.assertEqual(columns.blue_names, ["<:champ:1> victorwembanyama (2/1/3)"])
+
+    @patch("bot_app.render.tracked_puuids", return_value=())
+    @patch("bot_app.render._positions_by_index", return_value=["Top"])
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch("bot_app.render._resolve_concurrently", return_value=[_PlayerLookup("فاكهة#NA1", None, False)])
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
+    def test_match_rows_anchor_rtl_names_with_ltr_stats(self, *_mocks: object) -> None:
+        """Arabic names do not push the champion icon to the row's right edge."""
+        columns = build_match_columns(
+            [{"puuid": "player", "teamId": 200, "championName": "Ahri", "kills": 5,
+              "deaths": 8, "assists": 11}],
+            server="na1",
+        )
+
+        self.assertEqual(columns.red_names, ["\u2066<:champ:1> فاكهة (5/8/11)\u2069"])
 
     @patch("bot_app.render.tracked_puuids", return_value=())
     @patch("bot_app.render._positions_by_index", return_value=["Top"])

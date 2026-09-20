@@ -142,7 +142,7 @@ def _stats_embed(
 
 
 class ChampStatsView(discord.ui.View):
-    """Author-scoped controls for champion-history tables that never expire."""
+    """Shared controls for champion-history tables that never expire."""
 
     def __init__(
         self,
@@ -220,16 +220,12 @@ class ChampStatsView(discord.ui.View):
         self._previous.disabled = self.page <= 0
         self._next.disabled = self.page >= pages - 1
 
-    async def _check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command author can use these controls.", ephemeral=True)
-            return False
+    async def _acknowledge(self, interaction: discord.Interaction) -> None:
+        """Acknowledge a reader's selection before editing the report."""
         await interaction.response.defer()
-        return True
 
     async def _choose(self, interaction: discord.Interaction) -> None:
-        if not await self._check(interaction):
-            return
+        await self._acknowledge(interaction)
         self.selected = self._select.values[0]
         self.page = 0
         self._refresh_buttons()
@@ -237,16 +233,14 @@ class ChampStatsView(discord.ui.View):
         await self._remember(interaction)
 
     async def _go_previous(self, interaction: discord.Interaction) -> None:
-        if not await self._check(interaction):
-            return
+        await self._acknowledge(interaction)
         self.page = max(self.page - 1, 0)
         self._refresh_buttons()
         await interaction.edit_original_response(embed=_stats_embed(self.report, self.player_name, self.selected, self.page, self.apply_filter), view=self)
         await self._remember(interaction)
 
     async def _go_next(self, interaction: discord.Interaction) -> None:
-        if not await self._check(interaction):
-            return
+        await self._acknowledge(interaction)
         self.page += 1
         self._refresh_buttons()
         await interaction.edit_original_response(embed=_stats_embed(self.report, self.player_name, self.selected, self.page, self.apply_filter), view=self)
@@ -376,6 +370,29 @@ class ChampStatsCommands(commands.Cog):
 
     def __init__(self, bot: discord.Bot) -> None:
         self.bot = bot
+        self._scan_tasks: set[asyncio.Task] = set()
+
+    async def _finish_scan(
+        self, message, puuid: str, server: str, champion: str, queue: str,
+        role: str, patch: str | None, since_patch: bool, player_name: str,
+        author_id: int, apply_filter: bool,
+    ) -> None:
+        """Publish the completed report through the channel after the scan finishes."""
+        try:
+            report = await asyncio.to_thread(
+                _load_report, puuid, server, champion, queue, role, patch,
+                since_patch, scan_riot=True,
+            )
+            view = ChampStatsView(report, player_name, author_id, apply_filter)
+            await message.channel.get_partial_message(message.id).edit(
+                embed=_stats_embed(report, player_name, view.selected, view.page, apply_filter),
+                view=view,
+            )
+            await remember_view_state(message, VIEW_KIND, view.state_payload())
+        except discord.NotFound:
+            LOGGER.info("/champstats scan finished after its message was removed")
+        except Exception:
+            LOGGER.exception("Could not finish /champstats Riot history scan")
 
     @discord.slash_command(guild_ids=GUILD_IDS, description="Show your cached champion history")
     @discord.option("champion", description="Champion name", required=True)
@@ -418,22 +435,17 @@ class ChampStatsCommands(commands.Cog):
             await ctx.respond(embed=make_embed(f"I could not resolve `{champion}` as a champion."))
             return
         LOGGER.info("/champstats showing %s for %s (queue=%s)", found.name, target.riot_id, queue)
-        report = await asyncio.to_thread(
-            _load_report,
-            target.puuid,
-            target.server,
-            found.name,
-            queue,
-            role,
-            patch,
-            since_patch,
-            scan_riot=True,
-        )
-        player_name = target.riot_id
-        view = ChampStatsView(report, player_name, ctx.author.id, apply_filter)
-        embed = _stats_embed(report, player_name, view.selected, 0, apply_filter)
-        message = await ctx.respond(embed=embed, view=view)
-        await remember_view_state(message, VIEW_KIND, view.state_payload())
+        message = await ctx.respond(embed=make_embed(
+            "Scanning Riot match history; this message will refresh when it finishes.",
+            title=f"{found.name} Stats — {target.riot_id}",
+        ))
+        if message is not None:
+            task = asyncio.create_task(self._finish_scan(
+                message, target.puuid, target.server, found.name, queue, role,
+                patch, since_patch, target.riot_id, ctx.author.id, apply_filter,
+            ))
+            self._scan_tasks.add(task)
+            task.add_done_callback(self._scan_tasks.discard)
 
 
 def setup(bot: discord.Bot) -> None:

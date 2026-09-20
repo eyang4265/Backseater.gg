@@ -27,6 +27,25 @@ _POSITION_LABELS = {"TOP": "Top", "MIDDLE": "Mid", "BOTTOM": "Bottom", "UTILITY"
 _METRIC_LABELS = ("Gold", "XP", "CS")
 
 
+def laning_pages(match: dict[str, Any], timeline: dict[str, Any] | None) -> tuple[tuple[tuple[str, int], ...], ...]:
+    """Group checkpoints three per page, ending at the last timeline frame."""
+    first = tuple((f"{minute}m", minute * 60_000) for minute in CHECKPOINT_MINUTES)
+    if timeline is None:
+        return (first,)
+    final_frame = MatchTimeline(timeline).duration_ms()
+    duration = final_frame
+    game_seconds = (match.get("info") or {}).get("gameDuration")
+    if game_seconds:
+        seconds = float(game_seconds)
+        duration = min(duration, int(seconds if seconds > 100_000 else seconds * 1000))
+    later = tuple(
+        (f"{minute}m", minute * 60_000)
+        for minute in range(20, duration // 60_000 + 1, 5)
+    )
+    remaining = (*later, ("End", final_frame))
+    return (first, *(remaining[index:index + 3] for index in range(0, len(remaining), 3)))
+
+
 def _champion_label(participant: dict[str, Any], catalog) -> str:
     """Icon + champion name (display name) for a participant."""
     champion = catalog.by_key(participant.get("championId")) if catalog else None
@@ -44,9 +63,10 @@ def _format_stats(stats: dict[str, int] | None) -> str:
 
 
 async def build_laning_embed(
-    match: dict[str, Any], timeline: dict[str, Any] | None, puuid: str
+    match: dict[str, Any], timeline: dict[str, Any] | None, puuid: str,
+    checkpoints: tuple[tuple[str, int], ...] | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
-    """Render a player's Gold/XP/CS side by side with their lane opponent's, at 5/10/15 minutes."""
+    """Render the selected lane-comparison checkpoints and their Gold/XP chart."""
     LOGGER.info("Building laning-phase embed for puuid=%s", puuid)
     info = match.get("info", {})
     participants = info.get("participants", []) or []
@@ -90,19 +110,18 @@ async def build_laning_embed(
 
     match_timeline = MatchTimeline(timeline)
     participant_id = participant.get("participantId")
-    chart_checkpoints: list[tuple[int, dict[str, dict[str, float] | None]]] = []
-    for minutes in CHECKPOINT_MINUTES:
-        timestamp = minutes * 60_000
+    chart_checkpoints: list[tuple[str, dict[str, dict[str, float] | None]]] = []
+    for label, timestamp in (checkpoints or laning_pages(match, timeline)[0]):
         you_stats = match_timeline.stats_at(participant_id, timestamp)
         opponent_stats = match_timeline.stats_at(opponent_id, timestamp)
         chart_checkpoints.append((
-            minutes,
+            label,
             {
                 "you": {"Gold": you_stats["gold"], "XP": you_stats["xp"]} if you_stats else None,
                 "opponent": {"Gold": opponent_stats["gold"], "XP": opponent_stats["xp"]} if opponent_stats else None,
             },
         ))
-        embed.add_field(name=f"{minutes}m", value="\n".join(_METRIC_LABELS), inline=True)
+        embed.add_field(name=label, value="\n".join(_METRIC_LABELS), inline=True)
         embed.add_field(name="You", value=_format_stats(you_stats), inline=True)
         embed.add_field(name="Opponent", value=_format_stats(opponent_stats), inline=True)
 

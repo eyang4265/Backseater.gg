@@ -8,22 +8,24 @@ import discord
 from discord.ext import commands
 
 from ...render import make_embed
+from ..command_directory import is_owner_only
 from ..shared import GUILD_IDS, log_command
 
 LOGGER = logging.getLogger(__name__)
 
 
-def _is_owner_only(command: discord.ApplicationCommand) -> bool:
-    """True if a command carries the ``@commands.is_owner()`` check."""
-    return any(
-        getattr(check, "__qualname__", "").startswith("is_owner")
-        for check in getattr(command, "checks", [])
-    )
+def owner_only_commands(bot: discord.Bot) -> tuple[discord.SlashCommand, ...]:
+    """List each owner command once across guild-specific registrations."""
+    unique: dict[str, discord.SlashCommand] = {}
+    for command in bot.application_commands:
+        if isinstance(command, discord.SlashCommand) and is_owner_only(command):
+            unique.setdefault(command.qualified_name, command)
+    return tuple(command for _, command in sorted(unique.items()))
 
 
 class OwnerCommands(commands.Cog):
     """List every registered owner-only slash command, kept current by
-    introspecting the bot's command tree rather than a hand-maintained list."""
+    introspecting and deduplicating the bot's command tree."""
 
     def __init__(self, bot: discord.Bot) -> None:
         """Initialize the instance."""
@@ -36,15 +38,7 @@ class OwnerCommands(commands.Cog):
     async def ownercommands(self, ctx: discord.ApplicationContext) -> None:
         """Handle ownercommands."""
         log_command(ctx)
-        owner_only = sorted(
-            (
-                command
-                for command in self.bot.application_commands
-                if isinstance(command, discord.SlashCommand)
-                and _is_owner_only(command)
-            ),
-            key=lambda command: command.qualified_name,
-        )
+        owner_only = owner_only_commands(self.bot)
         LOGGER.debug("Found %d owner-only commands", len(owner_only))
         lines = [
             f"**`/{command.qualified_name}`** — {command.description}"

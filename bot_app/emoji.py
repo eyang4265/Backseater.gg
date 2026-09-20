@@ -128,7 +128,7 @@ def named_emoji(name: str | None, *, prefixes: tuple[str, ...] = ()) -> Any | No
 
 
 def item_emoji(name: str | None, *, item_id: str | int | None = None) -> Any | None:
-    """Find the configured custom emoji for a League item."""
+    """Find an item emoji by id, including Stormrazor's older id, then name."""
     if item_id is not None:
         normalized_id = str(item_id)
         if normalized_id.startswith("32"):
@@ -137,6 +137,10 @@ def item_emoji(name: str | None, *, item_id: str | int | None = None) -> Any | N
             candidate_ids = [normalized_id[2:], normalized_id]
         else:
             candidate_ids = [normalized_id, f"32{normalized_id}"]
+        if normalized_id == "3095":
+            # Older matches retain Stormrazor's former id; the configured
+            # icon uses its current 3097 id.
+            candidate_ids.extend(("3097", "323097"))
         for candidate_id in candidate_ids:
             found = named_emoji(candidate_id)
             if found is not None:
@@ -148,7 +152,12 @@ def item_emoji(name: str | None, *, item_id: str | int | None = None) -> Any | N
             found = named_emoji(candidate_id)
             if found is not None:
                 return found
-    return named_emoji(name, prefixes=("item_", "item"))
+    found = named_emoji(name, prefixes=("item_", "item"))
+    if found is not None:
+        return found
+    if str(item_id) in {"3095", "3097"} or (name and name.casefold() == "stormrazor"):
+        return named_emoji("Stormrazer", prefixes=("item_", "item"))
+    return None
 
 
 def rune_emoji(name: str | None) -> Any | None:

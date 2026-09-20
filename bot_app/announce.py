@@ -275,7 +275,7 @@ def format_match(
 
         link = opgg_url(player.server, player.riot_id)
         name = f"[{player.riot_id}]({link})" if link else player.riot_id
-        line = f"{emoji_lookup.prefixed(icon, name)} — ({kda_text(participant)})"
+        line = f"{emoji_lookup.prefixed(icon, name)} ({kda_text(participant)})"
 
         if result != REMAKE:
             standing = rank_text(player.rank, with_winrate=True)
@@ -1115,14 +1115,15 @@ async def _fetch_match_timeline(match: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def build_rating_embed(
-    match: dict[str, Any], ratings: dict[str, PlayerRating]
+    match: dict[str, Any], ratings: dict[str, PlayerRating], *,
+    summary: str | None = None, color: discord.Color | None = None,
 ) -> discord.Embed:
-    """Render every player's lobby-relative rating as blue/red score columns."""
+    """Render lobby-relative ratings beneath the completed-match summary."""
     info = match.get("info", {})
     embed = make_embed(
-        f"Player ratings — {queue_name(info.get('queueId'))}",
+        summary if summary is not None else f"Player ratings — {queue_name(info.get('queueId'))}",
         title="Match Ratings",
-        color=discord.Color.blue(),
+        color=color if color is not None else discord.Color.blue(),
     )
     if not ratings:
         embed.description = (
@@ -1142,6 +1143,7 @@ def build_rating_embed(
 def build_inventory_embed(
     match: dict[str, Any], *, color: discord.Color | None = None,
     timeline: dict[str, Any] | None = None,
+    summary: str | None = None,
 ) -> discord.Embed:
     """Render every player's end-of-game item slots as blue/red name/items columns.
 
@@ -1149,10 +1151,11 @@ def build_inventory_embed(
     (win/loss) instead of switching to a fixed color when Items is selected.
     ``timeline`` supplies the shared renderer's ADC boot fallback when the
     final Match-V5 participant slots no longer contain a purchased boot.
+    ``summary`` preserves the completed-match header and tracked-player lines.
     """
     info = match.get("info", {})
     embed = make_embed(
-        f"Item builds — {queue_name(info.get('queueId'))}",
+        summary if summary is not None else f"Item builds — {queue_name(info.get('queueId'))}",
         title="Items",
         color=color or discord.Color.dark_gold(),
     )
@@ -1340,7 +1343,11 @@ class _MatchDisplaySelect(discord.ui.Select):
         if choice == _MATCH_DISPLAY_RATINGS:
             timeline = await _fetch_match_timeline(self._announcement.match)
             ratings = await asyncio.to_thread(rate_match, self._announcement.match, timeline)
-            embed = build_rating_embed(self._announcement.match, ratings)
+            embed = build_rating_embed(
+                self._announcement.match, ratings,
+                summary=self._announcement.text,
+                color=outcome_color(self._announcement.outcome),
+            )
             chart = None
             if existing_chart_url:
                 embed.set_image(url=existing_chart_url)
@@ -1368,6 +1375,7 @@ class _MatchDisplaySelect(discord.ui.Select):
                 self._announcement.match,
                 color=outcome_color(self._announcement.outcome),
                 timeline=timeline,
+                summary=self._announcement.text,
             )
             chart = None
             if existing_chart_url:
@@ -1581,7 +1589,11 @@ class _RatingChartSelect(discord.ui.Select):
         embed = (
             interaction.message.embeds[0].copy()
             if interaction.message.embeds
-            else build_rating_embed(self._announcement.match, {})
+            else build_rating_embed(
+                self._announcement.match, {},
+                summary=self._announcement.text,
+                color=outcome_color(self._announcement.outcome),
+            )
         )
         if chart is not None:
             embed.set_image(url=f"attachment://{chart.filename}")
@@ -1645,6 +1657,7 @@ class _InventoryChartSelect(discord.ui.Select):
             else build_inventory_embed(
                 self._announcement.match,
                 color=outcome_color(self._announcement.outcome),
+                summary=self._announcement.text,
             )
         )
         if chart is not None:

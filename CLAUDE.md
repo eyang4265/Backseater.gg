@@ -69,6 +69,13 @@ before changing a subsystem. Document current behavior and the reasons for unusu
 constraints; keep debugging history in commits. Update both root feature summaries
 and the relevant reference section when functionality changes.
 
+Default to no [Bot Patch Notes](PATCH_NOTES.md) entry for routine changes. For a
+very impactful user-facing change, ask the user before editing that file and add
+an entry only after the user confirms. Keep entries
+concise and user-facing under the current date, newest first, with a local
+America/Los_Angeles timestamp for each entry. `/patchnotes` reads
+this file directly; entries describe behavior, not Git commits or internal-only work.
+
 Keep everything from this heading onward identical in `AGENTS.md` and `CLAUDE.md`.
 Each root file has a 12 KiB budget, including its protected hard rules; shorten
 editable prose or move details to the reference before raising that budget.
@@ -132,8 +139,12 @@ verification gap.
 
 - [League announcements and controls](docs/implemented-features.md#league-announcements-and-persistent-controls):
   shared `/match` and `/livegame` pipelines, all completed queues, rank LP tracking,
+  compact match team rows and stable right-to-left name layout,
+  abbreviated Emerald rank displays,
   rotating-mode live-id recovery, match-only Arena team colors, persistent
-  Display/Chart controls, inventory boot recovery, and delayed automatic live-post cleanup.
+  Display/Chart controls with match summaries in Items and Ratings, inventory
+  seven-slot ADC inventories, boot and Stormrazor item recovery,
+  and delayed automatic live-post cleanup.
 - [Teamfight Tactics](docs/implemented-features.md#teamfight-tactics): separate
   identities/state, completed-match announcements, rank/trait displays, filtered
   history, and startup rank baselines. TFT live polling remains disabled.
@@ -141,10 +152,12 @@ verification gap.
   combined username lookup, NA/EUW/KR platform resolution, default linked accounts,
   match-position selection, unlinked tracking, and shared-lobby teammate LP changes.
 - [Commands and statistics](docs/implemented-features.md#commands-and-champion-statistics):
-  profiles, mastery, histories, OP.GG/Coachless builds, champion/counter/duo statistics,
-  role-based OP.GG trends, rank graphs, public command directories, and server flake tier lists.
+  profiles, mastery, histories, OP.GG/Coachless builds, linked champion-icon pool records and champion/counter/duo statistics,
+  role-based OP.GG trends, maintained bot patch notes, rank graphs,
+  topic-grouped public command directories, deduplicated owner directory, shared
+  command-result controls, a curated League command directory, resilient champion/counter history refreshes, and server flake tier lists.
 - [Timeline analysis and ratings](docs/implemented-features.md#timeline-analysis-and-ratings):
-  jungle proximity, lane comparisons, role-aware match ratings, and manually
+  jungle proximity, three-at-a-time lane comparisons through game end, role-aware match ratings, and manually
   collected aggregate lane statistics and population baselines.
 - [Meetups](docs/implemented-features.md#meetup-planning): server-scoped activity/time
   polls, atomic lock-in, paginated lists, confirmation previews, shared attendance,
@@ -152,4 +165,5 @@ verification gap.
 - [Runtime and storage](docs/implemented-features.md#runtime-and-storage): per-key Riot
   limits, caching, private migrated runtime data, serialized state transactions,
   typed configuration, sync retry, single-instance startup, structured logs,
-  locked dependencies, CI, and hermetic tests including documentation drift checks.
+  locked dependencies, pull-request-only CI, and hermetic tests including documentation drift checks.
+  Runtime failures also produce sanitized, rate-limited owner DMs.

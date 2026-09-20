@@ -2,9 +2,12 @@
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+import discord
 
 from bot_app.counterstats import aggregate
-from bot_app.commands.counterstats import CounterStatsView, _counter_embed
+from bot_app.commands.counterstats import CounterStatsCommands, CounterStatsView, _counter_embed
 from bot_app.counterstats import CounterRecord, CounterStatsReport
 
 
@@ -106,6 +109,34 @@ class CounterStatsTests(unittest.TestCase):
         view = asyncio.run(build_view())
 
         self.assertIsNone(view.timeout)
+
+    def test_background_scan_edits_channel_message(self):
+        async def run():
+            view = CounterStatsView([], "me", "Garen", "All Games", "Top", False, "player", 1)
+            message = Mock(id=123)
+            message.channel.get_partial_message.return_value.edit = AsyncMock()
+            with patch("bot_app.commands.counterstats._load_payloads", return_value=[_match("1", win=True)]):
+                await CounterStatsCommands(Mock())._finish_scan(message, view, "me", "NA1")
+            message.channel.get_partial_message.assert_called_once_with(123)
+            message.channel.get_partial_message.return_value.edit.assert_awaited_once()
+            message.edit.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_background_scan_ignores_deleted_message(self):
+        async def run():
+            view = CounterStatsView([], "me", "Garen", "All Games", "Top", False, "player", 1)
+            message = Mock(id=123)
+            message.channel.get_partial_message.return_value.edit = AsyncMock(
+                side_effect=discord.NotFound(Mock(status=404, reason="Not Found"), "Unknown Message")
+            )
+            with patch("bot_app.commands.counterstats._load_payloads", return_value=[_match("1", win=True)]), \
+                    patch("bot_app.commands.counterstats.LOGGER") as logger:
+                await CounterStatsCommands(Mock())._finish_scan(message, view, "me", "NA1")
+            logger.exception.assert_not_called()
+            logger.info.assert_called_once()
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

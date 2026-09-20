@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import discord
 
 from bot_app.champstats import ChampionStatsReport, ChoiceRecord
-from bot_app.commands.champstats import ChampStatsView, _filtered, _load_report
+from bot_app.commands.champstats import ChampStatsCommands, ChampStatsView, _filtered, _load_report
 
 
 class ChampStatsFilterTests(unittest.TestCase):
@@ -116,6 +118,40 @@ class ChampStatsLoadingTests(unittest.TestCase):
             _load_report("player", "NA1", "Jinx", "Ranked Solo/Duo", role="ADC")
 
         client.match_timeline.assert_called_once_with("jinx", "NA1")
+
+    def test_background_scan_edits_channel_message_and_persists_view(self) -> None:
+        async def run() -> None:
+            report = ChampionStatsReport("Garen", "All Games", 0, 0, (), (), (), ())
+            message = MagicMock(id=123)
+            message.channel.get_partial_message.return_value.edit = AsyncMock()
+            with patch("bot_app.commands.champstats._load_report", return_value=report), \
+                    patch("bot_app.commands.champstats.remember_view_state", new_callable=AsyncMock) as remember:
+                await ChampStatsCommands(MagicMock())._finish_scan(
+                    message, "me", "NA1", "Garen", "All Games", "All Roles",
+                    None, False, "player", 1, True,
+                )
+            message.channel.get_partial_message.assert_called_once_with(123)
+            message.channel.get_partial_message.return_value.edit.assert_awaited_once()
+            remember.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_background_scan_ignores_removed_message(self) -> None:
+        async def run() -> None:
+            report = ChampionStatsReport("Garen", "All Games", 0, 0, (), (), (), ())
+            message = MagicMock(id=123)
+            message.channel.get_partial_message.return_value.edit = AsyncMock(
+                side_effect=discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Message")
+            )
+            with patch("bot_app.commands.champstats._load_report", return_value=report), \
+                    patch("bot_app.commands.champstats.LOGGER") as logger:
+                await ChampStatsCommands(MagicMock())._finish_scan(
+                    message, "me", "NA1", "Garen", "All Games", "All Roles",
+                    None, False, "player", 1, True,
+                )
+            logger.exception.assert_not_called()
+
+        asyncio.run(run())
 
     def test_timeline_skips_other_champions_and_duplicate_matches(self) -> None:
         def payload(match_id: str, champion: str) -> dict:

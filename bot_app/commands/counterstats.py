@@ -87,7 +87,7 @@ def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) 
 
 
 class CounterStatsView(discord.ui.View):
-    """Author-scoped role buttons that never expire for matchup tables."""
+    """Shared role and page buttons that never expire for matchup tables."""
 
     def __init__(
         self, payloads, puuid: str, champion: str, queue_scope: str,
@@ -166,9 +166,6 @@ class CounterStatsView(discord.ui.View):
 
     def _select_role(self, role: str):
         async def callback(interaction: discord.Interaction) -> None:
-            if interaction.user.id != self.author_id:
-                await interaction.response.send_message("Only the command author can use these controls.", ephemeral=True)
-                return
             await interaction.response.defer()
             await self._ensure_loaded()
             self.enemy_role = role
@@ -179,18 +176,13 @@ class CounterStatsView(discord.ui.View):
             await self._remember(interaction)
         return callback
 
-    async def _check(self, interaction: discord.Interaction) -> bool:
-        """Authorize and acknowledge a component interaction."""
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the command author can use these controls.", ephemeral=True)
-            return False
+    async def _acknowledge(self, interaction: discord.Interaction) -> None:
+        """Acknowledge a reader's click before loading cached history."""
         await interaction.response.defer()
-        return True
 
     async def _go_previous(self, interaction: discord.Interaction) -> None:
         """Show the previous matchup page."""
-        if not await self._check(interaction):
-            return
+        await self._acknowledge(interaction)
         await self._ensure_loaded()
         self.page = max(self.page - 1, 0)
         self._refresh()
@@ -200,8 +192,7 @@ class CounterStatsView(discord.ui.View):
 
     async def _go_next(self, interaction: discord.Interaction) -> None:
         """Show the next matchup page."""
-        if not await self._check(interaction):
-            return
+        await self._acknowledge(interaction)
         await self._ensure_loaded()
         report = self._report()
         self.page = min(self.page + 1, _counter_page_count(report) - 1)
@@ -326,7 +317,7 @@ class CounterStatsCommands(commands.Cog):
         self._scan_tasks: set[asyncio.Task] = set()
 
     async def _finish_scan(self, message, view: CounterStatsView, puuid: str, server: str) -> None:
-        """Refresh the visible matchup table after the Riot history scan."""
+        """Refresh the channel message after scanning, even if the interaction token expires."""
         try:
             view.payloads = await asyncio.to_thread(_load_payloads, puuid, server, scan_riot=True)
             if view.laning:
@@ -337,7 +328,11 @@ class CounterStatsCommands(commands.Cog):
             report = view._report()
             view.page = min(view.page, _counter_page_count(report) - 1)
             view._refresh()
-            await message.edit(embed=_counter_embed(report, view.player_name, view.page), view=view)
+            await message.channel.get_partial_message(message.id).edit(
+                embed=_counter_embed(report, view.player_name, view.page), view=view,
+            )
+        except discord.NotFound:
+            LOGGER.info("/counterstats scan finished after its message was removed")
         except Exception:
             LOGGER.exception("Could not finish /counterstats Riot history scan")
 

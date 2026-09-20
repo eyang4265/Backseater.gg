@@ -1394,12 +1394,12 @@ _LANING_SIDE_LABELS = {"you": "You", "opponent": "Opponent"}
 
 
 def build_laning_comparison_chart(
-    checkpoints: Sequence[tuple[int, dict[str, dict[str, float] | None]]],
+    checkpoints: Sequence[tuple[int | str, dict[str, dict[str, float] | None]]],
     *, filename: str = "laning.png",
 ) -> discord.File | None:
     """Grouped bar chart comparing a player's Gold/XP against their lane opponent by checkpoint.
 
-    `checkpoints` is a sequence of (minutes, stats) pairs, where stats maps
+    `checkpoints` is a sequence of (label, stats) pairs, where stats maps
     "you"/"opponent" to that side's raw ``MatchTimeline.stats_at`` result
     (``{"Gold": ..., "XP": ...}``), or None if that minute never happened.
     Checkpoints sit side by side on one axes, each with a Gold/XP bar pair
@@ -1437,7 +1437,7 @@ def build_laning_comparison_chart(
             figure.patch.set_facecolor(_BACKGROUND)
             axes.set_facecolor(_BACKGROUND)
 
-            for group_center, (minutes, sides) in zip(group_centers, checkpoints):
+            for group_center, (label, sides) in zip(group_centers, checkpoints):
                 for metric_index, metric in enumerate(metrics):
                     for side_index, side in enumerate(_LANING_SIDES):
                         stats = sides.get(side)
@@ -1458,7 +1458,7 @@ def build_laning_comparison_chart(
                         color=_TEXT, fontsize=9.5,
                     )
                 axes.text(
-                    group_center, -ceiling * 0.14, f"{minutes}m", ha="center", va="top",
+                    group_center, -ceiling * 0.14, f"{label}m" if isinstance(label, int) else label, ha="center", va="top",
                     color=_TEXT, fontsize=12, fontweight="bold",
                 )
 
@@ -1577,7 +1577,7 @@ _TIER_ABBREVIATIONS = {
     "Silver": "S",
     "Gold": "G",
     "Plat": "P",
-    "Emerald": "E",
+    "Em": "E",
     "Diamond": "D",
     "Master": "M",
     "Grandmaster": "GM",

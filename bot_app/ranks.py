@@ -28,6 +28,7 @@ TIER_LABELS: dict[str, str] = {
     tier: tier.title() for tier in (*SUB_MASTER_TIERS, *APEX_TIERS)
 }
 TIER_LABELS["PLATINUM"] = "Plat"
+TIER_LABELS["EMERALD"] = "Em"
 
 
 _TIER_SPAN = 400

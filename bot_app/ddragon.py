@@ -22,6 +22,7 @@ LOGGER = logging.getLogger(__name__)
 
 _VERSIONS_URL = "https://ddragon.leagueoflegends.com/api/versions.json"
 _CDN = "https://ddragon.leagueoflegends.com/cdn"
+_LEGACY_ITEM_NAMES = {3095: "Stormrazor", 3097: "Stormrazor"}
 
 
 _REFRESH_SECONDS = 6 * 3600
@@ -456,7 +457,7 @@ def _asset_name_map(cache_key: str, url: str, builder: Any) -> dict[str, str]:
 
 
 def item_name(item_id: int | str | None) -> str | None:
-    """Display name for a Data Dragon item id (e.g. 3020 → "Sorcerer's Shoes")."""
+    """Display name for a Data Dragon item or explicitly known item id."""
     try:
         identifier = int(item_id) if item_id is not None else None
     except (TypeError, ValueError):
@@ -464,7 +465,7 @@ def item_name(item_id: int | str | None) -> str | None:
     if identifier is None:
         return None
     metadata = item_metadata().get(identifier)
-    return metadata.name if metadata else None
+    return metadata.name if metadata else _LEGACY_ITEM_NAMES.get(identifier)
 
 
 def item_metadata() -> dict[int, ItemMetadata]:

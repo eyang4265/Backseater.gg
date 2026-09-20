@@ -17,7 +17,7 @@ LOGGER = logging.getLogger(__name__)
 _COMMANDS = (
     (
         "Command Guides",
-        "**`/leaguecommands`** — List every public League and general bot command.\n"
+        "**`/leaguecommands`** — List League and general bot commands, excluding `/meetup` and `/flake`.\n"
         "Usage: run with no options; the list is generated from registered commands.\n\n"
         "**`/tftcommands`** — List every public Teamfight Tactics command.\n"
         "Usage: run with no options; the list is generated from registered commands.",
@@ -67,6 +67,8 @@ _COMMANDS = (
         "Usage: `role:<role>`; use the buttons to show the top 10 at each game-time range.\n\n"
         "**`/champstats`** — Show your cached record on one champion with rune, final-item, and boot breakdowns.\n"
         "Usage: `champion:<name>`; optionally choose `queue`, `role`, `server`, `username`, `filter`, or `position:1-10`.\n\n"
+        "**`/championpool`** — Show champion records and win rates by role.\n"
+        "Usage: optionally choose `queue`, `server`, or `username`; defaults to your linked account.\n\n"
         "**`/counterstats`** — Show a champion's win rate against every enemy champion.\n"
         "Usage: `champion:<name> role:<role>`; optionally choose `queue`, `filter`, `server`, `username`, or `position:1-10`, then use the five role buttons.\n\n"
         "**`/coachless`** — Show Coachless.gg rune and item WPA recommendations.\n"
@@ -82,6 +84,8 @@ _COMMANDS = (
     ),
     (
         "Riot & Server",
+        "**`/patchnotes`** — Show recent updates to this bot.\n"
+        "Usage: run with no options; reads the maintained bot patch notes.\n\n"
         "**`/rotation`** — Show this week's free champion rotation.\n\n"
         "**`/serverstatus`** — Show active maintenance and incidents.\n"
         "Usage: optionally choose a `server`.\n\n"

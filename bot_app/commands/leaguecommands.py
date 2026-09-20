@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class LeagueCommandDirectory(commands.Cog):
-    """List every registered public command outside the TFT namespace."""
+    """List League commands, excluding unrelated meetup and flake tools."""
 
     def __init__(self, bot: discord.Bot) -> None:
         """Initialize the command directory."""
@@ -22,10 +22,10 @@ class LeagueCommandDirectory(commands.Cog):
 
     @discord.slash_command(
         guild_ids=GUILD_IDS,
-        description="List every public League and general bot command",
+        description="List League and general bot commands",
     )
     async def leaguecommands(self, ctx: discord.ApplicationContext) -> None:
-        """Send the live League command directory."""
+        """Send the live League directory without meetup or flake entries."""
         log_command(ctx)
         embed = build_game_command_directory(self.bot, tft=False)
         await ctx.respond(embed=embed)

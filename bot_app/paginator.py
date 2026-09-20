@@ -1,4 +1,4 @@
-"""Reusable author-scoped Discord embed pagination."""
+"""Reusable Discord embed pagination that anyone can navigate."""
 
 from __future__ import annotations
 
@@ -49,12 +49,7 @@ class Paginator(discord.ui.View):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Handle check."""
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "Run the command yourself to control these pages.", ephemeral=True
-            )
-            return False
+        """Allow any reader to use the page controls."""
         return True
 
     async def on_timeout(self) -> None:

@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.vscode/
 .cache/
 # Secrets — never commit. See json/secrets.example.json.
 json/secrets.json
