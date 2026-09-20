@@ -143,6 +143,16 @@ match does not prove the changed schema synced. If a fresh check needs a bot sta
 follow the hard rule requiring explicit run authorization and report any remaining
 verification gap.
 
+## Deployment
+
+Treat the live Oracle VM deployment at `/opt/discord-bot` as the production bot.
+After verified code changes, stop `discord-bot.service`, sync the repository over
+SSH while excluding `.git/`, `.venv/`, secrets, `data/`, caches, and logs, then
+restart the service. It must run `/usr/bin/python3 main.py`. Verify the service is
+active and fresh logs contain `Synchronized application commands`, then push the
+same commit to GitHub. Never copy production secrets or runtime data into Git.
+Sync documentation-only changes without restarting the bot.
+
 ## Implemented features
 
 - [League announcements and controls](docs/implemented-features.md#league-announcements-and-persistent-controls):
