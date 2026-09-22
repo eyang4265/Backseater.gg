@@ -407,7 +407,8 @@ in commits. The protected hard rules remain in the root instruction files.
   category labels, short project logger names, grouped multiline tracebacks, and explicit
   startup/shutdown lifecycle events; `bot.log` retains those categories plus full
   dates, millisecond timestamps, full logger names, and no terminal color codes.
-- Central command diagnostics record invocation, duration, and exceptions.
+- Central command diagnostics record invocation, every caller-supplied slash
+  argument (including nested subcommand payloads), duration, and exceptions.
   Command result logs identify the originating slash command, including
   `/matchlist` responses.
   Coachless diagnostics include endpoint, status, stage, cache, and traceback.

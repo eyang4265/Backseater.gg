@@ -214,6 +214,37 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(len(logs.output), 1)
         self.assertIn("champion=Ahri", logs.output[0])
 
+    def test_command_logging_recovers_all_nested_interaction_arguments(self) -> None:
+        """INFO diagnostics retain arguments from the raw nested payload."""
+        ctx = SimpleNamespace(
+            command="example",
+            author="Tester",
+            channel="#bot",
+            selected_options=[{"name": "champion", "value": "Ahri"}],
+            interaction=SimpleNamespace(
+                data={
+                    "options": [
+                        {
+                            "name": "lookup",
+                            "options": [
+                                {"name": "username", "value": "Player#NA1"},
+                                {"name": "position", "value": 3},
+                            ],
+                        }
+                    ]
+                }
+            ),
+        )
+        self.assertEqual(
+            command_option_fields(ctx),
+            {"username": "Player#NA1", "position": 3, "champion": "Ahri"},
+        )
+        with self.assertLogs("bot_app.commands.shared", level="INFO") as logs:
+            log_command(ctx)
+        self.assertIn("username=Player#NA1", logs.output[0])
+        self.assertIn("position=3", logs.output[0])
+        self.assertIn("champion=Ahri", logs.output[0])
+
 
 class LatestMatchPositionTests(unittest.IsolatedAsyncioTestCase):
     async def test_position_five_resolves_blue_support_from_latest_match(self) -> None:

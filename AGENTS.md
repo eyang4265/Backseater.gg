@@ -182,6 +182,6 @@ Sync documentation-only changes without restarting the bot.
   persistent controls, discussion threads, and automatic closure.
 - [Runtime and storage](docs/implemented-features.md#runtime-and-storage): per-key Riot
   limits, caching, private migrated runtime data, serialized state transactions,
-  typed configuration, sync retry, single-instance startup, structured logs,
+  typed configuration, sync retry, single-instance startup, argument-complete logs,
   locked dependencies, pull-request-only CI, and hermetic tests including documentation drift checks.
   Runtime failures also produce sanitized, rate-limited owner DMs.

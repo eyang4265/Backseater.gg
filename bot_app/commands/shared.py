@@ -51,11 +51,15 @@ def game_mode_choices(_ctx: discord.AutocompleteContext) -> tuple[str, ...]:
 
 
 def log_command(ctx: Any, **fields: Any) -> None:
-    """Record a slash-command invocation once with consistent context."""
+    """Record one invocation with every argument present in Discord's payload."""
     if getattr(ctx, "_debug_command_logged", False):
         return
+    supplied_fields = command_option_fields(ctx)
+    supplied_fields.update(fields)
     supplied = " | ".join(
-        f"{key}={value}" for key, value in fields.items() if value is not None
+        f"{key}={value}"
+        for key, value in supplied_fields.items()
+        if value is not None
     )
     command = getattr(ctx, "command", "unknown")
     author = getattr(ctx, "author", "unknown")
@@ -72,13 +76,33 @@ def log_command(ctx: Any, **fields: Any) -> None:
 
 
 def command_option_fields(ctx: Any) -> dict[str, Any]:
-    """Extract supplied slash-command option values for the global logger."""
-    selected = getattr(ctx, "selected_options", None) or ()
-    return {
-        option["name"]: option["value"]
-        for option in selected
-        if isinstance(option, dict) and "name" in option and "value" in option
-    }
+    """Extract every caller-supplied option from Discord's invocation payload.
+
+    Pycord normally exposes ``selected_options``, but some command shapes only
+    retain the complete option list on the raw interaction. Nested subcommand
+    options are flattened so the INFO invocation line never silently drops an
+    argument the caller entered.
+    """
+
+    def collect(options: Any, fields: dict[str, Any]) -> None:
+        if not isinstance(options, (list, tuple)):
+            return
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            nested = option.get("options")
+            if nested:
+                collect(nested, fields)
+            if "name" in option and "value" in option:
+                fields[str(option["name"])] = option["value"]
+
+    fields: dict[str, Any] = {}
+    interaction = getattr(ctx, "interaction", None)
+    data = getattr(interaction, "data", None)
+    if isinstance(data, dict):
+        collect(data.get("options"), fields)
+    collect(getattr(ctx, "selected_options", None), fields)
+    return fields
 
 
 _USER_OPTION_TYPE = 6

@@ -5,6 +5,7 @@ __pycache__/
 .cache/
 # Secrets — never commit. See json/secrets.example.json.
 json/secrets.json
+*.key
 
 # Runtime state, rewritten by the pollers.
 json/*.tmp
