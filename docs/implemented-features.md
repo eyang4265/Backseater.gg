@@ -20,8 +20,8 @@ in commits. The protected hard rules remain in the root instruction files.
   end timestamp. The tracked-player summary shows parenthesized K/D/A directly
   after the player name. Team rows use the same `name (K/D/A)` format, omitting
   the former centered-dot separator to reduce wrapping in the two-column layout.
-  Right-to-left names keep the champion
-  icon and Latin stats in their intended order. Arena queues 1740 (Bravery 3v3)
+  Right-to-left names are isolated from both the champion icon and Latin stats,
+  keeping all three in their intended order. Arena queues 1740 (Bravery 3v3)
   and 1750 (3v3) use team-aware layouts with concise `Team 1`, `Team 2`, etc.
   headings. Completed-match
   Players, Ratings, and Items views prefix each team with a distinct color marker;
@@ -61,6 +61,8 @@ in commits. The protected hard rules remain in the root instruction files.
 
 - `/livegame` and automatic lobby announcements share team columns, player/champion
   rows, inferred positions, ranks/win rates, duration, and a relative start timestamp.
+  Right-to-left player names are isolated from their champion icons so Discord's
+  bidirectional layout keeps the icon at the start of each row.
   One automatic announcement is emitted per shared lobby. The persistent Display
   dropdown replaces names with ranks or champion mastery; Flex offers separate
   Flex Rank and Solo Rank choices. Ranks never appear in a separate bottom block.

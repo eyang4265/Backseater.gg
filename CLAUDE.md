@@ -42,7 +42,7 @@ Where the two genuinely must differ, the difference is a field on the
 announcement dataclass that the shared code reads, never a forked call path.
 If a change cannot be expressed that way, say so and stop rather than forking.
 
-Do not start or restart the bot solely because files have changed. When explicitly asked to run the bot, first stop every existing bot process, then start it with system Python 3.9.6 using `/usr/bin/python3 main.py`; never run `main.py` from `.venv`.
+Always deploy and restart the production bot after any repository change. First stop every existing production bot process, then start it with system Python 3.9.6 using `/usr/bin/python3 main.py`; never run `main.py` from `.venv`. Documentation-only changes also require a production restart.
 
 When you add or change a public slash command, update the `/commands` command directory with its current description and usage instructions. Keep owner-only commands out of that directory.
 Keep each public slash command in its own command module named after the command (for example, `/champ` belongs in `commands/champ.py`). Move reusable logic shared by multiple commands into a separate shared module.
@@ -138,18 +138,17 @@ verification gap.
 ## Deployment
 
 Treat the live Oracle VM deployment at `/opt/discord-bot` as the production bot.
-After verified code changes, stop `discord-bot.service`, sync the repository over
+After any verified repository change, stop `discord-bot.service`, sync the repository over
 SSH while excluding `.git/`, `.venv/`, secrets, `data/`, caches, and logs, then
 restart the service. It must run `/usr/bin/python3 main.py`. Verify the service is
 active and fresh logs contain `Synchronized application commands`, then push the
 same commit to GitHub. Never copy production secrets or runtime data into Git.
-Sync documentation-only changes without restarting the bot.
 
 ## Implemented features
 
 - [League announcements and controls](docs/implemented-features.md#league-announcements-and-persistent-controls):
   shared `/match` and `/livegame` pipelines, all completed queues, rank LP tracking,
-  compact match team rows and stable right-to-left name layout,
+  compact match team rows and isolated right-to-left player-name layout,
   abbreviated Emerald rank displays,
   rotating-mode live-id recovery, match-only Arena team colors, persistent
   Display/Chart controls with match summaries in Items and Ratings, inventory

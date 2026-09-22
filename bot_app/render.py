@@ -204,9 +204,16 @@ def _summoner_label(riot_id: str, game_name_counts: dict[str, int]) -> str:
 
 
 def _ltr_player_row(row: str, label: str) -> str:
-    """Keep an RTL player name from reversing the icon and Latin stats."""
+    """Keep an RTL player name between the icon and any Latin suffix.
+
+    A left-to-right isolate around the full row is not sufficient: the bidi
+    algorithm can still attach neutral spaces and parenthesized K/D/A to the
+    RTL run, displaying the stats before the name.  Isolating the name as its
+    own RTL run gives Discord explicit boundaries for all three pieces.
+    """
     if any(unicodedata.bidirectional(char) in {"R", "AL"} for char in label):
-        return f"\u2066{row}\u2069"
+        isolated_label = f"\u2067{label}\u2069"
+        return f"\u2066{row.replace(label, isolated_label, 1)}\u2069"
     return row
 
 
@@ -1066,7 +1073,9 @@ def build_lobby_columns(
             label = rank_label
         else:
             label = _summoner_label(lookup.riot_id or "-", game_name_counts)
-        label = emoji_lookup.prefixed(icon, label)
+        player_label = label
+        label = emoji_lookup.prefixed(icon, player_label)
+        label = _ltr_player_row(label, player_label)
         if participant.get("puuid") in highlighted:
             label = f"**{label}**"
 

@@ -437,7 +437,37 @@ class TeamColumnLayoutTests(unittest.TestCase):
             server="na1",
         )
 
-        self.assertEqual(columns.red_names, ["\u2066<:champ:1> فاكهة (5/8/11)\u2069"])
+        self.assertEqual(
+            columns.red_names,
+            ["\u2066<:champ:1> \u2067فاكهة\u2069 (5/8/11)\u2069"],
+        )
+
+    @patch("bot_app.render.tracked_puuids", return_value=())
+    @patch("bot_app.render._positions_by_index", return_value=["Top"])
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch(
+        "bot_app.render._resolve_concurrently",
+        return_value=[_PlayerLookup("فاكهة#NA1", None, False)],
+    )
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
+    def test_live_rows_anchor_rtl_names_after_the_champion_icon(
+        self, *_mocks: object
+    ) -> None:
+        """Live rows use the same explicit icon/name bidi boundaries."""
+        columns = build_lobby_columns(
+            {
+                "gameQueueConfigId": 420,
+                "participants": [
+                    {"puuid": "player", "teamId": 200, "championId": 103}
+                ],
+            },
+            server="na1",
+        )
+
+        self.assertEqual(
+            columns.red_names,
+            ["\u2066<:champ:1> \u2067فاكهة\u2069\u2069"],
+        )
 
     @patch("bot_app.render.tracked_puuids", return_value=())
     @patch("bot_app.render._positions_by_index", return_value=["Top"])
