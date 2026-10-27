@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class LeagueCommandDirectory(commands.Cog):
-    """List League commands, excluding unrelated meetup and flake tools."""
+    """List League commands, excluding the unrelated flake tool."""
 
     def __init__(self, bot: discord.Bot) -> None:
         """Initialize the command directory."""
@@ -25,7 +25,7 @@ class LeagueCommandDirectory(commands.Cog):
         description="List League and general bot commands",
     )
     async def leaguecommands(self, ctx: discord.ApplicationContext) -> None:
-        """Send the live League directory without meetup or flake entries."""
+        """Send the live League directory without flake entries."""
         log_command(ctx)
         embed = build_game_command_directory(self.bot, tft=False)
         await ctx.respond(embed=embed)

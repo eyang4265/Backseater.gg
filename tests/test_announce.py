@@ -1,7 +1,9 @@
 """Announcement presentation helpers."""
 
+import asyncio
 import io
 import unittest
+from itertools import product
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
@@ -27,12 +29,15 @@ from bot_app.announce import (
     format_live_game,
     format_match,
     gold_embed,
+    publish_live_games,
     remember_match_view_state,
+    MatchAnnouncementView,
 )
 from bot_app.ranks import RankSnapshot
 from bot_app.store import Account
 from bot_app.queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID
 from bot_app.rating import PlayerRating, RatingBuckets
+from bot_app.render import TeamColumns
 from bot_app.riot import RiotAPIError
 
 
@@ -150,6 +155,93 @@ class RelativeTimestampTests(unittest.TestCase):
         catalog.start()
         self.addCleanup(catalog.stop)
 
+    def test_unavailable_mayhem_and_clash_results_post_finished_notices(self) -> None:
+        """A permanent 403 produces no invented result or statistics."""
+        match = {
+            "metadata": {"matchId": "NA1_123"},
+            "liveGameSnapshot": {
+                "text": (
+                    "**ARAM: Mayhem — Live Game** (12:34)\n"
+                    "Player#NA1 — Ashe"
+                ),
+                "game": {
+                    "platformId": "NA1",
+                    "gameId": 123,
+                    "gameQueueConfigId": 2400,
+                    "participants": [{"puuid": "p1", "championId": 22}],
+                },
+            },
+            "info": {
+                "gameEndTimestamp": 1_700_000_000_000,
+                "estimatedGameDuration": 754,
+                "queueId": 2400,
+                "resultUnavailable": True,
+                "participants": [{"puuid": "p1"}],
+            },
+        }
+
+        for queue_id, name in ((2400, "ARAM: Mayhem"), (700, "Clash"), (720, "ARAM Clash")):
+            with self.subTest(queue_id=queue_id):
+                match["info"]["queueId"] = queue_id
+                match["liveGameSnapshot"]["game"]["gameQueueConfigId"] = queue_id
+                match["liveGameSnapshot"]["text"] = (
+                    f"**{name} — Live Game** (12:34)\nPlayer#NA1 — Ashe"
+                )
+                announcement = format_match(match, [TrackedPlayer("p1", "Player#NA1")])
+
+                self.assertIsNotNone(announcement)
+                self.assertTrue(announcement.result_unavailable)
+                self.assertIn(f"{name} — Game Finished", announcement.text)
+                self.assertIn("(~12min)", announcement.text)
+                self.assertNotIn("12:34", announcement.text)
+                self.assertIn("Player#NA1 — Ashe", announcement.text)
+                self.assertNotIn("started", announcement.text)
+                self.assertNotIn("Victory", announcement.text)
+                self.assertNotIn("Defeat", announcement.text)
+                self.assertIn("Detailed results are unavailable from Riot", announcement.text)
+
+    def test_unavailable_result_embed_reuses_live_player_champion_columns(self) -> None:
+        """The finished notice reuses stored live rows without post-game controls."""
+        game = {
+            "platformId": "NA1",
+            "gameId": 123,
+            "gameQueueConfigId": 2400,
+            "participants": [{"puuid": "p1", "championId": 22}],
+        }
+        announcement = MatchAnnouncement(
+            "**ARAM: Mayhem — Game Finished**\nPlayer#NA1 — Ashe",
+            None,
+            {
+                "info": {"resultUnavailable": True},
+                "liveGameSnapshot": {"game": game},
+            },
+            {"p1"},
+            result_unavailable=True,
+        )
+
+        async def render():
+            embed, chart = await build_announcement_embed(announcement)
+            return embed, chart, MatchAnnouncementView(announcement)
+
+        for queue_id in (2400, 700, 720):
+            game["gameQueueConfigId"] = queue_id
+            columns = Mock()
+            with (
+                self.subTest(queue_id=queue_id),
+                patch("bot_app.announce.build_lobby_columns", return_value=columns) as build,
+                patch("bot_app.announce.add_team_columns") as add_columns,
+            ):
+                embed, chart, view = asyncio.run(render())
+
+                self.assertEqual(embed.description, announcement.text)
+                self.assertEqual(embed.color, discord.Color.purple())
+                self.assertIsNone(chart)
+                self.assertEqual(view.children, [])
+                build.assert_called_once_with(game, "NA1", highlight_puuids={"p1"})
+                add_columns.assert_called_once_with(
+                    embed, columns, include_rank_rows=False
+                )
+
     def test_unknown_queue_is_not_filtered_even_with_legacy_ranked_flag(self) -> None:
         """Completed announcements never apply a queue allowlist."""
         match = {
@@ -200,22 +292,9 @@ class RelativeTimestampTests(unittest.TestCase):
         self.assertIsNotNone(announcement)
         self.assertIn("<t:1700000000:R>", announcement.text)
 
-    def test_format_match_omits_the_timestamp_when_missing(self) -> None:
-        """Verify that a match with no gameEndTimestamp produces no relative-timestamp markup."""
-        match = {
-            "info": {
-                "gameEndTimestamp": 1,
-                "gameDuration": 1500,
-                "queueId": 420,
-                "participants": [{"puuid": "p1", "teamId": 100, "win": True}],
-            }
-        }
-        players = [TrackedPlayer(puuid="p1", riot_id="Name#TAG")]
-        announcement = format_match(match, players, require_ranked_queue=False)
-        self.assertIn("<t:", announcement.text)
 
     def test_format_live_game_includes_a_relative_start_timestamp(self) -> None:
-        """Verify that the header carries a Discord relative-timestamp for gameStartTime."""
+        """Keep relative starts while omitting elapsed timers for Mayhem/Clash."""
         game = {
             "gameStartTime": 1_700_000_000_000,
             "gameLength": 300,
@@ -227,6 +306,23 @@ class RelativeTimestampTests(unittest.TestCase):
         self.assertIsNotNone(announcement)
         self.assertIn("<t:1700000000:R>", announcement.text)
 
+        for queue_id, length, expected in (
+            (2400, 0, "**ARAM: Mayhem — Live Game**"),
+            (2400, 300, "**ARAM: Mayhem — Live Game**"),
+            (700, 0, "**Clash — Live Game**"),
+            (700, 300, "**Clash — Live Game**"),
+            (720, 0, "**ARAM Clash — Live Game**"),
+            (720, 300, "**ARAM Clash — Live Game**"),
+            (450, 300, "**ARAM — Live Game** (5:00)"),
+            (420, 300, "**Ranked Solo/Duo — Live Game** (5:00)"),
+        ):
+            with self.subTest(queue_id=queue_id, length=length):
+                game.update(gameQueueConfigId=queue_id, gameLength=length)
+                live = format_live_game(game, [TrackedPlayer("p1", "Name#TAG")])
+                self.assertEqual(
+                    live.text.splitlines()[0],
+                    expected + " • started <t:1700000000:R>",
+                )
     def test_league_match_line_shows_teammate_lp_change(self) -> None:
         """League LP deltas are visible and retained in persistent view state."""
         match = {
@@ -738,20 +834,29 @@ class ItemsDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(kwargs["embed"].image)
         self.assertEqual(kwargs["attachments"], [])
 
-    async def test_items_option_keeps_the_win_loss_embed_color(self) -> None:
-        """Verify that the side stripe stays the outcome color, not a fixed one."""
-        announcement = MatchAnnouncement(
-            "text", "Defeat", {"info": {"participants": []}}, set()
-        )
-        select = _MatchDisplaySelect(announcement)
-        interaction = _select_with_value(select, "inventory")
-        with patch(
-            "bot_app.announce._build_match_chart", AsyncMock(return_value=None)
+    async def test_display_modes_keep_the_match_embed_color(self) -> None:
+        """Players, ranks, mastery, ratings, and items retain Mayhem/Clash purple."""
+        queues = ((420, discord.Color.red()), (2400, discord.Color.purple()),
+                  (700, discord.Color.purple()), (720, discord.Color.purple()))
+        for (queue, expected), mode in product(
+            queues, ("players", "rankings", "mastery", "ratings", "inventory")
         ):
-            await select.callback(interaction)
-
-        embed = interaction.edit_original_response.call_args.kwargs["embed"]
-        self.assertEqual(embed.color, discord.Color.red())
+            announcement = MatchAnnouncement(
+                "text", "Defeat", {"info": {"participants": [], "queueId": queue}}, set()
+            )
+            select = _MatchDisplaySelect(announcement)
+            interaction = _select_with_value(select, mode)
+            with (
+                self.subTest(queue_id=queue, mode=mode),
+                patch("bot_app.announce._build_match_chart", AsyncMock(return_value=None)),
+                patch("bot_app.announce.build_match_columns", return_value=TeamColumns()),
+                patch("bot_app.announce._fetch_match_timeline", AsyncMock(return_value=None)),
+                patch("bot_app.announce.rate_match", return_value={}),
+            ):
+                await select.callback(interaction)
+                interaction.response.defer.assert_awaited_once()
+                embed = interaction.edit_original_response.call_args.kwargs["embed"]
+                self.assertEqual(embed.color, expected)
 
     async def test_inventory_chart_select_swaps_the_chart_without_losing_items(
         self,
@@ -872,13 +977,13 @@ class FetchMatchTimelineTests(unittest.IsolatedAsyncioTestCase):
 
 class BuildRatingEmbedTests(unittest.TestCase):
     def test_unrateable_match_says_so_instead_of_showing_empty_columns(self) -> None:
-        """Verify that an unrateable match explains why instead of looking broken."""
+        """An unrateable match shows a brief status without empty columns."""
         embed = build_rating_embed({"info": {"queueId": 420}}, {})
-        self.assertIn("too short", embed.description)
+        self.assertIn("Ratings unavailable", embed.description)
         self.assertEqual(embed.fields, [])
 
-    def test_notes_from_every_rated_player_are_deduplicated_and_shown(self) -> None:
-        """Verify that duplicate confidence notes across players collapse to one line."""
+    def test_limited_ratings_show_brief_status_without_explanatory_notes(self) -> None:
+        """Limited ratings keep the confidence status and omit methodology notes."""
         note = "Rated from match data only — timeline unavailable."
         buckets = RatingBuckets(50.0, 50.0, 50.0, 50.0, 50.0, 50.0)
         ratings = {
@@ -904,8 +1009,8 @@ class BuildRatingEmbedTests(unittest.TestCase):
         }
         with patch("bot_app.announce.ddragon.catalog", return_value=None):
             embed = build_rating_embed(match, ratings)
-        notes_field = next(f for f in embed.fields if f.name == "Notes")
-        self.assertEqual(notes_field.value, f"• {note}")
+        self.assertFalse(any(f.name == "Notes" for f in embed.fields))
+        self.assertEqual(embed.footer.text, "Limited ratings · Timeline unavailable")
 
 
 class RememberMatchViewStateTests(unittest.IsolatedAsyncioTestCase):
@@ -940,6 +1045,47 @@ class LiveGameMessageCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(_live_game_key({"gameId": 1}))
         self.assertIsNone(live_game_key_from_match_id("garbage"))
 
+    async def test_publish_persists_the_shared_live_announcement_payload(self) -> None:
+        """Automatic live posts retain their source data for denied results."""
+        announcement = LiveGameAnnouncement(
+            "Player is in ARAM: Mayhem",
+            {
+                "platformId": "NA1",
+                "gameId": 123,
+                "gameQueueConfigId": 2400,
+                "participants": [{"puuid": "p1", "championId": 22}],
+            },
+            {"p1"},
+        )
+        message = Mock(id=70)
+        channel = Mock(id=7, send=AsyncMock(return_value=message))
+        with (
+            patch("bot_app.announce.load_guild_channels", return_value={}),
+            patch("bot_app.announce.load_accounts", return_value={}),
+            patch("bot_app.announce.load_tft_accounts", return_value={}),
+            patch(
+                "bot_app.announce.resolve_announcement_channels",
+                new=AsyncMock(return_value=[channel]),
+            ),
+            patch(
+                "bot_app.announce.build_live_game_embed",
+                new=AsyncMock(return_value=discord.Embed()),
+            ),
+            patch(
+                "bot_app.announce.remember_live_game_view_state", new=AsyncMock()
+            ),
+            patch("bot_app.announce.remember_live_game_message") as remember_message,
+            patch("bot_app.announce.remember_live_game_snapshot") as remember_snapshot,
+        ):
+            await publish_live_games(
+                Mock(), [announcement], global_channel=Mock()
+            )
+
+        remember_message.assert_called_once_with("NA1:123", 7, 70)
+        snapshot = remember_snapshot.call_args.args[1]
+        self.assertEqual(snapshot["game"], announcement.game)
+        self.assertEqual(snapshot["highlight_puuids"], ["p1"])
+
     async def test_delete_live_game_messages_deletes_and_swallows_errors(self) -> None:
         """Every recorded post is deleted; a missing one is ignored."""
         from bot_app.announce import delete_live_game_messages
@@ -955,9 +1101,12 @@ class LiveGameMessageCleanupTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "bot_app.announce.pop_live_game_messages",
             return_value=[(7, 70), (7, 71)],
-        ) as pop:
+        ) as pop, patch(
+            "bot_app.announce.pop_live_game_snapshots", return_value={"NA1:1": {}}
+        ) as pop_snapshot:
             await delete_live_game_messages(bot, ["NA1:1"])
         pop.assert_called_once_with(["NA1:1"])
+        pop_snapshot.assert_called_once_with(["NA1:1"])
         good.delete.assert_awaited_once()
 
     async def test_delete_live_game_messages_no_records_is_a_noop(self) -> None:
@@ -966,7 +1115,7 @@ class LiveGameMessageCleanupTests(unittest.IsolatedAsyncioTestCase):
         bot = Mock()
         with patch(
             "bot_app.announce.pop_live_game_messages", return_value=[]
-        ):
+        ), patch("bot_app.announce.pop_live_game_snapshots", return_value={}):
             await delete_live_game_messages(bot, ["NA1:1"])
         bot.get_channel.assert_not_called()
 

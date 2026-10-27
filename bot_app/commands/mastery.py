@@ -103,7 +103,7 @@ class MasteryPaginator(Paginator):
         )
 
     def _render_page(self, page_entries, page: int, pages: int) -> discord.Embed:
-        """Render page."""
+        """Render concise mastery columns and a page number."""
         champion_lines = [
             f"{prefixed(champion_emoji(entry.champion, name=entry.name), f'**{entry.name}**')}"
             f" – {entry.points:,}"
@@ -117,7 +117,7 @@ class MasteryPaginator(Paginator):
             for entry in page_entries
         ]
 
-        embed = make_embed("The champions with the most mastery points are:")
+        embed = make_embed("")
         embed.set_author(
             name=f"Champion Mastery: {self.riot_id}", icon_url=self.profile_icon_url
         )

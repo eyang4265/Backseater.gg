@@ -17,6 +17,7 @@ class PublishTests(unittest.IsolatedAsyncioTestCase):
         chart = discord.File(io.BytesIO(b"png"), filename="damage.png")
         build = AsyncMock(return_value=(discord.Embed(title="match"), chart))
         with (
+            patch("bot_app.daily_summary.record_announcement") as journal,
             patch("bot_app.announce.load_guild_channels", return_value={}),
             patch("bot_app.announce.load_accounts", return_value={}),
             patch("bot_app.announce.resolve_announcement_channel", return_value=None),
@@ -27,6 +28,8 @@ class PublishTests(unittest.IsolatedAsyncioTestCase):
         ):
             await publish(Mock(), [announcement])
 
+        self.assertEqual(journal.call_count, 2)
+        self.assertEqual([call.args[0] for call in journal.call_args_list], [1, 2])
         build.assert_awaited_once_with(announcement)
         files = [channel.send.await_args.kwargs["file"] for channel in channels]
         self.assertIsNot(files[0], files[1])

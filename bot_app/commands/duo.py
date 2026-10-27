@@ -1,4 +1,4 @@
-"""The public ``/duo`` command."""
+"""The public ``/duo`` command with the selected game mode in its results."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class DuoCommands(commands.Cog):
     )
     @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
     async def duo(self, ctx, teammate, server=None, username=None, game_mode=None, position=None):
-        """Show a teammate's record with a direct primary target or latest-match slot."""
+        """Show the duo record and mode for a direct target or latest-match slot."""
         log_command(
             ctx,
             server=server,
@@ -99,13 +99,14 @@ class DuoCommands(commands.Cog):
             "/duo cache lookup for %s + %s (mode=%s): %d games, %d wins",
             target.riot_id, teammate_account.riot_id, game_mode, games, wins,
         )
+        mode_summary = f"**Game mode:** {game_mode or 'All Games'}"
         if not games:
             await ctx.respond(
-                embed=make_embed("No shared completed matches are in the cache yet.")
+                embed=make_embed(f"{mode_summary}\nNo shared completed matches are in the cache yet.")
             )
             return
         embed = make_embed(
-            f"**Record:** {wins}W–{games - wins}L\n**Win rate:** {wins / games:.1%}\n**Games:** {games}",
+            f"{mode_summary}\n**Record:** {wins}W–{games - wins}L\n**Win rate:** {wins / games:.1%}\n**Games:** {games}",
             title=f"Duo — {target.riot_id} + {teammate_account.riot_id}",
         )
         await ctx.respond(embed=embed)

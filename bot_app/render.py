@@ -20,8 +20,10 @@ from typing import Any, Callable, Iterable, Sequence
 import discord
 
 from . import ddragon, emoji as emoji_lookup
+from .arena_teams import arena_team_label, arena_team_placement, arena_team_sort_key
+from .match_cache import get_match_cache
 from .positions import POSITION_LABELS, ROLE_ORDER, assign_team_positions, role_sort_key
-from .queues import ARENA_QUEUE_IDS, ARENA_TEAM_SIZES
+from .queues import ARAM_MAYHEM_QUEUE_ID, ARENA_QUEUE_IDS, ARENA_TEAM_SIZES, FLEX_QUEUE_ID
 from .rating import PlayerRating
 from .ranks import (
     APEX_TIERS,
@@ -34,7 +36,7 @@ from .ranks import (
     value_to_rank,
 )
 from .riot import RiotAPIError, TTLCache, get_client
-from .store import teammate_puuids, tracked_puuids
+from .store import load_partymates, teammate_puuids, tracked_puuids
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,20 +44,8 @@ BLUE_TEAM_ID = 100
 RED_TEAM_ID = 200
 TEAM_IDS = (BLUE_TEAM_ID, RED_TEAM_ID)
 
-# Discord does not support per-field text colors, so Arena teams use distinct
-# color emoji in their field headings. The current Arena queues have six teams;
-# the extra markers keep the helper useful if an eight-team payload is rendered.
-_ARENA_TEAM_MARKERS = ("🔵", "🔴", "🟢", "🟡", "🟣", "🟠", "🟤", "⚪")
-
-
 _LOOKUP_WORKERS = 10
 _MASTERY_CACHE = TTLCache(ttl_seconds=6 * 3600, max_entries=4096)
-
-
-def _arena_team_label(number: int) -> str:
-    """Return a concise Arena team heading with a distinct color marker."""
-    marker = _ARENA_TEAM_MARKERS[(number - 1) % len(_ARENA_TEAM_MARKERS)]
-    return f"{marker} Team {number}"
 
 
 def make_embed(
@@ -186,6 +176,7 @@ class _Row:
     rank: str
     value: int | None
     debug: str = ""
+    placement: int | None = None
 
 
 def _game_name_counts(all_riot_ids: Sequence[str]) -> dict[str, int]:
@@ -201,6 +192,116 @@ def _summoner_label(riot_id: str, game_name_counts: dict[str, int]) -> str:
     """Game name alone, unless another player in this game shares it — then Name#Tag."""
     game_name = riot_id.split("#", 1)[0]
     return riot_id if game_name_counts.get(game_name, 0) > 1 else game_name
+
+
+def _registry_marker(
+    puuid: str | None, tracked: set[str], teammates: set[str], partymates: set[str]
+) -> str:
+    """One identity marker, preferring tracked accounts over other registries."""
+    if puuid in tracked or puuid in teammates:
+        return " ⭐"
+    if puuid in partymates:
+        return " 👥"
+    return ""
+
+
+
+def _hugging_puuids(participants, tracked, teammates, five_stack, lonely) -> set[str]:
+    """Replace exactly two visible registry stars with people hugging per game.
+
+    Count unique participating tracked/teammate accounts after solo and
+    five-stack overrides. Saved partymates keep their own marker.
+    """
+    starred = {p.get("puuid") for p in participants
+               if p.get("puuid") in tracked | teammates
+               and p.get("puuid") not in five_stack | lonely}
+    return starred if len(starred) == 2 else set()
+
+
+def _repeat_encounter_markers(participants, queue_id, start_ms, anchors, excluded=()):
+    """Mark players repeated from each anchor's immediately previous observed game.
+
+    A prior ally must currently be an ally; a prior enemy must currently be
+    an enemy. A prior opposite relationship adds 🔄. Registered identities
+    suppress all encounter markers. Missing timing/evidence skips
+    the marker; no API requests or partymate admission are involved.
+    """
+    if (not isinstance(queue_id, int) or queue_id <= 0 or queue_id in ARENA_QUEUE_IDS
+            or not isinstance(start_ms, (int, float)) or start_ms <= 0):
+        return {}
+    eligible = {p["puuid"]: p["teamId"] for p in participants
+                if p.get("puuid") and p.get("teamId") in TEAM_IDS and not p.get("bot")}
+    cache = get_match_cache()
+    markers = {}
+    for anchor in sorted(set(anchors) & eligible.keys()):
+        history = cache.prior_encounters(anchor, int(start_ms))
+        for puuid, team in eligible.items():
+            if puuid in anchors or puuid in excluded:
+                continue
+            ally = team == eligible[anchor]
+            if ally in history.get(puuid, set()):
+                markers.setdefault(puuid, set()).add("👤" if ally else "😈")
+            if (not ally) in history.get(puuid, set()):
+                markers.setdefault(puuid, set()).add("🔄")
+    return {puuid: " " + " ".join(m for m in ("👤", "😈", "🔄") if m in values)
+            for puuid, values in markers.items()}
+
+
+def _five_stack_puuids(participants, queue_id, start_ms, known=()) -> set[str]:
+    """Mark a full known team or a five-player roster inferred from shared games.
+
+    Five tracked/teammate/partymate identities on one team qualify immediately.
+    Ranked Flex also qualifies with four known identities and one unknown.
+    Otherwise require two prior completed games (three observed live lobbies
+    for Mayhem) and half of every member's last ten games in seven days. Skip
+    bots, unknown teams/queues, and Arena. Reads only cached
+    evidence, so completed views cannot admit partymates or record live games.
+    """
+    if not isinstance(queue_id, int) or queue_id <= 0 or queue_id in ARENA_QUEUE_IDS:
+        return set()
+    known = set(known)
+    detected = set()
+    for team in TEAM_IDS:
+        roster = [p for p in participants if p.get("teamId") == team]
+        if len(roster) != 5 or any(not p.get("puuid") or p.get("bot") for p in roster):
+            continue
+        puuids = {p["puuid"] for p in roster}
+        if len(puuids) != 5:
+            continue
+        if puuids <= known or (queue_id == FLEX_QUEUE_ID and len(puuids & known) == 4):
+            detected.update(puuids)
+            continue
+        if not isinstance(start_ms, (int, float)) or start_ms <= 0:
+            continue
+        cache = get_match_cache()
+        mayhem = queue_id == ARAM_MAYHEM_QUEUE_ID
+        lookup = cache.recent_live_team_games if mayhem else cache.recent_team_matches
+        histories = [lookup(puuid, queue_id, int(start_ms)) for puuid in sorted(puuids)]
+        shared = set.intersection(*(set(history) for history in histories))
+        shared = {mid for mid in shared
+                  if len({history[mid] for history in histories}) == 1
+                  and histories[0][mid] in TEAM_IDS}
+        if len(shared) >= (3 if mayhem else 2) and all(
+                len(shared) * 2 >= len(history) for history in histories):
+            detected.update(puuids)
+    return detected
+
+
+def _lonely_puuids(participants, queue_id, tracked, teammates, partymates) -> set[str]:
+    """Tracked players with no known same-team companion, not confirmed solos.
+
+    Skip unknown queues/teams, bots, and Arena's different team model. Opposing
+    registered players do not count as companions.
+    """
+    if not isinstance(queue_id, int) or queue_id <= 0 or queue_id in ARENA_QUEUE_IDS:
+        return set()
+    known = tracked | teammates | partymates
+    eligible = [p for p in participants if p.get("teamId") in (100, 200) and not p.get("bot")]
+    return {
+        p["puuid"] for p in eligible if p.get("puuid") in tracked
+        and not any(other.get("puuid") in known and other.get("puuid") != p["puuid"]
+                    and other["teamId"] == p["teamId"] for other in eligible)
+    }
 
 
 def _ltr_player_row(row: str, label: str) -> str:
@@ -312,8 +413,8 @@ def build_rating_columns(
 
     Follows the same Top/Jungle/Mid/Bottom/Support ordering, and the same
     Arena-subteam grouping by ``playerSubteamId``, as :func:`build_match_columns`
-    so the two embeds read consistently. Arena headings use a distinct color
-    marker followed by ``Team N``.
+    so the two embeds read consistently. Completed Arena teams are ordered by
+    placement and their headings use a distinct color marker plus ordinal.
     """
     info = match.get("info", {})
     participants = info.get("participants", []) or []
@@ -343,13 +444,13 @@ def build_rating_columns(
             groups.setdefault(key, []).append(participant)
         arena_teams = [
             (
-                _arena_team_label(number),
+                arena_team_label(number, arena_team_placement(group)),
                 [label_for(p) for p in group],
                 [score_for(p) for p in group],
                 [kda_text(p) for p in group],
             )
-            for number, group in enumerate(
-                (groups[key] for key in sorted(groups)), start=1
+            for number, (_team_id, group) in enumerate(
+                sorted(groups.items(), key=arena_team_sort_key), start=1
             )
         ]
         return RatingColumns(arena_teams=arena_teams)
@@ -561,8 +662,8 @@ def build_inventory_columns(
 
     Follows the same Top/Jungle/Mid/Bottom/Support ordering, and the same
     Arena-subteam grouping by ``playerSubteamId``, as :func:`build_match_columns`
-    so the embed reads consistently with the other Display views. Arena headings
-    use a distinct color marker followed by ``Team N``.
+    so the embed reads consistently with the other Display views. Completed
+    Arena teams are ordered by placement and use color-plus-ordinal headings.
     """
     info = match.get("info", {})
     participants = info.get("participants", []) or []
@@ -588,12 +689,12 @@ def build_inventory_columns(
             groups.setdefault(key, []).append(participant)
         arena_teams = [
             (
-                _arena_team_label(number),
+                arena_team_label(number, arena_team_placement(group)),
                 [label_for(p) for p in group],
                 [_final_items_text(p, timeline) for p in group],
             )
-            for number, group in enumerate(
-                (groups[key] for key in sorted(groups)), start=1
+            for number, (_team_id, group) in enumerate(
+                sorted(groups.items(), key=arena_team_sort_key), start=1
             )
         ]
         return InventoryColumns(arena_teams=arena_teams)
@@ -696,8 +797,8 @@ def _columns_from_rows(
     Arena rows normally carry ``playerSubteamId`` as their team id. Spectator
     payloads can omit it and collapse the lobby into one or two shared ids; in
     that case, recover the subteams from Riot's team-contiguous player order.
-    Completed-match callers can request a distinct color marker on each concise
-    ``Team N`` heading; live-game callers leave the headings uncolored.
+    Completed-match callers can request placement-ordered color-plus-ordinal
+    headings; live-game callers retain stable, uncolored ``Team N`` headings.
     """
 
     def team(team_id: int) -> tuple[list[str], list[str], float | None]:
@@ -734,11 +835,26 @@ def _columns_from_rows(
                 for index in range(0, len(rows), arena_team_size)
             ]
         else:
-            # Match-V5's participant order is not subteam order. Sort the real
-            # playerSubteamId values so Players agrees with Items and Ratings
-            # when a user changes the Display selection.
-            for team_id in sorted(distinct_team_ids):
-                team_groups.append([row for row in rows if row.team_id == team_id])
+            # Match-V5's participant order is not result order. Completed rows
+            # carry placement, so show 1st, 2nd, etc.; live rows fall back to
+            # stable playerSubteamId order because placement is unavailable.
+            groups = {
+                team_id: [row for row in rows if row.team_id == team_id]
+                for team_id in distinct_team_ids
+            }
+            team_groups.extend(
+                group
+                for _team_id, group in sorted(
+                    groups.items(),
+                    key=lambda item: (
+                        next(
+                            (row.placement for row in item[1] if row.placement),
+                            10_000,
+                        ),
+                        item[0],
+                    ),
+                )
+            )
 
         arena_teams = []
         for number, group in enumerate(team_groups, start=1):
@@ -746,7 +862,10 @@ def _columns_from_rows(
             ranks = [row.rank for row in group]
             average = average_value([row.value for row in group if row.value is not None])
             label = (
-                _arena_team_label(number)
+                arena_team_label(
+                    number,
+                    next((row.placement for row in group if row.placement), None),
+                )
                 if colored_arena_headings
                 else f"Team {number}"
             )
@@ -879,6 +998,7 @@ def build_match_columns(
     server: str | None,
     queue_id: int | None = None,
     highlight_puuids: Iterable[str] = (),
+    game_start_ms: int | None = None,
     show_rank_names: bool = False,
     show_mastery: bool = False,
 ) -> TeamColumns:
@@ -887,7 +1007,17 @@ def build_match_columns(
     Names are bolded for any player in the tracked-account registry — not just the ones
     this announcement is about — so a tracked player who happened to be in the
     lobby still stands out. ``queue_id`` selects which ranked queue's standing
-    is shown: a Flex match shows Flex rank.
+    is shown: a Flex match shows Flex rank. Saved inferred partymates are also
+    bolded and marked with 👥. Tracked accounts use ⭐ and linked teammates
+    use ⭐; tracked players without known same-team companions use 😢 instead.
+    These inferred lonely markers remain in rank and mastery display modes.
+    Unregistered repeat allies append 👤 and repeat enemies append 😈 relative to highlighted
+    or tracked players; changed ally/enemy relationships append 🔄. Only
+    the immediately previous observed game before ``game_start_ms`` counts;
+    Full known teams, Flex teams with four known players, or inferred five-player
+    rosters use 🤡 over ⭐ in every mode.
+    Exactly two remaining starred players in the game use 🫂 instead of ⭐.
+    🤡/🫂/⭐/👥 override all three cues.
 
     Arena matches use Riot's ``playerSubteamId`` rather than the broad
     blue/red ``teamId`` so each Arena party gets its own color-coded column.
@@ -908,12 +1038,23 @@ def build_match_columns(
     )
     rank_queue = rank_queue_for_match(queue_id)
     arena = queue_id in ARENA_QUEUE_IDS
-    highlighted = set(highlight_puuids) | set(tracked_puuids())
+    tracked = set(tracked_puuids())
+    teammates = set(teammate_puuids())
+    highlighted = set(highlight_puuids) | tracked
     # A /teammate puuid is bolded like a tracked player, but only when this
     # lobby also holds a real tracked account — teammates never surface a
     # match on their own, so an all-teammate lobby stays unhighlighted.
     if highlighted & {participant.get("puuid") for participant in participants}:
-        highlighted |= set(teammate_puuids())
+        highlighted |= teammates
+    partymates = set(load_partymates())
+    highlighted |= partymates
+    five_stack = _five_stack_puuids(participants, queue_id, game_start_ms, tracked | teammates | partymates)
+    lonely = _lonely_puuids(participants, queue_id, tracked, teammates, partymates)
+    hugging = _hugging_puuids(participants, tracked, teammates, five_stack, lonely)
+    encounters = _repeat_encounter_markers(
+        participants, queue_id, game_start_ms, set(highlight_puuids) | tracked,
+        tracked | teammates | partymates | five_stack,
+    )
     catalog = ddragon.catalog()
 
     champion_ids = [p.get("championName", "Unknown champion") for p in participants]
@@ -953,6 +1094,11 @@ def build_match_columns(
             label = _summoner_label(lookup.riot_id or "-", game_name_counts)
 
         entry = emoji_lookup.prefixed(icon, label)
+        entry += (" 🤡" if participant.get("puuid") in five_stack else
+                  " 😢" if participant.get("puuid") in lonely else
+                  " 🫂" if participant.get("puuid") in hugging else
+                  _registry_marker(participant.get("puuid"), tracked, teammates, partymates))
+        entry += encounters.get(participant.get("puuid"), "")
         if not show_rank_names:
             # Omitting the old separator saves width in Discord's narrow
             # side-by-side team fields while retaining parenthesized K/D/A.
@@ -972,6 +1118,11 @@ def build_match_columns(
                 name=entry,
                 rank=rank_label,
                 value=lookup.rank.value if lookup.rank else None,
+                placement=(
+                    int(participant.get("placement") or 0) or None
+                    if arena
+                    else None
+                ),
             )
         )
 
@@ -988,11 +1139,23 @@ def build_lobby_columns(
     server: str,
     *,
     queue_id: int | None = None,
+    highlight_puuids: Iterable[str] = (),
     show_rank_names: bool = False,
     show_mastery: bool = False,
 ) -> TeamColumns:
     """Columns for a live game from the Spectator API.
 
+    Linked teammates and tracked accounts are bolded in every queue. Saved
+    inferred partymates are bolded with 👥. Tracked accounts use ⭐ and linked
+    teammates use ⭐; tracked players without known same-team companions use
+    the inferred lonely marker 😢 instead in name, rank, and mastery modes.
+    Unregistered repeat allies append 👤 and repeat enemies append 😈 relative to highlighted
+    or tracked players; changed ally/enemy relationships append 🔄. Only the
+    immediately previous observed game before the lobby began counts;
+    Full known teams, Flex teams with four known players, or inferred five-player
+    rosters use 🤡 over ⭐ in every mode.
+    Exactly two remaining starred players in the game use 🫂 instead of ⭐.
+    🤡/🫂/⭐/👥 override all three cues.
     Arena lobbies use ``playerSubteamId`` when Spectator supplies it and fall
     back to the shared Arena team-size recovery when it does not. Live headings
     remain plain ``Team N`` labels; color markers are reserved for completed matches.
@@ -1051,7 +1214,18 @@ def build_lobby_columns(
         else [None] * len(participants)
     )
 
-    highlighted = tracked_puuids()
+    partymates = set(load_partymates())
+    tracked = set(tracked_puuids())
+    teammates = set(teammate_puuids())
+    highlighted = tracked | teammates | partymates
+    five_stack = _five_stack_puuids(participants, lobby_queue_id, game.get("gameStartTime"),
+                                    tracked | teammates | partymates)
+    lonely = _lonely_puuids(participants, lobby_queue_id, tracked, teammates, partymates)
+    hugging = _hugging_puuids(participants, tracked, teammates, five_stack, lonely)
+    encounters = _repeat_encounter_markers(
+        participants, lobby_queue_id, game.get("gameStartTime"),
+        set(highlight_puuids) | tracked, tracked | teammates | partymates | five_stack,
+    )
     tags = ddragon.champion_tags_by_internal_id()
     rows: list[_Row] = []
 
@@ -1075,6 +1249,11 @@ def build_lobby_columns(
             label = _summoner_label(lookup.riot_id or "-", game_name_counts)
         player_label = label
         label = emoji_lookup.prefixed(icon, player_label)
+        label += (" 🤡" if participant.get("puuid") in five_stack else
+                  " 😢" if participant.get("puuid") in lonely else
+                  " 🫂" if participant.get("puuid") in hugging else
+                  _registry_marker(participant.get("puuid"), tracked, teammates, partymates))
+        label += encounters.get(participant.get("puuid"), "")
         label = _ltr_player_row(label, player_label)
         if participant.get("puuid") in highlighted:
             label = f"**{label}**"

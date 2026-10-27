@@ -13,9 +13,28 @@ in commits. The protected hard rules remain in the root instruction files.
   pipeline in `bot_app/announce.py`. It has no queue filter: all completed games
   are eligible, including non-ranked, rotating, custom, and unknown queue ids.
   Only `queues.RANKED_QUEUE_IDS` (Solo/Duo 420, Flex 440) trigger ranked LP lookups
-  and rank-history writes. Processing is chronological with durable deduplication.
-  Spectator lobby ids supplement the by-PUUID Match-V5 history for rotating modes
-  such as ARAM: Mayhem, whose completed games can be omitted from that history.
+  and rank-history writes. Processing is chronological against one permanent
+  global ledger of completed match ids, so shared games are stored once and an
+  account change cannot make an old game new again. Registration seeds recent
+  ids into the same ledger without backfilling announcements. Legacy per-player
+  histories migrate into it before their duplicate lists are cleared.
+  Spectator lobby ids supplement the by-PUUID Match-V5 history for modes with
+  limited completed-match coverage, including ARAM: Mayhem (2400), Clash (700),
+  and ARAM Clash (720).
+  After Spectator confirms one of these lobbies ended, a Match-V5 `403 Forbidden`
+  produces a one-time shared completed-game notice stating that the game finished
+  and detailed results are unavailable. Finished Mayhem and Clash embeds use purple,
+  including unavailable-result notices and all completed display modes. The notice reuses the stored live-game
+  player/champion summary and team columns. It shows the elapsed time from the
+  stored game start to the 403, minus two minutes and floored at zero, as
+  `(~Nmin)` to compensate for polling delay, while omitting seconds, the stale
+  relative start time, and invented match statistics. Active lobbies never
+  produce a finished notice; `404` responses remain retryable. Successful
+  Match-V5 payloads retain their real results, statistics, and controls.
+  Explicit `/match` and `/livegame` lookups include every registered tracked
+  participant present, so summaries, bold rows, and gold chart highlights stay
+  consistent with automatic announcements; an explicitly selected unregistered
+  player is included too.
 - Embeds show team columns, tracked-player highlights, duration, and a relative
   end timestamp. The tracked-player summary shows parenthesized K/D/A directly
   after the player name. Team rows use the same `name (K/D/A)` format, omitting
@@ -24,11 +43,42 @@ in commits. The protected hard rules remain in the root instruction files.
   keeping all three in their intended order. Arena queues 1740 (Bravery 3v3)
   and 1750 (3v3) use team-aware layouts with concise `Team 1`, `Team 2`, etc.
   headings. Completed-match
-  Players, Ratings, and Items views prefix each team with a distinct color marker;
+  Players, Ratings, and Items views prefix each team with a distinct color marker
+  and list teams by ordinal placement (`1st`, `2nd`, etc.), best finish first;
   live-game announcements keep the headings uncolored.
   Rank displays include Solo/Duo win rates and replace player names, omitting the
   K/D/A suffix while ranks occupy that column.
   Displayed Emerald standings use `Em` to keep rank labels compact.
+- Top featured-player summary lines append 🔥 (`:fire:`) for three or more
+  consecutive wins or 🥶 (`:cold_face:`) for three or more consecutive losses
+  across League queues. Completed views include the selected match; live views
+  check three completed results before the lobby started. History comes from
+  Riot's consecutive match IDs, with cached match payloads and a five-minute
+  marker cache. Later games never affect historical views. Remakes, missing
+  results, insufficient history, and API failures omit the marker. ARAM: Mayhem,
+  Clash, and ARAM Clash never show streak markers in live or completed summaries; finished notices
+  also remove markers from older stored live summaries. Display/chart controls
+  preserve this text.
+- Ranked promotions append 🎉 and demotions 📉 to the top completed-player
+  summary in place of 🔥/🥶. Moving up/down a division or tier qualifies,
+  including apex tiers; LP-only
+  gains/losses, placements, resets, remakes, and ambiguous multi-game rank changes do
+  not. Rank snapshots must differ by exactly one completed ranked game.
+  The poller supplies attributable before/after snapshots and stores a
+  promotion/demotion flags on the match's rank-history point, so later `/match`
+  views and persistent controls retain the cue. Missing historical evidence
+  omits the rank-change emoji.
+- Top featured-player summaries append 🖐️ beside K/D/A when that participant's
+  Match-V5 `pentaKills` is positive. One marker covers any number of pentakills
+  in the selected match and coexists with streak/rank-change icons. It applies
+  to all League queues with available results, including Mayhem and Clash;
+  missing statistics and unavailable-result notices never invent a pentakill.
+  Shared `/match`, automatic announcements, display/chart controls, and saved
+  views retain the same summary.
+- Linked teammates present in a lobby appear in shared live and completed summaries
+  in every queue, including Mayhem, and in `/livegame` and `/match` selections.
+  Live team rows highlight them too. They never initiate polling; missing ranked
+  data does not exclude them from summaries.
 - Ranked teammate LP is snapshotted when a shared live lobby is first announced.
   When that lobby later surfaces through a tracked account's completed-match poll,
   the shared match announcement includes the teammate's current rank and LP change.
@@ -38,15 +88,18 @@ in commits. The protected hard rules remain in the root instruction files.
   same player/champion data from an earlier live announcement when available,
   otherwise fetching on demand. Ratings and Items retain the completed-match
   header and tracked-player summary above their columns, including after chart
-  changes; Ratings retains the outcome color as well.
+  changes; Ratings retains the outcome color (purple for finished Mayhem/Clash) as well.
 - Chart choices are Damage Done, Gold Graph, Gold Difference Graph, Jungle
   Proximity, Damage Taken, Healing and Shielding, and Vision Score. Display changes
   retain the selected chart, including Items and Ratings; each mode retains
   Display/Chart controls. Jungle Proximity changes only the chart, preserving the
   selected columns, and shares `jungle_proximity_render` with the standalone command.
+  Arena metric charts use borderless solid colors matching the team heading
+  markers, center each ordinal inside its bar with contrasting text, and retain
+  the tracked player's gold outline and ordinal legend labels.
 - Items render blue/red name/items columns with seven core icon slots for ADCs
   and six for other roles (⬛ for empty slots), followed by the trinket. They
-  retain the base win/loss color.
+  retain the base win/loss color (purple for finished Mayhem/Clash).
   The final inventory is authoritative. If an ADC/BOTTOM boot is absent, timeline
   purchase history supplies the latest still-held boot: sales and undo events clear
   it, while a bot-lane role-quest `ITEM_DESTROYED` preserves it because the boot moves
@@ -61,13 +114,19 @@ in commits. The protected hard rules remain in the root instruction files.
 
 - `/livegame` and automatic lobby announcements share team columns, player/champion
   rows, inferred positions, ranks/win rates, duration, and a relative start timestamp.
+  Mayhem, Clash, and ARAM Clash omit elapsed timers and streak icons, showing
+  `<queue> — Live Game` without a parenthesized duration; their relative start
+  timestamps remain available.
   Right-to-left player names are isolated from their champion icons so Discord's
   bidirectional layout keeps the icon at the start of each row.
   One automatic announcement is emitted per shared lobby. The persistent Display
   dropdown replaces names with ranks or champion mastery; Flex offers separate
   Flex Rank and Solo Rank choices. Ranks never appear in a separate bottom block.
 - Automatic live posts are recorded by `platform:gameId` through
-  `store.remember_live_game_message` in private runtime storage.
+  `store.remember_live_game_message` in private runtime storage. Their shared
+  announcement payloads are stored under the same key until cleanup, preserving
+  the Spectator participant, champion, queue, and tracked-player data needed for
+  a Mayhem/Clash completion notice when Match-V5 denies the finished result.
   `tracker.poll_and_announce` deletes the live post immediately before the completed
   announcement. `poll_live_games_and_announce` also sweeps ended or dodged lobbies
   through `announce.delete_live_game_messages`. `collect_new_live_games` retires
@@ -79,6 +138,96 @@ in commits. The protected hard rules remain in the root instruction files.
 - Announcement channels are configured per guild with a mandatory global fallback,
   guild membership routing, cached batch lookups, and conservative treatment of
   transient Discord failures.
+
+### Inferred partymates
+
+- Shared `format_live_game` admits inferred partymates on their third same-team
+  game: two prior completed games in the same queue within seven days plus the
+  current live lobby. The prior games must be at least half of each player's
+  last ten cached non-remake games before the lobby began. Completed-match
+  views retain saved markers but never admit new identities.
+  Mayhem (queue 2400) requires three distinct observed same-team live lobbies,
+  including the current one, within seven days and at least half of each
+  player's last ten observed lobbies. Finished results/notices never count.
+  Platform/game IDs deduplicate repeated polls and `/livegame` calls; the
+  separate SQLite history survives restarts and does not create match results
+  or statistics. Missing platform, game ID, or timing skips observation.
+- Detection uses the existing SQLite match cache without extra Riot requests.
+  Bots, custom games, unknown teams/timing, and Arena are excluded. Missing
+  cached evidence does not establish solo play. There is no separate
+  **Possible premades** section or confirmed party-size claim.
+
+- Qualifying pair members outside the tracked/teammate registries are merged into private
+  `data/partymates.json`, keyed by PUUID with `server` and full `riotId`, using
+  the same identity layout as `teammates.json`. Optional existing Discord IDs
+  and known Riot IDs survive incomplete later payloads. Entries accumulate as
+  historical inferred identities, not confirmed current party membership.
+  Unknown platform skips saving rather than guessing a server. Concurrent
+  writers merge atomically and unchanged lookups do not rewrite the file;
+  storage failures leave the announcement usable.
+- Partymates exclude tracked and teammate PUUIDs on reads, saves, and detection
+  merges. Saving a League tracked account or teammate also prunes matching stored
+  partymates; legacy overlaps are hidden immediately and removed on the next merge.
+  `/accounts` additionally excludes identities shown in either earlier section.
+  Tracked accounts use ⭐, linked teammates ⭐, and saved partymates 👥
+  beside their names in shared match/live rows and `/accounts`. If an identity
+  overlaps, tracked status takes precedence. A tracked player with no other
+  tracked, teammate, or saved partymate on their team uses 😢 instead of ⭐.
+  This means no known queue companions, not confirmed solo queue; opponents
+  do not count. Bots, unknown queues/teams, and Arena skip the lonely marker.
+  Name, rank, and mastery modes share it across commands and announcements.
+  Saved partymates are bold, including
+  rank and mastery modes. They retain this marker
+  after detection evidence ages out. Partymates do not initiate polls or change
+  player lookup; tracked and teammate identities remain excluded.
+
+- When exactly two participating players would show ⭐ after solo/five-stack
+  overrides, both use 🫂 (`:people_hugging:`) instead. Count tracked and linked
+  teammate identities once per game; saved partymates retain 👥. This applies
+  to shared live/completed rows in name, rank, and mastery modes.
+
+- A full five-player team uses 🤡 instead of its registry, lonely, or repeat
+  markers immediately when all five are tracked, linked teammates, or saved
+  partymates on the same team. This overrides ⭐ even without cached history.
+  Ranked Flex (440) also marks all five when exactly four are known and one is
+  unknown, without history or adding the fifth to partymates. Other queues retain
+  the five-known-player rule. Otherwise all five must share the same two prior completed games in that queue
+  within seven days and those games comprise at least half of each member's last
+  ten cached games. Mayhem requires three shared observed live lobbies through
+  the selected game's start. Overlapping qualifying pairs alone do not suffice
+  for unknown identities. Missing evidence for unknown players, bots, unknown teams,
+  and Arena skip detection. This is inferred, not a confirmed Riot party roster.
+  Both shared surfaces and name/rank/mastery modes use the same read-only check;
+  existing bolding remains unchanged.
+
+- Shared live/completed player rows append 👤 for a prior ally currently on the
+  same team again and 😈 for a prior enemy currently opposing the selected or
+  tracked player again. The marker uses only each selected/tracked player's
+  immediately previous cached match or observed live lobby before this game's start. Older encounters
+  never contribute; cached history may be incomplete.
+  Blue/red side changes do not change the relationship. 🔄 marks a previous
+  ally now opposing you or a previous enemy now allied with you. Multiple
+  selected/tracked players can contribute different cues from their respective
+  previous games.
+  ⭐/👥 registry markers override all three encounter cues in name,
+  rank, and mastery modes and do not add players to any registry. Arena, bots,
+  unknown teams/queues/timing, the selected game, and future games are excluded.
+  Normal live lobbies now persist distinct encounter observations too; repeated
+  polls/views count once. Missing evidence shows no encounter marker.
+
+- Owner-only `/updatepartymate` (no options) fetches every tracked League
+  account's complete paginated Match-V5 history for a fixed past-seven-day window.
+  It reuses cached matches and deduplicates shared IDs. The shared pair rule is
+  applied only to a current Spectator same-team lobby, with two completed games
+  before its start and pairs anchored to a completely scanned tracked account. Untracked histories remain partial:
+  only games observed in the roster scan contribute to their ten-game window.
+  Mayhem uses the shared three-live-lobby observation gate. Completed Mayhem games, Arena, custom games, bots, remakes, out-of-window
+  games, and unavailable results are excluded. Existing partymates remain; storage excludes tracked League/TFT
+  and teammate identities. The reply defers privately, shows progress, prevents
+  concurrent sweeps, and reports additions, saved total, and incomplete coverage.
+  Riot failures do not prevent other accounts from being scanned. No live lobby
+  or third match is needed for this historical scan. `/ownercommands` discovers
+  it automatically; public directories exclude it.
 
 ### Persistent interactions
 
@@ -159,8 +308,15 @@ in commits. The protected hard rules remain in the root instruction files.
   statistics put the resolved platform in the title.
 - Account tools support tracking, refresh, reassignment, duplicate prevention,
   roster limits, and removal cleanup. Owner-only `/accounts` paginates all tracked
-  accounts (linked mentions or `*(unlinked)*`) followed by Teammates, ephemerally.
-- Owner-only `/add` accepts optional `user` and `teammate` (false by default).
+  accounts (linked mentions or `*(unlinked)*`), then Teammates and inferred
+  Partymates, ephemerally. Each section is sorted by Riot ID; partymate rows show
+  Riot ID, server, and an optional linked Discord user. Section headings include
+  counts, and pagination includes all three registries.
+- Owner-only `/add` accepts optional `user` and an `account_type` dropdown:
+  `tracked` (default), `teammate`, or `partymate`. The dropdown replaces the
+  former teammate checkbox. Manual partymates skip the third-game inference gate
+  and never start polling. Re-adding a companion preserves a known Discord tie
+  when `user` is omitted. Tracked PUUIDs must be switched using the linked user.
   A summoner without a tag defaults to `NA1`. Normal tracking without a Discord
   user uses a synthetic 18-digit sentinel key shared by League/TFT, reusing it
   when re-adding an existing PUUID. Unlinked accounts poll normally.
@@ -173,11 +329,13 @@ in commits. The protected hard rules remain in the root instruction files.
   announcement then shows their rank and attributable LP change.
   `render.build_match_columns` highlights them only when a real tracked player is
   in the same lobby. TFT highlighting is unaffected.
-- `/add` with a `user` but no `summoner` switches an existing registration:
-  `teammate:true` demotes League/TFT tracking via `_demote_to_teammate`,
-  `untrack_account`, and `untrack_tft_account`; false promotes via
-  `_promote_from_teammate` / `_track_both_accounts` and removes the teammate entry.
-  A PUUID belongs to one registry. Teammate removal is a direct registry-file edit.
+- `/add` with a `user` but no `summoner` switches the saved League identity
+  to the selected account type. Teammate/partymate selection stops League/TFT
+  polling through their normal unregistration paths; either companion can be
+  promoted back to tracked through `_track_both_accounts`. Moves between
+  teammate and partymate preserve the Riot ID, platform, and Discord tie.
+  Companion mutations share the League state lock and prevent tracked overlap;
+  tracking or selecting teammate retires a matching partymate.
 - Match `position` slots 1–5 are blue Top/Jungle/Mid/ADC/Support; 6–10 are red.
   `/match`, `/timeline`, `/laning` select from the requested match. `/mastery`,
   `/matchhistory`, `/matchlist`, `/champstats`, `/counterstats`, and the primary
@@ -186,7 +344,46 @@ in commits. The protected hard rules remain in the root instruction files.
 
 ## Commands and champion statistics
 
+- All command responses and announcement embeds show concise results, filters, dates,
+  and page numbers. Methodology, retention, and usage explanations live in
+  `/commands` help and command docs, rather than result descriptions or footers.
+  Error, empty, scan-progress, and partial-history statuses stay brief. Command
+  directories omit introductory prose; explicit per-command help retains usage
+  details. Source links use embed titles. Ratings omit methodology notes and show
+  a brief timeline-unavailable footer when confidence is Limited.
+
 ### Lookups, builds, and discovery
+
+- `/emoji` (no options) explains player markers, previous-game cues, streaks, pentakills,
+  promotions/demotions, display and chart icons, Arena colors, and custom champion
+  aliases. It distinguishes inferred groups from confirmed parties and resolves
+  custom icons from the bot cache with readable aliases as fallbacks. Available
+  in the public help and League command directories; no Riot requests or controls.
+
+- `/bestplayer` ranks every tracked League account–champion pair over the last 180 days by win rate, then games
+  played, with optional `min_games` (positive integer, default 10). The threshold
+  is inclusive: `min_games:20` includes champions with at least 20 valid games. Optional `queue` defaults to `All Games`; `Ranked` combines Solo/Duo and
+  Flex, and named queue choices select exact queue IDs (including Arena variants
+  under their queue label). Minimum games and win rates use only the selected
+  queue scope, combining roles. Each invocation paginates every tracked account's
+  Riot Match-V5 history in 100-ID pages within a fixed rolling 180-day window,
+  without a game-count cap,
+  merging cached payloads and fetching missing details through RiotClient.
+  Duplicate identities and shared matches are scanned once; a fixed end time
+  keeps pagination stable. Both cached and fetched payloads are filtered by match
+  start time (gameStartTimestamp, falling back to gameCreation); the boundaries
+  are inclusive, and undated matches are excluded. Cached results survive API failures, with incomplete
+  accounts and unavailable matches disclosed on every page. Riot-available history
+  is not guaranteed lifetime history; the shared cache still prunes at 180 days,
+  and older matches do not contribute. One roster scan runs at
+  a time. Acknowledged scan progress and final results edit a normal channel
+  message so long scans survive interaction webhook expiry. Duplicate matches, remakes, missing outcomes, and
+  unavailable results are excluded; MonkeyKing is grouped as Wukong. Tracked
+  accounts are deduplicated by PUUID; linked teammates and inferred partymates
+  are not included unless tracked. Ten rows per page show player, champion,
+  win rate, W/L, and games in bounded inline columns. Plain `#1` rank labels
+  avoid Discord Markdown numbered-list spacing. The command acknowledges
+  before cache work, and anyone can navigate the shared paginator.
 
 - `/profile` shows level, Solo/Duo and Flex ranks/records, and top masteries.
   Commands also cover PUUID, mastery, timelines, rotation, status, match lists,
@@ -194,18 +391,24 @@ in commits. The protected hard rules remain in the root instruction files.
   `opgg_champion_url` with `hl=en_US` to stay in English.
 - `/patchnotes` reads the five newest dated entries in `PATCH_NOTES.md` on each
   invocation. The maintained file records user-facing bot changes as they are
-  made, including before commit. The command defers before reading and reports
-  missing or empty notes gracefully.
+  made, including before commit. Owner-only command additions and updates are
+  excluded from patch notes. The command defers before reading and reports
+  missing or empty notes gracefully. Full entries are shown without a character
+  cutoff, separated by blank lines. Long output splits into numbered embeds
+  at entry/word boundaries, each with at most 4,000 description characters.
 - `/matchhistory` filters by champion and mode (Normal Draft, Ranked Flex,
   Ranked Solo/Duo, Arena, ARAM), shows up to ten matching results, and totals W/L.
-  `/duo` uses the same mode autocomplete and team-aware cached results.
+  `/duo` uses the same mode autocomplete and team-aware cached results. Its
+  record and empty-result embeds label the selected game mode, or `All Games`
+  when no filter is supplied.
 - `/championpool` scans the latest 100 Match-V5 IDs, reading cached payloads
   first, then fetching missing matches. It groups non-remake standard
   Summoner's Rift games longer than 15 minutes by recorded role and champion,
   with optional All SR, Ranked Solo/Duo, or Ranked Flex scope. Each role shows
   up to five champions ordered by sample size, with emoji-backed champion names,
   record, and win rate in aligned role rows without a footer. Missing emoji
-  leave the champion name visible. The player title links to the resolved
+  leave the champion name visible. Riot’s MonkeyKing is displayed and grouped as
+  Wukong, with icons accepted under either name. The player title links to the resolved
   account's OP.GG profile. Unavailable
   match details and the eligible sample size are disclosed in the embed.
 - `/champ` uses live OP.GG tier, win/pick/ban rates, patch, skill order, grouped
@@ -229,12 +432,13 @@ in commits. The protected hard rules remain in the root instruction files.
   derive directories from the registered tree, partitioning non-owner commands by
   TFT prefix. They group known commands by purpose, place newly registered names
   under Other, and split entries at command boundaries before embed field limits.
-  `/leaguecommands` omits `/meetup` and `/flake` from display while leaving both
-  public commands registered and available directly.
+  `/leaguecommands` omits `/flake` from display while leaving the
+  public command registered and available directly.
 - Owner-only `/ownercommands` introspects `@commands.is_owner()` checks and
-  lists each command once across guild-specific registrations. Owner
-  self-tests and `/msg` (send as the bot to a chosen channel, defaulting to the
-  invoking channel) are excluded from public directories. Shared behavior includes
+  lists each command once across guild-specific registrations. Owner self-tests,
+  `/msg` (send as the bot), and `/purge number:<1-1000>` are excluded from public
+  directories. `/purge` immediately defers ephemerally, scans newest-first, and
+  deletes only messages authored by the bot in the invoking channel. Shared behavior includes
   pagination, mention-safe responses, deferred slow work, ephemeral permission
   errors, and bot-mention latency replies. Anyone who can see a command result
   can use its display and page controls, including the shared paginator.
@@ -248,8 +452,103 @@ in commits. The protected hard rules remain in the root instruction files.
   directly under a file-specific lock, so Riot polling and unrelated store writes
   cannot starve them through shared executors or locks.
 
+### Party records and daily recaps
+
+- Public `/party [server] [username] [game_mode] [size]` defaults through the
+  shared linked-account resolver. It groups completed cached games by exact
+  three-, four-, or five-player known roster and queue; known players are tracked
+  accounts, linked teammates, saved partymates, and the selected player. Larger
+  groups never also count as smaller subsets. Each paginated report shows W/L,
+  win rate, games, each player's most-played role, and the most-used champion
+  lineup. Current registries define membership; shared teams do not prove a
+  premade party. Cache-only coverage (normally 180 days) is documented in command help. Remakes,
+  Arena, unknown queues, incomplete teams, and unavailable results are excluded.
+  The command acknowledges before lookup and database work. Existing shared
+  pagination permits any reader to navigate; field values remain below 1,024.
+- Automatic completed-match publishing journals successful posts by channel and
+  League/TFT match ID in private `data/daily_summary.json`. Recap identities resolve
+  from registered accounts and linked League teammates, including ARAM: Mayhem
+  payloads that omit names; display only summoner names without Riot tags, retaining
+  the TFT suffix. Accounts still aggregate by PUUID, including namesakes.
+  Older nameless journal events recover names by PUUID
+  when rendered. Manual `/match` and
+  `/livegame` invocations do not enter recap totals. A background poll every
+  minute posts a daily recap at the first check after **4 a.m. America/Los_Angeles**,
+  covering the preceding **4 a.m.–4 a.m. gaming day** using posting timestamps.
+  DST boundaries preserve local 4 a.m. times (23/25-hour days where applicable).
+  The fallback announcement channel and current `/setchannel` routes receive
+  separate channel-specific recaps, including an empty-day notice. League W/L
+  and TFT top-four/bottom-four rows are separate; unavailable results never count
+  as wins/losses or LP. LP totals include only recorded attributable changes,
+  combined across ranked queues. Player tables use three inline columns, Player (Games), W/L, and LP, on
+  eight-row pages so LP stays beside each record. Games includes unavailable results; W/L
+  reports known outcomes (top-four/bottom-four for TFT) without displaying
+  unavailable-game counts; missing W/L and LP values are blank, including saved
+  recap replay and restored page buttons. Invisible placeholders preserve empty
+  LP rows in Discord. Game counts sit beside player names, such as `BlyTea (8)`. W/L and LP
+  use their own native inline columns without separator dots, so values stay
+  under the correct headers. LP uses signed totals. Recaps omit the collection explanation, date-range and
+  completed-announcement count header; the title still identifies the gaming day.
+- Collection starts when this feature or a destination is enabled, without
+  importing old announcements. Each automatic recap uses one message; extra
+  pages use First/Prev/Next/Last buttons that anyone can use. Buttons acknowledge
+  before editing or saving state, and pages and selection restore after restart.
+  Single-page recaps omit controls. Per-channel/day delivery receipts survive
+  restarts, and failed sends retry on later polls.
+  Up to 14 closed days catch up after downtime. Events and receipt history are
+  retained for 14 days. A process crash between Discord accepting a page and
+  saving its receipt can cause that message to repeat; normal restart/retry paths
+  skip saved deliveries. Removed routes receive no further recaps.
+
+- Public `/dailyrecap` replays the latest fully published automatic recap from
+  the current channel, falling back to this server's announcement route. The
+  legacy fallback channel is used only if it belongs to the invoking server;
+  other servers' recaps are never used. The command defers before state reads,
+  has no options, and explains when no recap has posted yet. Embed pages
+  are saved when all automatic recap pages succeed, independently of the
+  14-day event/receipt retention, and survive restarts and pruning. Partial newer
+  recaps leave the last complete snapshot available. Existing shared pagination
+  lets any reader navigate the replay without recomputing the statistics. Legacy
+  saved date-range/count headers and collection explanations are removed on replay;
+  legacy three- and four-column records are upgraded to the compact layout with
+  games beside names, separate W/L and LP columns, and no unavailable-game counts.
+
+### Synergy records
+
+- Public `/synergy [server] [username] [teammate] [game_mode] [breakdown] [min_games] [size]`
+  defaults to the invoking user's linked account via the shared resolver. Known
+  group members come from current tracked, linked, and partymate registries plus
+  the selected player. An explicit League/Discord teammate may be outside those
+  registries and filters whole groups containing that identity.
+- Reports exact known same-team groups of two through five players. `size:2-5`
+  selects an exact total including the selected player. Larger groups never count
+  as smaller subsets. Champions (default) groups complete champion lineups; Roles
+  groups complete recognized role combinations. Records remain separate by exact
+  roster, lineup, and queue; each distinct game counts once. Selected player is
+  first, followed by companions in stable identity order. Wukong is normalized
+  from MonkeyKing. Missing picks exclude the whole lineup for that breakdown;
+  roles are never guessed for ARAM.
+- Defaults to at least three games per lineup, configurable from 1 to 1,000;
+  sorts by observed win rate, then games. One lineup per page shows group size,
+  queue, W-L, sample count, and win rate above separate aligned Player and
+  Champion/Role columns. Values remain below 1,024 characters even for five players.
+  Any reader can navigate using the shared paginator. Empty and single-page
+  follow-up responses omit the view keyword: Pycord rejects an explicit `view=None`.
+- Uses retained player-scoped completed-match cache (normally 180 days), without
+  a history scan. Excludes remakes, unavailable results, bots, co-op AI, Arena,
+  unknown/custom queues, incomplete or duplicate team rosters, and inconsistent
+  outcomes. Observed records do not establish causal synergy or premade membership.
+  Acknowledges before player resolution and database work.
+
 ### Champion and counter reports
 
+- `/championpool` and `/champstats` share one scan start per 60 seconds per
+  invoking Discord user, across guilds, accounts, and options. A running scan
+  blocks another call to either command even after the cooldown elapses.
+  Admission is reserved before lookup or other slow work; rejections respond
+  ephemerally without scanning. Completion or failure releases the active slot
+  while retaining the start cooldown. This process-local guard prevents users
+  from stacking expensive history scans; a bot restart resets it.
 - `/champstats` posts a scan status message before loading all available Riot
   history and required timeline-backed data. It edits that channel message
   with the complete report after the scan, even if the interaction token has
@@ -358,41 +657,6 @@ in commits. The protected hard rules remain in the root instruction files.
   fetches timelines on demand, shows name/score/K-D-A columns, and retains the
   selected chart and both dropdowns even when the timeline fetch fails.
 
-## Meetup planning
-
-- `/meetup propose|confirm|list|cancel` and explicit IDs are scoped to the invoking
-  server. `/meetup list` paginates open events in five-row aligned columns. Storage
-  is separate `data/meetups.sqlite` (schema 1: `meetups`, `meetup_options`,
-  `meetup_votes`, `meetup_answers`) so pruning the match cache cannot delete plans.
-- `timeparse.py` converts comma-separated natural-language times to UTC epochs
-  using an IANA zone, rejects explicit past times, and rolls bare times forward.
-  Accepted forms include `fri 7pm`, `tomorrow 18:30`, `9/5 7:30pm`, `sept 6 8pm`.
-- Activities and times are independent multi-select polls, avoiding a cross-product
-  that could exceed Discord's 25-option limit. Each user/axis/option vote is stored;
-  a new answer replaces that axis, and empty selection counts as an answer.
-  Organizer lock-in previews axis leaders in an ephemeral picker, acknowledges
-  before storage, and atomically locks only a still-polling meetup. Stale pickers
-  cannot reopen closed plans or overwrite a lock. Headcount is the overlap of
-  members who selected both winning options.
-- `render.py` builds every state from stored meetup state, uses inline label/vote/
-  voter columns with field limits, and displays `<t:epoch:F>` / `<t:epoch:R>` for
-  viewer-local time. Persistent views store only `{"meetup_id": …}` and reload
-  current votes. `command_views.py` restores `meetup` and `meetup_confirm` controls.
-- `/meetup confirm` previews exactly who will be pinged, requiring a second click
-  to send. Default recipients are expected but unanswered members; other scopes
-  include everyone expected or everyone who voted. A new thread message explicitly
-  enables `AllowedMentions(users=True)` because edits do not notify members.
-  Replies update the same attendance store as the original poll, and repeated
-  default confirmations target only members still unanswered.
-- Proposals attach and pin an optional discussion thread while keeping the poll
-  embed in the parent channel so thread archival cannot prevent embed edits.
-  Threads use seven-day auto-archive; commands inside threads skip nested thread
-  creation. Missing Create Public Threads / Manage Messages permissions degrade
-  to a threadless/unpinned plan. The ten-minute `poll_and_close_meetups` loop closes
-  plans six hours after their start or unlocked polls after 30 days, replaces the
-  embed with a static summary, removes controls, unpins, and archives/locks the
-  discussion thread without deleting it.
-
 ## Runtime and storage
 
 - `RiotClient` centralizes platform/regional routing, bounded retries, per-key
@@ -401,6 +665,9 @@ in commits. The protected hard rules remain in the root instruction files.
   League/TFT keys have independent budgets; identical key values share one budget.
 - Data Dragon provides champion metadata, aliases, emoji rendering, profile icons,
   map images, patch-aware caches, and internal-ID-to-display-name resolution.
+  Shared champion-emoji lookup uses original named champion icons across commands
+  and announcements, including Ryze, Yone, Aatrox, Viego, and Kayn; unavailable
+  emoji fall back to plain text. `/emoji` documents this behavior.
 - Environment-first configuration falls back to JSON, validates numeric/boolean
   settings, and supports IANA timezones, polling intervals, cache controls, and
   clean startup/shutdown. `LOG_LEVEL` / `log_level` defaults to INFO for routine
@@ -436,8 +703,8 @@ in commits. The protected hard rules remain in the root instruction files.
   the backup API for a transactionally consistent snapshot.
   Atomic JSON replacement prevents partial writes; independent League and TFT
   transaction locks serialize full poller read-modify-write cycles, including
-  registry changes, so overlapping workers cannot commit stale snapshots. Match,
-  meetup, and persistent-view records use versioned SQLite storage.
+  registry changes, so overlapping workers cannot commit stale snapshots. Match
+  and persistent-view records use versioned SQLite storage.
 - Offline-capable `unittest` coverage includes domain logic, registration and option
   types/order, pollers, routing, publishing, commands, persistence, migrations,
   rate limits, caches, chart fallbacks, and startup errors. A suite-wide socket

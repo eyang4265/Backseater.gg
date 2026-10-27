@@ -80,7 +80,8 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
     """Emoji for a champion, matched on internal id then display name.
 
     ``name`` covers callers that only have a display string (e.g. a match
-    payload's raw ``championName``) and no catalog entry.
+    payload's raw ``championName``) and no catalog entry. All champions use
+    their original named icons, with plain text when the emoji is unavailable.
     """
     index = _emoji_index()
     if not index:
@@ -97,7 +98,8 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
         candidates += [name, name.replace(" ", "").replace("'", "")]
 
     for candidate in candidates:
-        found = index.get(candidate.lower())
+        lowered = candidate.lower()
+        found = index.get(lowered)
         if found is not None:
             return found
     LOGGER.debug("No champion emoji found for candidates=%s", candidates)

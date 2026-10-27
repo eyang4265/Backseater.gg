@@ -21,17 +21,20 @@ from typing import Any, Iterable
 
 from .config import DATA_DIR, JSON_DIR, migrate_legacy_runtime_file
 from .queues import FLEX_QUEUE_ID, SOLO_QUEUE_ID
-from .ranks import RankSnapshot
+from .ranks import RankSnapshot, is_demotion, is_promotion
 
 LOGGER = logging.getLogger(__name__)
 
 DATA_PATH = DATA_DIR / "accounts.json"
 TFT_DATA_PATH = DATA_DIR / "tft_accounts.json"
 TEAMMATE_DATA_PATH = DATA_DIR / "teammates.json"
+PARTYMATE_DATA_PATH = DATA_DIR / "partymates.json"
 TRACKER_STATE_PATH = DATA_DIR / "match_tracker_state.json"
+PROCESSED_MATCH_IDS_PATH = DATA_DIR / "processed_match_ids.json"
 TFT_TRACKER_STATE_PATH = DATA_DIR / "tft_match_tracker_state.json"
 LIVE_GAME_STATE_PATH = DATA_DIR / "live_game_state.json"
 LIVE_GAME_MESSAGE_PATH = DATA_DIR / "live_game_messages.json"
+LIVE_GAME_SNAPSHOT_PATH = DATA_DIR / "live_game_snapshots.json"
 TFT_LIVE_GAME_STATE_PATH = DATA_DIR / "tft_live_game_state.json"
 GUILD_STATE_PATH = DATA_DIR / "guilds.json"
 FLAKE_RANKS_PATH = DATA_DIR / "flake_ranks.json"
@@ -52,7 +55,6 @@ _LEGACY_RUNTIME_PATHS = {
 }
 
 
-MATCH_HISTORY_LIMIT = 100
 RANK_HISTORY_LIMIT = 500
 EMBED_BUTTON_STATE_LIMIT = 500
 # How many still-open live-game lobbies we keep posted-message records for. A
@@ -226,8 +228,8 @@ def remember_embed_button_state(
         write_json(EMBED_BUTTON_STATE_PATH, states, indent=2)
 
 
-def dedupe_tail(ids: Iterable[str], limit: int = MATCH_HISTORY_LIMIT) -> list[str]:
-    """Keep the last ``limit`` ids, de-duplicated, preserving order.
+def dedupe_tail(ids: Iterable[str], limit: int | None = None) -> list[str]:
+    """De-duplicate ids in order, optionally keeping only the last ``limit``.
 
     The previous implementation sliced a ``set``, whose iteration order is
     unrelated to recency — so trimming could discard the *newest* ids and let
@@ -239,7 +241,7 @@ def dedupe_tail(ids: Iterable[str], limit: int = MATCH_HISTORY_LIMIT) -> list[st
         if match_id not in seen:
             seen.add(match_id)
             ordered.append(match_id)
-    return ordered[-limit:]
+    return ordered[-limit:] if limit is not None else ordered
 
 
 @dataclass(frozen=True)
@@ -272,14 +274,16 @@ def load_accounts() -> dict[str, Account]:
 
 
 def save_accounts(accounts: dict[str, Account]) -> None:
-    """Save accounts."""
-    write_json(
-        DATA_PATH,
-        {discord_id: account.to_json() for discord_id, account in accounts.items()},
-        indent=4,
-    )
-    LOGGER.info("Saved %d tracked accounts", len(accounts))
-    _tracked_puuid_cache.invalidate()
+    """Save tracked accounts and retire any matching inferred partymates."""
+    with _league_state_lock, _write_lock:
+        write_json(
+            DATA_PATH,
+            {discord_id: account.to_json() for discord_id, account in accounts.items()},
+            indent=4,
+        )
+        LOGGER.info("Saved %d tracked accounts", len(accounts))
+        _tracked_puuid_cache.invalidate()
+        _prune_partymates()
 
 
 def load_teammates() -> dict[str, Account]:
@@ -310,21 +314,23 @@ def load_teammates() -> dict[str, Account]:
 
 
 def save_teammates(teammates: dict[str, Account]) -> None:
-    """Atomically persist the ``/teammate`` PUUID registry."""
-    write_json(
-        TEAMMATE_DATA_PATH,
-        {
-            account.puuid: {
-                "server": account.server,
-                "riotId": account.riot_id,
-                **({"discordId": account.discord_id} if account.discord_id else {}),
-            }
-            for account in teammates.values()
-        },
-        indent=4,
-    )
-    LOGGER.info("Saved %d teammate PUUIDs", len(teammates))
-    _teammate_puuid_cache.invalidate()
+    """Persist teammates and retire matching inferred partymates atomically."""
+    with _league_state_lock, _write_lock:
+        write_json(
+            TEAMMATE_DATA_PATH,
+            {
+                account.puuid: {
+                    "server": account.server,
+                    "riotId": account.riot_id,
+                    **({"discordId": account.discord_id} if account.discord_id else {}),
+                }
+                for account in teammates.values()
+            },
+            indent=4,
+        )
+        LOGGER.info("Saved %d teammate PUUIDs", len(teammates))
+        _teammate_puuid_cache.invalidate()
+        _prune_partymates()
 
 
 def update_teammates(
@@ -336,6 +342,104 @@ def update_teammates(
         mutate(teammates)
         save_teammates(teammates)
         return teammates
+
+
+def _load_partymate_registry() -> dict[str, Account]:
+    """Read raw inferred identities, including any legacy registry overlaps.
+
+    The teammate-compatible identity format retains server and Riot ID, with
+    an optional Discord ID. Membership is historical inferred evidence only;
+    it never confirms a current party or initiates independent account polling.
+    """
+    raw = read_json(PARTYMATE_DATA_PATH, {})
+    partymates: dict[str, Account] = {}
+    for puuid, entry in raw.items() if isinstance(raw, dict) else ():
+        if not isinstance(entry, dict) or not puuid:
+            LOGGER.warning("Skipping malformed partymates.json entry for %s", puuid)
+            continue
+        discord_id = entry.get("discordId")
+        partymates[str(puuid)] = Account(
+            discord_id=str(discord_id) if discord_id else "",
+            puuid=str(puuid),
+            server=entry.get("server") or "NA1",
+            riot_id=entry.get("riotId") or "Unknown partymate",
+        )
+    return partymates
+
+
+def _partymate_exclusions() -> set[str]:
+    """PUUIDs belonging to explicitly tracked or teammate identities."""
+    return {
+        account.puuid
+        for account in (
+            *load_accounts().values(), *load_tft_accounts().values(),
+            *load_teammates().values(),
+        )
+    }
+
+
+def load_partymates() -> dict[str, Account]:
+    """Return inferred identities excluding tracked accounts and teammates."""
+    with _league_state_lock, _write_lock:
+        excluded = _partymate_exclusions()
+        return {p: a for p, a in _load_partymate_registry().items() if p not in excluded}
+
+
+def _prune_partymates() -> None:
+    """Retire stored overlaps after account registration without blocking it."""
+    try:
+        raw = _load_partymate_registry()
+        excluded = _partymate_exclusions()
+        if excluded.intersection(raw):
+            save_partymates(raw)
+    except OSError:
+        LOGGER.warning("Could not prune registered identities from partymates", exc_info=True)
+
+
+def save_partymates(partymates: dict[str, Account]) -> None:
+    """Persist inferred identities atomically, excluding tracked/teammate PUUIDs."""
+    with _league_state_lock, _write_lock:
+        excluded = _partymate_exclusions()
+        partymates = {a.puuid: a for a in partymates.values() if a.puuid not in excluded}
+        write_json(
+            PARTYMATE_DATA_PATH,
+            {
+                account.puuid: {
+                    "server": account.server,
+                    "riotId": account.riot_id,
+                    **({"discordId": account.discord_id} if account.discord_id else {}),
+                }
+                for account in partymates.values()
+            },
+            indent=4,
+        )
+        LOGGER.info("Saved %d partymate PUUIDs", len(partymates))
+
+
+def remember_partymates(accounts: Iterable[Account]) -> dict[str, Account]:
+    """Merge detected identities without losing records or rewriting unchanged data.
+
+    Preserve known Discord IDs and Riot IDs when a later lobby lacks them.
+    Tracked/teammate identities are excluded, including legacy overlaps.
+    Concurrent detections and registrations share the League state lock.
+    """
+    with _league_state_lock, _write_lock:
+        previous = _load_partymate_registry()
+        excluded = _partymate_exclusions()
+        partymates = {p: a for p, a in previous.items() if p not in excluded}
+        for account in accounts:
+            if not account.puuid or not account.server or account.puuid in excluded:
+                continue
+            existing = partymates.get(account.puuid)
+            partymates[account.puuid] = Account(
+                discord_id=account.discord_id or (existing.discord_id if existing else ""),
+                puuid=account.puuid,
+                server=account.server,
+                riot_id=account.riot_id or (existing.riot_id if existing else "Unknown partymate"),
+            )
+        if partymates != previous:
+            save_partymates(partymates)
+        return partymates
 
 
 def load_tft_accounts() -> dict[str, Account]:
@@ -486,7 +590,7 @@ def server_for_puuid(puuid: str) -> str | None:
 
 @dataclass
 class PlayerState:
-    """Per-player poller state: which matches were seen, and last known ranks."""
+    """Per-player ranks plus legacy match ids retained only for migration."""
 
     matches: list[str] = field(default_factory=list)
     ranks: dict[int, RankSnapshot | None] = field(default_factory=dict)
@@ -529,7 +633,7 @@ class PlayerState:
         return payload
 
     def remember(self, match_ids: Iterable[str]) -> None:
-        """Handle remember."""
+        """Extend the legacy per-player list while old state is being migrated."""
         self.matches = dedupe_tail([*self.matches, *match_ids])
 
     def record_rank(
@@ -542,7 +646,7 @@ class PlayerState:
         attributable: bool = True,
         timestamp: int | None = None,
     ) -> bool:
-        """Store a rank point, using null delta for baselines and resyncs."""
+        """Store attributable rank points and rank-movement evidence for match summaries."""
         source_id = match_id
         if source_id and any(
             entry.get("s", entry.get("m")) == source_id
@@ -570,6 +674,8 @@ class PlayerState:
             "m": match_id if attributable else None,
             "s": source_id,
             "w": won if attributable else None,
+            "promotion": bool(attributable and not reset and is_promotion(previous, snapshot)),
+            "demotion": bool(attributable and not reset and is_demotion(previous, snapshot)),
         }
         self.history.setdefault(queue_id, []).append(entry)
         self.history[queue_id] = self.history[queue_id][-RANK_HISTORY_LIMIT:]
@@ -599,6 +705,34 @@ def save_tracker_state(state: dict[str, PlayerState]) -> None:
     )
 
 
+def load_processed_match_ids(
+    tracker_state: dict[str, PlayerState] | None = None,
+) -> set[str]:
+    """Load the permanent global League match ledger, including legacy state.
+
+    Older releases stored processed ids on every player. Until those legacy
+    lists are cleared after a successful ledger write, unioning them here makes
+    the migration crash-safe and prevents an already announced match replay.
+    """
+    raw = read_json(PROCESSED_MATCH_IDS_PATH, [])
+    processed = {
+        match_id for match_id in raw if isinstance(match_id, str)
+    } if isinstance(raw, list) else set()
+    if tracker_state is not None:
+        for player_state in tracker_state.values():
+            processed.update(player_state.matches)
+    return processed
+
+
+def remember_processed_match_ids(match_ids: Iterable[str]) -> set[str]:
+    """Permanently add League match ids to the single global ledger."""
+    with _write_lock:
+        processed = load_processed_match_ids()
+        processed.update(str(match_id) for match_id in match_ids if match_id)
+        write_json(PROCESSED_MATCH_IDS_PATH, sorted(processed))
+    return processed
+
+
 @dataclass
 class TftPlayerState:
     """Per-TFT-account match history, first-poll migration, and last TFT rank.
@@ -618,7 +752,7 @@ class TftPlayerState:
         if not isinstance(raw, dict):
             return cls()
         return cls(
-            matches=dedupe_tail(raw.get("matches") or []),
+            matches=dedupe_tail(raw.get("matches") or [], limit=100),
             initialized=bool(raw.get("initialized", False)),
             rank=RankSnapshot.from_state(raw.get("rank")),
         )
@@ -633,7 +767,7 @@ class TftPlayerState:
 
     def remember(self, match_ids: Iterable[str]) -> None:
         """Remember completed TFT match ids."""
-        self.matches = dedupe_tail([*self.matches, *match_ids])
+        self.matches = dedupe_tail([*self.matches, *match_ids], limit=100)
         self.initialized = True
 
 
@@ -701,6 +835,51 @@ def load_live_game_messages() -> dict[str, list[list[int]]]:
 def save_live_game_messages(records: dict[str, list[list[int]]]) -> None:
     """Atomically persist the posted live-game announcement message records."""
     write_json(LIVE_GAME_MESSAGE_PATH, records)
+
+
+def load_live_game_snapshots() -> dict[str, dict[str, Any]]:
+    """Live-game key -> shared announcement payload captured when it was posted."""
+    raw = read_json(LIVE_GAME_SNAPSHOT_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): payload
+        for key, payload in raw.items()
+        if isinstance(payload, dict)
+        and isinstance(payload.get("game"), dict)
+        and isinstance(payload.get("highlight_puuids"), list)
+    }
+
+
+def remember_live_game_snapshot(game_key: str, payload: dict[str, Any]) -> None:
+    """Persist the live payload needed if Match-V5 later denies the result."""
+    if not isinstance(payload.get("game"), dict):
+        return
+    with _write_lock:
+        snapshots = load_live_game_snapshots()
+        snapshots.pop(game_key, None)
+        snapshots[game_key] = payload
+        if len(snapshots) > LIVE_GAME_MESSAGE_LIMIT:
+            for stale in list(snapshots)[: len(snapshots) - LIVE_GAME_MESSAGE_LIMIT]:
+                del snapshots[stale]
+        write_json(LIVE_GAME_SNAPSHOT_PATH, snapshots)
+
+
+def pop_live_game_snapshots(game_keys: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Remove and return stored live announcement payloads for ``game_keys``."""
+    wanted = {str(key) for key in game_keys}
+    if not wanted:
+        return {}
+    with _write_lock:
+        snapshots = load_live_game_snapshots()
+        popped = {
+            key: snapshots.pop(key)
+            for key in wanted
+            if key in snapshots
+        }
+        if popped:
+            write_json(LIVE_GAME_SNAPSHOT_PATH, snapshots)
+        return popped
 
 
 def remember_live_game_message(

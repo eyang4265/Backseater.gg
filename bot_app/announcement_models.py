@@ -15,13 +15,14 @@ from .ranks import RankSnapshot
 
 @dataclass(frozen=True)
 class TrackedPlayer:
-    """A player an announcement should call out by name."""
+    """A featured player, with an attributable previous rank for rank-change cues."""
 
     puuid: str
     riot_id: str
     server: str | None = None
     lp_change: str | None = None
     rank: RankSnapshot | None = None
+    previous_rank: RankSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class MatchAnnouncement:
     highlight_puuids: set[str]
     game_type: str = "lol"
     lp_changes: dict[str, str] = field(default_factory=dict)
+    result_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ def match_announcement_payload(announcement: MatchAnnouncement) -> dict[str, Any
         "highlight_puuids": sorted(announcement.highlight_puuids),
         "game_type": announcement.game_type,
         "lp_changes": dict(announcement.lp_changes),
+        "result_unavailable": announcement.result_unavailable,
     }
 
 
@@ -79,6 +82,7 @@ def match_announcement_from_payload(payload: dict[str, Any]) -> MatchAnnouncemen
         highlight_puuids=set(payload.get("highlight_puuids", [])),
         game_type=str(payload.get("game_type", "lol")),
         lp_changes=dict(payload.get("lp_changes", {}) or {}),
+        result_unavailable=bool(payload.get("result_unavailable", False)),
     )
 
 

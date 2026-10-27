@@ -29,12 +29,11 @@ def trends_embed(
     game_lengths: tuple[int, ...],
     trends: tuple[ChampionTrend, ...],
 ) -> discord.Embed:
-    """Render ten game-length win-rate leaders as aligned Discord columns."""
+    """Render ten win-rate leaders as concise columns with the source in the title link."""
     url = opgg_trends_url(role)
     label = game_length_label(game_length, game_lengths)
     embed = make_embed(
-        f"Scanned every champion in OP.GG's {role.title()} table. "
-        f"[View role list on OP.GG]({url})",
+        "",
         title=f"OP.GG Game-Time Trends — {role.title()} · {label}",
     )
     embed.url = url

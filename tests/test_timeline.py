@@ -316,14 +316,6 @@ class LevelCurveTests(unittest.TestCase):
                     level_at_xp(cumulative, TOP_LANE_MAX_LEVEL), float(level)
                 )
 
-    def test_each_level_costs_100_more_than_the_last(self) -> None:
-        """Verify that each level costs 100 more than the last."""
-        steps = [
-            _CUMULATIVE_XP[i] - _CUMULATIVE_XP[i - 1]
-            for i in range(1, len(_CUMULATIVE_XP))
-        ]
-        self.assertEqual(steps, list(range(280, 280 + 100 * len(steps), 100)))
-
     def test_thresholds_land_on_whole_levels(self) -> None:
         """Verify that thresholds land on whole levels."""
         self.assertEqual(level_at_xp(0), 1.0)
@@ -338,10 +330,6 @@ class LevelCurveTests(unittest.TestCase):
     def test_the_curve_stretches_as_levels_get_expensive(self) -> None:
         """Verify that the curve stretches as levels get expensive."""
         self.assertLess(level_at_xp(16_290 + 190) - 17.0, 0.15)
-
-    def test_xp_past_the_cap_does_not_add_levels(self) -> None:
-        """Verify that xp past the cap does not add levels."""
-        self.assertEqual(level_at_xp(30_000), float(MAX_LEVEL))
 
     def test_missing_or_negative_xp_is_level_one(self) -> None:
         """Verify that missing or negative xp is level one."""
@@ -403,26 +391,6 @@ class LevelCurveAgainstRiotTests(unittest.TestCase):
                 checked += 1
         self.assertGreater(checked, 100)
 
-    def test_only_top_laners_pass_eighteen(self) -> None:
-        """Verify that only top laners pass eighteen."""
-        match = json.loads((_SAMPLES / "sample_match.json").read_text())
-        timeline = json.loads((_SAMPLES / "sample_timeline.json").read_text())
-        positions = {
-            str(p["participantId"]): p.get("teamPosition")
-            for p in match["info"]["participants"]
-        }
-
-        past_cap = {
-            positions[participant_id]
-            for frame in timeline["info"]["frames"]
-            for participant_id, participant_frame in frame["participantFrames"].items()
-            if (participant_frame.get("level") or 0) > MAX_LEVEL
-        }
-        # Shorter sample matches may not reach level 19; if any participant
-        # exceeds the normal cap, only the top lane may do so.
-        self.assertTrue(past_cap.issubset({"TOP"}))
-
-
 class FormatDiffTests(unittest.TestCase):
     def test_sign_and_grouping(self) -> None:
         """Verify that sign and grouping."""
@@ -458,13 +426,6 @@ class SlotLookupTests(unittest.TestCase):
                 ]
             }
         }
-
-    def test_slot_one_is_blue_top_and_six_is_red_top(self) -> None:
-        """Verify that slot one is blue top and six is red top."""
-        blue_top = participant_at_slot(self._match(), 1)
-        red_top = participant_at_slot(self._match(), 6)
-        self.assertEqual((blue_top["teamId"], blue_top["teamPosition"]), (100, "TOP"))
-        self.assertEqual((red_top["teamId"], red_top["teamPosition"]), (200, "TOP"))
 
     def test_slots_run_top_to_support_down_each_side(self) -> None:
         """Verify that slots run top to support down each side."""

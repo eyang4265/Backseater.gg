@@ -107,40 +107,32 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "game", {option.name for option in commands_by_name["match"].options}
         )
 
-    def test_game_command_directories_cover_every_public_command(self) -> None:
-        """Keep both directories synchronized with live registration metadata."""
-        bot = discord.Bot()
-        register_all(bot)
-        league = set(public_commands(bot, tft=False))
-        tft = set(public_commands(bot, tft=True))
-        public = {
-            command
-            for command in bot.application_commands
-            if not is_owner_only(command)
-        }
-        self.assertEqual(league | tft, public)
-        self.assertFalse(league & tft)
-        self.assertTrue(
-            all(not command.qualified_name.startswith("tft") for command in league)
-        )
-        self.assertTrue(
-            all(command.qualified_name.startswith("tft") for command in tft)
-        )
-
     def test_game_directories_group_commands_without_losing_new_names(self) -> None:
-        """Topic headings retain live metadata and give unknown names a home."""
+        """Partition actual registrations and retain every public directory entry."""
         bot = discord.Bot()
         register_all(bot)
         # Pending registrations are the pre-sync equivalent of the runtime tree.
         registered = SimpleNamespace(
             application_commands=list(bot.pending_application_commands)
         )
+        league = {command.qualified_name for command in public_commands(registered, tft=False)}
+        tft_commands = {command.qualified_name for command in public_commands(registered, tft=True)}
+        public = {
+            command.qualified_name for command in registered.application_commands
+            if not is_owner_only(command)
+        }
+        self.assertTrue(league)
+        self.assertTrue(tft_commands)
+        self.assertEqual(league | tft_commands, public)
+        self.assertFalse(league & tft_commands)
+        self.assertTrue(all(not name.startswith("tft") for name in league))
+        self.assertTrue(all(name.startswith("tft") for name in tft_commands))
         for tft, known_category in ((False, "Matches & Analysis"), (True, "Matches")):
             embed = build_game_command_directory(registered, tft=tft)
             self.assertIn(known_category, [field.name for field in embed.fields])
             entries = "\n".join(field.value for field in embed.fields)
             for command in public_commands(registered, tft=tft):
-                expected = 0 if not tft and command.qualified_name in {"meetup", "flake"} else 1
+                expected = 0 if not tft and command.qualified_name in {"flake"} else 1
                 self.assertEqual(entries.count(f"**`/{command.qualified_name}`** —"), expected)
             self.assertTrue(all(len(field.value) <= 1024 for field in embed.fields))
 
@@ -189,12 +181,15 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                     "an annotation; use a @discord.option decorator instead",
                 )
 
-    def test_public_boundaries_expose_their_primary_types(self) -> None:
-        """Verify that public boundaries expose their primary types."""
-        self.assertEqual(RankSnapshot.__name__, "RankSnapshot")
-        self.assertEqual(Account.__name__, "Account")
-        self.assertEqual(RiotClient.__name__, "RiotClient")
-        self.assertEqual(Target.__name__, "Target")
+    def test_public_boundaries_reexport_canonical_types(self) -> None:
+        """Compatibility modules expose the actual types used by the bot."""
+        from bot_app import ranks, riot, store
+        from bot_app.commands.shared import Target as CommandTarget
+
+        self.assertIs(RankSnapshot, ranks.RankSnapshot)
+        self.assertIs(Account, store.Account)
+        self.assertIs(RiotClient, riot.RiotClient)
+        self.assertIs(Target, CommandTarget)
 
     def test_services_do_not_import_command_modules(self) -> None:
         """Keep the reusable service layer independent of Discord handlers."""

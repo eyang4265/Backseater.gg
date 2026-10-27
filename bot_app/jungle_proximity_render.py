@@ -101,7 +101,7 @@ async def build_jungle_proximity_chart(
 async def build_jungle_proximity_embed(
     match: dict[str, Any], timeline: dict[str, Any] | None
 ) -> tuple[discord.Embed, discord.File | None]:
-    """Render both team junglers' lane-proximity scores plus a checkpoint bar chart.
+    """Render both junglers' scores and chart with only the queue in the header.
 
     The chart (see :func:`build_jungle_proximity_comparison_chart`) shows
     both teams' junglers side by side, per lane, at each 5/10/15-minute
@@ -111,7 +111,7 @@ async def build_jungle_proximity_embed(
     info = match.get("info", {})
     participants = info.get("participants", []) or []
     embed = make_embed(
-        f"Lane proximity for both junglers — {queue_name(info.get('queueId'))}",
+        queue_name(info.get("queueId")),
         title="Jungle Proximity",
         color=discord.Color.dark_green(),
     )

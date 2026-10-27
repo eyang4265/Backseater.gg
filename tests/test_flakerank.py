@@ -30,7 +30,7 @@ class FlakeRankTests(unittest.TestCase):
         self.assertEqual(rankings["11"]["20"]["tier"], "F")
 
     def test_embed_orders_tiers_with_s_as_most_flaky(self) -> None:
-        """The rendered legend and fields make the scale unambiguous."""
+        """The result omits explanatory prose and orders tiers consistently."""
         embed = build_flake_rank_embed(
             {
                 "2": {"display_name": "Bravo", "tier": "F"},
@@ -39,7 +39,7 @@ class FlakeRankTests(unittest.TestCase):
             guild_name="Friends",
         )
         self.assertEqual(embed.title, "Flake Tier List — Friends")
-        self.assertIn("S is the most flaky", embed.description)
+        self.assertFalse(embed.description)
         self.assertEqual([field.name for field in embed.fields], [
             "S Tier", "A Tier", "B Tier", "C Tier", "D Tier", "F Tier",
             "Unknown Tier",

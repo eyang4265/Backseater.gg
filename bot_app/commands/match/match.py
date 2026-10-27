@@ -10,7 +10,6 @@ from discord.ext import commands
 
 from ...announce import (
     MatchAnnouncementView,
-    TrackedPlayer,
     build_announcement_embed,
     format_match,
     remember_match_view_state,
@@ -26,6 +25,7 @@ from ..shared import (
     match_reference_index,
     target_at_match_position,
     target_for,
+    tracked_players_in_match,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -80,9 +80,13 @@ class MatchStatsCommands(commands.Cog):
             await ctx.respond(embed=make_embed(f"Could not fetch match data: {error}"))
             return
         LOGGER.debug("Formatting match %s for %s", selected, target.riot_id)
-        announcement = format_match(
+        match_players = await asyncio.to_thread(
+            tracked_players_in_match, match_data, target
+        )
+        announcement = await asyncio.to_thread(
+            format_match,
             match_data,
-            [TrackedPlayer(puuid=target.puuid, riot_id=target.riot_id, server=target.server)],
+            match_players,
             require_finished=False,
             require_ranked_queue=False,
         )

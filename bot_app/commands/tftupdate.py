@@ -31,7 +31,7 @@ class TftUpdateCommand(commands.Cog):
     )
     @commands.is_owner()
     async def tftupdate(self, ctx):
-        """Resolve all League PUUIDs and refresh every TFT registration."""
+        """Refresh TFT registrations with concise progress, busy, and result messages."""
         log_command(ctx)
         await ctx.defer(ephemeral=True)
         if self._running:
@@ -40,8 +40,7 @@ class TftUpdateCommand(commands.Cog):
             # silent for ten minutes.
             await ctx.edit(
                 embed=make_embed(
-                    "A `/tftupdate` sweep is already running. "
-                    "Wait for it to report back before starting another."
+                    "A `/tftupdate` sweep is already running."
                 )
             )
             return

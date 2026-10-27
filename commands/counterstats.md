@@ -20,3 +20,5 @@ finishes if the message is still present.
 The role and pagination controls remain usable after a bot restart; restored
 controls rebuild their inputs from the local match cache without scanning Riot.
 Anyone who can see the result can use these controls.
+
+Results use concise embeds; usage and counting details remain in this help.

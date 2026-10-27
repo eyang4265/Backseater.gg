@@ -29,9 +29,9 @@ def build_flake_rank_embed(
     page: int = 0,
     pages: int = 1,
 ) -> discord.Embed:
-    """Render assigned users from most flaky (S) through unknown."""
+    """Render tier columns from most flaky (S) through unknown without explanatory prose."""
     embed = make_embed(
-        "S is the most flaky; F is the least flaky. Unknown is unranked.",
+        "",
         title=f"Flake Tier List — {guild_name}",
     )
     for tier in FLAKE_TIERS:

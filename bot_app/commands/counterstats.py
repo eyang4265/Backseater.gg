@@ -46,7 +46,7 @@ def _counter_page_count(report: CounterStatsReport) -> int:
 
 
 def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) -> discord.Embed:
-    """Render one Discord-safe page of aligned matchup columns."""
+    """Render concise filters and one Discord-safe page of matchup columns."""
     result_label = "15m gold leads" if report.laning else "games"
     summary = (
         f"{report.queue_scope} · Player: {report.role} · Enemy: {report.enemy_role} · "
@@ -72,17 +72,13 @@ def _counter_embed(report: CounterStatsReport, player_name: str, page: int = 0) 
         embed.add_field(name="Win Rate", value="\n".join(f"{row.win_rate:.1%}" for row in rows), inline=True)
     else:
         embed.description += "\n\nNo matching enemy champions were found in the available history."
-    footer = "Each eligible game counts once against every champion on the opposing team."
-    if report.laning:
-        footer += (
-            " Wins use total gold versus the direct role opponent at 15:00; "
-            "ties and missing timelines are excluded."
-        )
+    footer = []
     if report.usage_filter:
-        footer += " Showing matchups above 1% usage."
+        footer.append("Usage >1%")
     if report.counters and _counter_page_count(report) > 1:
-        footer += f" Page {page + 1}/{_counter_page_count(report)}."
-    embed.set_footer(text=footer)
+        footer.append(f"Page {page + 1}/{_counter_page_count(report)}")
+    if footer:
+        embed.set_footer(text=" · ".join(footer))
     return embed
 
 
@@ -393,7 +389,7 @@ class CounterStatsCommands(commands.Cog):
         )
         view.add_role_buttons()
         embed = _counter_embed(report, target.riot_id, view.page)
-        embed.description += "\n\nScanning Riot match history; this message will refresh when it finishes."
+        embed.description += "\n\nScanning match history…"
         message = await ctx.respond(embed=embed, view=view)
         if message is not None:
             await remember_view_state(message, VIEW_KIND, view.state_payload())

@@ -61,7 +61,7 @@ class RiotInfoCommands(commands.Cog):
         if catalog is None:
             await ctx.respond(
                 embed=make_embed(
-                    "Could not fetch champion data from Data Dragon; try again shortly."
+                    "Champion data unavailable."
                 )
             )
             return
@@ -107,7 +107,7 @@ class RiotInfoCommands(commands.Cog):
         await ctx.respond(
             embed=make_embed(
                 "\n".join(lines)
-                or "No recent issues or events to report on this server.",
+                or "No recent server issues.",
                 title=f"Server Status: {server}",
             )
         )

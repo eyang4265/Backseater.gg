@@ -9,3 +9,5 @@ Usage: `/trends role:<top|jungle|mid|adc|support>`
 Use the game-time buttons to switch between every timestamp returned by OP.GG,
 currently **Under 25 min**, **25–30 min**, **30–35 min**, **35–40 min**, and
 **40+ min**. Champion names link to their individual OP.GG Trends pages.
+
+Results use concise embeds; usage and counting details remain in this help.

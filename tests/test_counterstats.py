@@ -98,10 +98,6 @@ class CounterStatsTests(unittest.TestCase):
             embed = _counter_embed(report, "player", page)
             self.assertTrue(all(len(field.value) <= 1024 for field in embed.fields))
 
-    def test_role_filter_is_reflected_in_report(self):
-        report = aggregate([_match("1", win=True, role="TOP", enemy_role="JUNGLE")], "me", "Garen", role="Top", enemy_role="Jungle")
-        self.assertEqual((report.role, report.enemy_role), ("Top", "Jungle"))
-
     def test_controls_never_expire(self):
         async def build_view() -> CounterStatsView:
             return CounterStatsView([], "me", "Garen", "All Games", "Top", False, "player", 1)

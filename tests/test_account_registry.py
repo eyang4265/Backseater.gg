@@ -16,6 +16,7 @@ from bot_app.store import (
     Account,
     load_accounts,
     load_live_game_state,
+    load_processed_match_ids,
     load_tracker_state,
     save_accounts,
     save_live_game_state,
@@ -46,7 +47,8 @@ class RegistryTests(unittest.TestCase):
         ):
             account = track_account("1", "Player", "NA1", "NA1")
             self.assertEqual(load_accounts()["1"], account)
-            self.assertEqual(load_tracker_state()["1"].matches, ["NA1_2", "NA1_1"])
+            self.assertEqual(load_tracker_state()["1"].matches, [])
+            self.assertEqual(load_processed_match_ids(), {"NA1_2", "NA1_1"})
             save_live_game_state({"1": "NA1:game"})
             self.assertEqual(untrack_account("1"), account)
             self.assertEqual(load_accounts(), {})

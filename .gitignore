@@ -22,6 +22,7 @@ json/live_game_messages.json
 json/live_game_state.json
 json/match_tracker_state.json
 json/teammates.json
+json/partymates.json
 json/tft_data.json
 json/tft_live_game_state.json
 json/tft_match_tracker_state.json

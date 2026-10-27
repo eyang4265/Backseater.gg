@@ -547,3 +547,59 @@ class DamageChartTests(unittest.TestCase):
             ["Senna", "Senna", "Zoe"],
             sorted(label.get_text() for label in axes.get_yticklabels()),
         )
+
+    def test_arena_bars_and_legend_use_distinct_team_cues(self) -> None:
+        """Arena charts identify placements with solid color and text."""
+        import bot_app.charts as charts
+        from bot_app.arena_teams import ARENA_TEAM_COLORS
+
+        match = self._match()
+        match["info"]["queueId"] = 1740
+        match["info"]["participants"][0]["playerSubteamId"] = 3
+        match["info"]["participants"][1]["playerSubteamId"] = 7
+        match["info"]["participants"][2]["playerSubteamId"] = 11
+        seen = []
+        real_subplots = charts.plt.subplots
+
+        def capture(*args, **kwargs):
+            figure, axes = real_subplots(*args, **kwargs)
+            seen.append(axes)
+            return figure, axes
+
+        with patch.object(charts.plt, "subplots", side_effect=capture), patch(
+            "bot_app.charts.ddragon.catalog", return_value=None
+        ):
+            self.assertIsNotNone(
+                _build_damage_chart(
+                    match,
+                    {match["info"]["participants"][0]["puuid"]},
+                )
+            )
+
+        axes = seen[0]
+        actual = {charts.matplotlib.colors.to_hex(bar.get_facecolor()) for bar in axes.patches}
+        expected = {color.lower() for color in ARENA_TEAM_COLORS[:3]}
+        self.assertTrue(expected.issubset(actual))
+        self.assertEqual(
+            ["1st place", "2nd place", "3rd place"],
+            [text.get_text() for text in axes.get_legend().get_texts()],
+        )
+        self.assertEqual(
+            {"★  Senna", "Senna", "Zoe"},
+            {label.get_text() for label in axes.get_yticklabels()},
+        )
+        self.assertTrue(
+            {"1st", "2nd", "3rd"}.issubset({text.get_text() for text in axes.texts})
+        )
+        self.assertEqual({None}, {bar.get_hatch() for bar in axes.patches[:3]})
+        self.assertEqual([0.0, 0.0, 1.8], sorted(bar.get_linewidth() for bar in axes.patches[:3]))
+
+    def test_arena_palette_matches_team_marker_colors(self) -> None:
+        """Arena charts retain distinct blue/red/green/yellow/purple/white teams."""
+        from bot_app.arena_teams import ARENA_TEAM_COLORS
+
+        self.assertEqual(
+            ARENA_TEAM_COLORS[:6],
+            ("#0072B2", "#D55E00", "#009E73", "#F0E442", "#CC79A7", "#FFFFFF"),
+        )
+        self.assertEqual(len(set(ARENA_TEAM_COLORS)), len(ARENA_TEAM_COLORS))

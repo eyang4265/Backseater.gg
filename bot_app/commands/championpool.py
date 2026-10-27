@@ -15,6 +15,7 @@ from ..render import make_embed
 from ..routing import opgg_url
 from ..services.riot_api import RiotAPIError, get_client
 from .shared import GUILD_IDS, SERVERS, log_command, not_found_embed, set_player_author, target_for
+from .history_scan_limit import limit_history_scan
 
 LOGGER = logging.getLogger(__name__)
 MATCH_LIMIT = 100
@@ -46,7 +47,7 @@ def _pool_embed(
     player_name: str, matches: list[dict], puuid: str, queue: str,
     checked: int, failures: int, profile_url: str | None = None,
 ) -> discord.Embed:
-    """Render aligned role columns and link the player title when possible."""
+    """Render role columns with display names and Wukong/MonkeyKing icon support."""
     rows = aggregate_pool(matches, puuid, queue)
     games = sum(row.games for row in rows)
     embed = make_embed(
@@ -71,7 +72,11 @@ def _pool_embed(
         embed.add_field(
             name=ROLE_NAMES[role] + suffix,
             value="\n".join(
-                emoji.prefixed(emoji.champion_emoji(None, name=row.champion), row.champion)
+                emoji.prefixed(
+                    emoji.champion_emoji(None, name=row.champion)
+                    or (emoji.champion_emoji(None, name="MonkeyKing") if row.champion == "Wukong" else None),
+                    row.champion,
+                )
                 for row in shown
             ),
             inline=True,
@@ -94,8 +99,9 @@ class ChampionPoolCommands(commands.Cog):
     @discord.option("queue", description="Summoner's Rift queue scope", choices=QUEUE_CHOICES, required=False)
     @discord.option("server", description="Player's server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
+    @limit_history_scan
     async def championpool(self, ctx, queue="All SR", server=None, username=None):
-        """Show champion usage, record, and win rate by role."""
+        """Show role records with shared cooldown and in-flight scan protection."""
         log_command(ctx, queue=queue, server=server, username=username)
         await ctx.defer()
         target = await target_for(ctx, server, username)

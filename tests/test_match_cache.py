@@ -179,7 +179,7 @@ class MatchCacheTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as db, db:
                 db.execute("PRAGMA user_version").fetchone()
                 self.assertEqual(
-                    db.execute("PRAGMA user_version").fetchone()[0], 5
+                    db.execute("PRAGMA user_version").fetchone()[0], 6
                 )
 
             cache = MatchCache(path)
@@ -243,3 +243,65 @@ class LaneMatchupStatisticsTests(unittest.TestCase):
             cache.prune_lane_statistics(["14.16"])
             self.assertEqual(cache.lane_matchup_stats("TOP"), [])
             self.assertEqual(cache.lane_ratings("TOP"), {1: 0.4, 2: -0.4})
+
+
+class PriorEncounterTests(unittest.TestCase):
+    def test_completed_relations_ignore_remakes_current_future_and_arena(self):
+        cache = MatchCache(':memory:')
+        self.addCleanup(cache.close)
+        for mid, end, remake, same_team, queue in (
+            ('ally', 1000, False, True, 420),
+            ('enemy', 2000, False, False, 440),
+            ('current', 3000, False, True, 420),
+            ('future', 4000, False, True, 420),
+            ('remake', 1000, True, True, 420),
+            ('arena', 1000, False, True, 1700),
+        ):
+            payload = _payload(end, remake=remake, same_team=same_team)
+            payload['info']['queueId'] = queue
+            payload['info']['participants'][1]['puuid'] = mid
+            cache.put('NA1_' + mid, 'NA1', payload)
+        self.assertEqual(cache.prior_encounters('a', 3000), {'enemy': {False}})
+
+    def test_latest_live_game_replaces_older_relations_and_completed_copy(self):
+        cache = MatchCache(':memory:')
+        self.addCleanup(cache.close)
+        cache.put('NA1_1', 'NA1', _payload(1000))
+        cache.remember_live_team_games('NA1_2', 2400, 1500,
+                                      {'a': {'teamId': 100}, 'c': {'teamId': 200}})
+        self.assertEqual(cache.prior_encounters('a', 3000), {'c': {False}})
+        payload = _payload(2000, same_team=False)
+        payload['info']['participants'][1]['puuid'] = 'c'
+        cache.put('NA1_2', 'NA1', payload)
+        self.assertEqual(cache.prior_encounters('a', 3000), {'c': {False}})
+        # Inspecting that same completed game cannot use its earlier live copy.
+        self.assertEqual(cache.prior_encounters('a', 1800), {'b': {True}})
+
+    def test_ineligible_previous_game_does_not_fall_back_to_older_players(self):
+        for queue, remake in ((1700, False), (420, True), (0, False)):
+            with self.subTest(queue=queue, remake=remake):
+                cache = MatchCache(':memory:')
+                try:
+                    cache.put('NA1_1', 'NA1', _payload(1000))
+                    payload = _payload(2000, remake=remake)
+                    payload['info']['queueId'] = queue
+                    cache.put('NA1_2', 'NA1', payload)
+                    self.assertEqual(cache.prior_encounters('a', 3000), {})
+                finally:
+                    cache.close()
+
+    def test_live_relations_survive_reopen_and_exclude_selected_lobby(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'cache.sqlite'
+            cache = MatchCache(path)
+            participants = {'a': {'teamId': 200}, 'b': {'teamId': 200}, 'c': {'teamId': 100}}
+            for _ in range(3):
+                cache.remember_live_team_games('NA1_1', 2400, 1000, participants)
+            self.assertEqual(cache.prior_encounters('a', 1000), {})
+            cache.close()
+            cache = MatchCache(path)
+            try:
+                self.assertEqual(cache.prior_encounters('a', 2000), {'b': {True}, 'c': {False}})
+                self.assertIsNone(cache.get('NA1_1'))
+            finally:
+                cache.close()

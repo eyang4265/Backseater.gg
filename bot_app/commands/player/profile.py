@@ -156,7 +156,7 @@ class PlayerCommands(commands.Cog):
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     async def opgg(self, ctx, server, username):
-        """Return an OP.GG profile link for a tracked or looked-up player."""
+        """Link the embed title to the selected player’s OP.GG profile."""
         log_command(ctx, server=server, username=username)
         target = await target_for(ctx, server, username)
         if target is None:
@@ -176,7 +176,6 @@ class PlayerCommands(commands.Cog):
         embed = discord.Embed(
             title=f"OP.GG — {target.riot_id}",
             url=url,
-            description=f"[Open {target.riot_id}'s OP.GG profile]({url})",
             color=discord.Color.blurple(),
         )
         set_player_author(embed, target)
@@ -255,7 +254,7 @@ class PlayerCommands(commands.Cog):
 
     @discord.slash_command(
         guild_ids=GUILD_IDS,
-        description="Show a live League lobby. Leave everything blank for your own account.",
+        description="Show a live League lobby",
     )
     @discord.option("server", description="Server", choices=SERVERS, required=False)
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)

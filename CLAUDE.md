@@ -42,7 +42,9 @@ Where the two genuinely must differ, the difference is a field on the
 announcement dataclass that the shared code reads, never a forked call path.
 If a change cannot be expressed that way, say so and stop rather than forking.
 
-Always deploy and restart the production bot after any repository change. First stop every existing production bot process, then start it with system Python 3.9.6 using `/usr/bin/python3 main.py`; never run `main.py` from `.venv`. Documentation-only changes also require a production restart.
+Deploy and restart production after code or runtime changes. Documentation-only edits (such as Markdown files) require no deployment or restart unless explicitly requested. For restarts, first stop every production bot process, then use system Python 3.9.25: `/usr/bin/python3 main.py`, never `.venv`.
+
+Never push to a remote unless the user explicitly requests it.
 
 When you add or change a public slash command, update the `/commands` command directory with its current description and usage instructions. Keep owner-only commands out of that directory.
 Keep each public slash command in its own command module named after the command (for example, `/champ` belongs in `commands/champ.py`). Move reusable logic shared by multiple commands into a separate shared module.
@@ -64,23 +66,27 @@ the task.
 
 ## Development instructions
 
-Read the relevant section of the [feature reference](docs/implemented-features.md)
-before changing a subsystem. Document current behavior and the reasons for unusual
-constraints; keep debugging history in commits. Update both root feature summaries
-and the relevant reference section when functionality changes.
+Read the relevant [feature reference](docs/implemented-features.md) before changes.
+Document behavior/constraints; keep debugging history in commits. Update both
+root summaries and the reference for behavior changes.
 
-Default to no [Bot Patch Notes](PATCH_NOTES.md) entry for routine changes. For a
-very impactful user-facing change, ask the user before editing that file and add
-an entry only after the user confirms. Keep entries
-concise and user-facing under the current date, newest first, with a local
-America/Los_Angeles timestamp for each entry. `/patchnotes` reads
-this file directly; entries describe behavior, not Git commits or internal-only work.
+Keep all command responses concise: results, filters, dates, and page numbers.
+Put command descriptions, methodology, and retention notes in `/commands` help
+and docs. Keep error, empty, progress, and partial-result statuses brief.
+
+Always update `/emoji` and its help/docs when adding, changing, or removing
+emojis, markers, aliases, or their meanings.
+
+Keep [Bot Patch Notes](PATCH_NOTES.md) for impactful public-facing changes only;
+ask before adding entries. Never include owner-only command additions or updates.
+Use the current date, newest first, with an America/Los_Angeles timestamp per
+entry. `/patchnotes` reads this file directly; describe behavior, not commits.
 
 Keep everything from this heading onward identical in `AGENTS.md` and `CLAUDE.md`.
 Each root file has a 12 KiB budget, including its protected hard rules; shorten
 editable prose or move details to the reference before raising that budget.
-`tests/test_agent_docs.py` checks synchronization, size, and local Markdown links
-(including section anchors). It never rewrites either hard-rule section.
+`tests/test_agent_docs.py` checks synchronization, size, and local Markdown links.
+It never rewrites either hard-rule section.
 
 Declare slash-command options with `@discord.option(...)` decorators. Postponed
 `discord.Option(...)` annotations can register as strings and fail at invocation.
@@ -89,7 +95,7 @@ transport, retries, and rate limits in `RiotClient`.
 
 ## Project map
 
-Paths below are relative to the repository root.
+Paths are repository-relative.
 
 | Work area | Start here |
 | --- | --- |
@@ -101,78 +107,68 @@ Paths below are relative to the repository root.
 | Riot and metadata access | [riot.py](bot_app/riot.py), [ddragon.py](bot_app/ddragon.py); service boundary in [services/](bot_app/services/) |
 | Persistence | [store.py](bot_app/store.py), [match_cache.py](bot_app/match_cache.py), [repositories/](bot_app/repositories/) |
 | Analysis | [timeline.py](bot_app/timeline.py), [rating.py](bot_app/rating.py), [rating_baselines.py](bot_app/rating_baselines.py), [lane_matchups/](bot_app/lane_matchups/) |
-| Meetups | [meetups/](bot_app/meetups/), [command](bot_app/commands/meetup/meetup.py) |
 | Regression tests | [tests/](tests/); named by subsystem |
 
 ## Verification
 
-Run from the repository root with dependencies from `requirements.txt` installed
-for system Python. These commands do not start the bot or require live credentials.
-Choose the focused tests for the behavior changed; use discovery for a full run.
-Registration and documentation checks are network-free. Some existing rendering
-tests attempt metadata/API requests and exercise fallbacks when offline.
+Run focused checks from the root with system Python and `requirements.txt`.
+No credentials needed. Registration/docs checks are network-free;
+rendering tests may attempt API requests and use offline fallbacks.
 
 ```sh
-# Documentation synchronization, size, and links (standard library only)
+# Documentation checks
 /usr/bin/python3 -m unittest tests.test_agent_docs
 
-# Slash-command registration and architecture, including option order/types
+# Registration and architecture
 /usr/bin/python3 -m unittest tests.test_architecture
 
 # Shared announcements, publishing, and rendering
 /usr/bin/python3 -m unittest tests.test_announce tests.test_publish tests.test_render
 
-# Meetup parsing, persistence, interactions, and cleanup
-/usr/bin/python3 -m unittest tests.test_meetups
-
-# Full suite, runnable offline (also includes documentation checks)
+# Full offline suite
 /usr/bin/python3 -m unittest discover -s tests -t .
 ```
 
-For public command changes, also inspect the startup log for the required sync
-message using `rg -n 'Synchronized application commands' bot.log`. A historical
-match does not prove the changed schema synced. If a fresh check needs a bot start,
-follow the hard rule requiring explicit run authorization and report any remaining
-verification gap.
+For public command changes, verify fresh startup logs contain
+`Synchronized application commands` after the required production restart.
 
 ## Deployment
 
 Treat the live Oracle VM deployment at `/opt/discord-bot` as the production bot.
-After any verified repository change, stop `discord-bot.service`, sync the repository over
+For verified code/runtime changes, stop `discord-bot.service`, sync the repository over
 SSH while excluding `.git/`, `.venv/`, secrets, `data/`, caches, and logs, then
 restart the service. It must run `/usr/bin/python3 main.py`. Verify the service is
-active and fresh logs contain `Synchronized application commands`, then push the
-same commit to GitHub. Never copy production secrets or runtime data into Git.
+active and fresh logs contain `Synchronized application commands`. Never copy
+production secrets or runtime data into Git.
 
 ## Implemented features
 
 - [League announcements and controls](docs/implemented-features.md#league-announcements-and-persistent-controls):
   shared `/match` and `/livegame` pipelines, all completed queues, rank LP tracking,
-  compact match team rows and isolated right-to-left player-name layout,
-  abbreviated Emerald rank displays,
-  rotating-mode live-id recovery, match-only Arena team colors, persistent
-  Display/Chart controls with match summaries in Items and Ratings, inventory
-  seven-slot ADC inventories, boot and Stormrazor item recovery,
-  and delayed automatic live-post cleanup.
+  RTL, 🔥/🥶 streaks except Mayhem/Clash, 🎉/📉 rank changes, 🖐️ pentakills, ⭐/👥 over prior-game 👤/😈/🔄 cues,
+  Em ranks,
+  permanent global match deduplication, purple Mayhem/Clash embeds and ~Nmin 403 notices minus two minutes, timer-free live views, all-queue teammate summaries,
+  third-live-game partymate detection, Mayhem three-lobby evidence, bold 👥 names, 😢 solo, 🫂 for two stars, 🤡 for five-stacks/Flex four-known teams, Arena team-colored charts, persistent
+  Display/Chart controls retaining summaries, seven-slot ADC inventories, boot and Stormrazor item recovery,
+  and delayed live-post cleanup.
 - [Teamfight Tactics](docs/implemented-features.md#teamfight-tactics): separate
   identities/state, completed-match announcements, rank/trait displays, filtered
   history, and startup rank baselines. TFT live polling remains disabled.
 - [Accounts and player resolution](docs/implemented-features.md#accounts-and-player-resolution):
-  combined username lookup, NA/EUW/KR platform resolution, default linked accounts,
-  match-position selection, unlinked tracking, and shared-lobby teammate LP changes.
+  username lookup, NA/EUW/KR resolution, linked-account defaults,
+  match positions, /add types, /accounts partymates, owner /updatepartymate scans, and teammate LP changes.
 - [Commands and statistics](docs/implemented-features.md#commands-and-champion-statistics):
-  profiles, mastery, histories, OP.GG/Coachless builds, linked champion-icon pool records and champion/counter/duo statistics,
-  role-based OP.GG trends, maintained bot patch notes, rank graphs,
-  topic-grouped public command directories, deduplicated owner directory, shared
-  command-result controls, a curated League command directory, resilient champion/counter history refreshes, and server flake tier lists.
+  profiles, mastery, histories, OP.GG/Coachless builds, linked pool records naming Wukong and champion/counter/duo statistics with /duo game-mode labels,
+  role-based OP.GG trends, public paged patch notes, rank graphs, /bestplayer 180-day champion rankings with queue/min-games filters,
+  /emoji legend, concise command responses, topic-grouped public command directories, deduplicated owner directory,
+  all-tracked highlights, owner message purging, a curated League directory,
+  resilient history refreshes, shared champion-report cooldowns and scan guards,
+  server flake tier lists, exact cached /party group records, /synergy 2–5-player lineups with safe follow-ups, and 4 a.m. Pacific recaps with Player (Games), W/L, and LP columns, no unavailable counts, tag-free summoner names including Mayhem teammates, blank missing values with aligned rows, persistent automatic page buttons, and /dailyrecap replay.
 - [Timeline analysis and ratings](docs/implemented-features.md#timeline-analysis-and-ratings):
   jungle proximity, three-at-a-time lane comparisons through game end, role-aware match ratings, and manually
   collected aggregate lane statistics and population baselines.
-- [Meetups](docs/implemented-features.md#meetup-planning): server-scoped activity/time
-  polls, atomic lock-in, paginated lists, confirmation previews, shared attendance,
-  persistent controls, discussion threads, and automatic closure.
 - [Runtime and storage](docs/implemented-features.md#runtime-and-storage): per-key Riot
   limits, caching, private migrated runtime data, serialized state transactions,
-  typed configuration, sync retry, single-instance startup, argument-complete logs,
+  typed configuration, original named champion icons, sync retry, single-instance startup, argument-complete logs,
   locked dependencies, pull-request-only CI, and hermetic tests including documentation drift checks.
   Runtime failures also produce sanitized, rate-limited owner DMs.

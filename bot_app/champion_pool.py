@@ -31,6 +31,7 @@ def aggregate_pool(matches: Iterable[dict], puuid: str, queue: str = "All SR") -
     """Count non-remake games by champion and role.
 
     Missing roles and nonstandard queues are excluded so lanes are comparable.
+    Riot's MonkeyKing identifier is grouped under the display name Wukong.
     """
     allowed = {
         "All SR": POOL_QUEUES,
@@ -54,6 +55,8 @@ def aggregate_pool(matches: Iterable[dict], puuid: str, queue: str = "All SR") -
             continue
         role = str(participant.get("teamPosition") or participant.get("individualPosition") or "").upper()
         champion = str(participant.get("championName") or "")
+        if champion == "MonkeyKing":
+            champion = "Wukong"
         if role not in ROLES or not champion:
             continue
         totals = records.setdefault((role, champion), [0, 0])

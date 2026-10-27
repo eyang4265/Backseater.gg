@@ -34,8 +34,16 @@ from .charts import (
 )
 from .config import get_settings
 from .jungle_proximity_render import jungle_chart_checkpoints
-from .queues import FLEX_QUEUE_ID, RANKED_QUEUE_IDS, SOLO_QUEUE_ID, lobby_queue_name, queue_name
-from .ranks import RankSnapshot, fetch_tft_rank
+from .premades import remember_game_partymates
+from .queues import (
+    FLEX_QUEUE_ID,
+    LIMITED_RESULT_QUEUE_IDS,
+    RANKED_QUEUE_IDS,
+    SOLO_QUEUE_ID,
+    lobby_queue_name,
+    queue_name,
+)
+from .ranks import RankSnapshot, fetch_tft_rank, is_demotion, is_promotion
 from .rating import PlayerRating, rate_match
 from .render import (
     add_inventory_columns,
@@ -53,14 +61,18 @@ from .render import (
 )
 from .riot import RiotAPIError, TTLCache, get_client
 from .routing import opgg_url
+from .streaks import streak_marker
 from .store import (
     load_accounts,
+    load_tracker_state,
     load_tft_accounts,
     load_embed_button_states,
     load_guild_channels,
     pop_live_game_messages,
+    pop_live_game_snapshots,
     remember_embed_button_state,
     remember_live_game_message,
+    remember_live_game_snapshot,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -113,7 +125,10 @@ async def delete_live_game_messages(bot: Any, game_keys: Sequence[str]) -> None:
     messages, channels, or permissions are swallowed — the record is dropped
     either way.
     """
-    pairs = await asyncio.to_thread(pop_live_game_messages, game_keys)
+    pairs, _snapshots = await asyncio.gather(
+        asyncio.to_thread(pop_live_game_messages, game_keys),
+        asyncio.to_thread(pop_live_game_snapshots, game_keys),
+    )
     if not pairs:
         return
     LOGGER.info("Deleting %d finished live-game announcement(s)", len(pairs))
@@ -220,6 +235,37 @@ def _result_for(participant: dict[str, Any]) -> str:
     return VICTORY if participant.get("win") else DEFEAT
 
 
+
+def _rank_change_markers(match: dict[str, Any], players: Sequence[TrackedPlayer]) -> dict[str, str]:
+    """Use attributable snapshots or stored match evidence, never today's rank."""
+    queue_id = match.get("info", {}).get("queueId")
+    if queue_id not in RANKED_QUEUE_IDS:
+        return {}
+    markers = {}
+    for player in players:
+        if is_promotion(player.previous_rank, player.rank):
+            markers[player.puuid] = " 🎉"
+        elif is_demotion(player.previous_rank, player.rank):
+            markers[player.puuid] = " 📉"
+    match_id = match.get("metadata", {}).get("matchId")
+    if not match_id:
+        return markers
+    accounts = {a.puuid: a.discord_id for a in load_accounts().values()}
+    states = load_tracker_state()
+    for player in players:
+        state = states.get(accounts.get(player.puuid)) or states.get(f"teammate:{player.puuid}")
+        if not state or player.puuid in markers:
+            continue
+        for entry in state.history.get(queue_id, []):
+            if entry.get("m") != match_id:
+                continue
+            if entry.get("promotion") is True:
+                markers[player.puuid] = " 🎉"
+            elif entry.get("demotion") is True:
+                markers[player.puuid] = " 📉"
+    return markers
+
+
 def format_match(
     match: dict[str, Any],
     players: Sequence[TrackedPlayer],
@@ -241,6 +287,16 @@ def format_match(
 
     ``outcome`` is set when every tracked player had the same result, and None
     when they were on opposing teams; callers colour the embed by it.
+    Mayhem/Clash notices with unavailable results retain stored live player/champion
+    details and label their 403-to-start elapsed time as ``(~Nmin)``.
+    Saved partymates retain bold 👥 markers in the shared team columns.
+    Repeat allies/enemies carry 👤/😈 only from the immediately previous observed game. No separate
+    premade summary section is added. Top player lines show 🔥/🥶 for three
+    consecutive verified wins/losses, including this completed result, except in
+    ARAM: Mayhem and Clash. Their stored live summaries also omit streaks. Ranked
+    promotions use 🎉 and demotions 📉 instead, using attributable snapshots
+    or saved evidence. Verified pentakills append 🖐️ beside K/D/A in every
+    queue, alongside any streak or rank-change marker.
     """
     info = match.get("info", {})
     if game_type == "tft":
@@ -259,6 +315,51 @@ def format_match(
         p.get("puuid"): p for p in participants if p.get("puuid") is not None
     }
 
+    if info.get("resultUnavailable"):
+        available_players = [
+            player for player in players if player.puuid in participants_by_puuid
+        ]
+        if not available_players:
+            LOGGER.debug("Skipping unavailable-result notice: no tracked players found")
+            return None
+        snapshot = match.get("liveGameSnapshot", {})
+        live_text = snapshot.get("text") if isinstance(snapshot, dict) else None
+        estimated_duration = info.get("estimatedGameDuration")
+        duration_suffix = (
+            f" (~{max(0, int(estimated_duration)) // 60}min)"
+            if isinstance(estimated_duration, (int, float))
+            else ""
+        )
+        if isinstance(live_text, str) and live_text:
+            _live_header, *live_details = live_text.splitlines()
+            if queue_id in LIMITED_RESULT_QUEUE_IDS:
+                # Older saved lobbies may predate this queue's streak suppression.
+                live_details = [
+                    line[:-2] if line.endswith((" 🔥", " 🥶")) else line
+                    for line in live_details
+                ]
+            summary = (
+                f"**{queue_name(queue_id)} — Game Finished**{duration_suffix}"
+            )
+            if live_details:
+                summary += "\n" + "\n".join(live_details)
+        else:
+            body = "\n".join(player.riot_id for player in available_players)
+            summary = (
+                f"**{queue_name(queue_id)} — Game Finished**{duration_suffix}\n{body}"
+            )
+        return MatchAnnouncement(
+            text=(
+                f"{summary}\n*Detailed results are unavailable from Riot.*"
+            ),
+            outcome=None,
+            match=match,
+            highlight_puuids={player.puuid for player in available_players},
+            game_type="lol",
+            result_unavailable=True,
+        )
+
+    rank_markers = _rank_change_markers(match, players)
     lines: list[tuple[str, str]] = []
     results: set[str] = set()
     for player in players:
@@ -276,6 +377,14 @@ def format_match(
         link = opgg_url(player.server, player.riot_id)
         name = f"[{player.riot_id}]({link})" if link else player.riot_id
         line = f"{emoji_lookup.prefixed(icon, name)} ({kda_text(participant)})"
+        if (participant.get("pentaKills") or 0) > 0:
+            line += " 🖐️"
+
+        line += ("" if queue_id in LIMITED_RESULT_QUEUE_IDS else
+                 rank_markers[player.puuid] if player.puuid in rank_markers and result != REMAKE else streak_marker(
+            player.puuid, player.server,
+            info.get("gameStartTimestamp") or info.get("gameCreation"), match,
+        ))
 
         if result != REMAKE:
             standing = rank_text(player.rank, with_winrate=True)
@@ -326,6 +435,7 @@ def format_match(
         body = "\n".join(f"**{result}** — {line}" for result, line in lines)
 
     LOGGER.debug("Formatted match announcement: players=%d outcome=%s", len(lines), outcome)
+    remember_game_partymates(match)
     return MatchAnnouncement(
         text=f"{header}\n{body}",
         outcome=outcome,
@@ -343,7 +453,10 @@ def format_match(
 def format_live_game(
     game: dict[str, Any], players: Sequence[TrackedPlayer], *, game_type: str = "lol"
 ) -> LiveGameAnnouncement | None:
-    """Create the tracked-player summary for a newly detected live lobby."""
+    """Summarize a lobby with prior three-game streaks in its top player lines.
+
+    Record inferred partymates; omit Mayhem/Clash timers and streak markers.
+    """
     if game_type == "tft":
         return _format_tft_live_game(game, players)
     participants = game.get("participants", []) or []
@@ -367,7 +480,11 @@ def format_live_game(
         icon = emoji_lookup.champion_emoji(champion, name=champion_name)
         link = opgg_url(player.server, player.riot_id)
         name = f"[{player.riot_id}]({link})" if link else player.riot_id
-        lines.append(f"{emoji_lookup.prefixed(icon, name)} — {champion_name}")
+        marker = (
+            "" if game.get("gameQueueConfigId") in LIMITED_RESULT_QUEUE_IDS
+            else streak_marker(player.puuid, player.server, game.get("gameStartTime"))
+        )
+        lines.append(f"{emoji_lookup.prefixed(icon, name)} — {champion_name}{marker}")
         highlighted.add(player.puuid)
 
     if not lines:
@@ -378,11 +495,16 @@ def format_live_game(
     start_ms = game.get("gameStartTime") or int(time.time() * 1000) - game_length * 1000
     ago = _relative_timestamp(start_ms)
     ago_suffix = f" • started {ago}" if ago else ""
+    duration_suffix = (
+        "" if game.get("gameQueueConfigId") in LIMITED_RESULT_QUEUE_IDS
+        else f" ({format_duration(game_length)})"
+    )
 
+    remember_game_partymates(game, live=True)
     return LiveGameAnnouncement(
         text=(
-            f"**{lobby_queue_name(game.get('gameQueueConfigId'))} — Live Game** "
-            f"({format_duration(game_length)}){ago_suffix}\n" + "\n".join(lines)
+            f"**{lobby_queue_name(game.get('gameQueueConfigId'))} — Live Game**"
+            f"{duration_suffix}{ago_suffix}\n" + "\n".join(lines)
         ),
         game=game,
         highlight_puuids=highlighted,
@@ -732,6 +854,19 @@ def _existing_chart_url(message: Any, field: str) -> str | None:
     return str(url) if url else None
 
 
+def _match_embed_color(announcement: MatchAnnouncement) -> discord.Color:
+    """Use purple for finished Mayhem/Clash games in every shared display mode."""
+    info = announcement.match.get("info", {})
+    snapshot = announcement.match.get("liveGameSnapshot", {})
+    game = snapshot.get("game", {}) if isinstance(snapshot, dict) else {}
+    queue = info.get("queueId") or game.get("gameQueueConfigId")
+    if announcement.game_type == "lol" and queue in LIMITED_RESULT_QUEUE_IDS:
+        return discord.Color.purple()
+    if announcement.result_unavailable:
+        return discord.Color.gold()
+    return outcome_color(announcement.outcome)
+
+
 async def build_announcement_embed(
     announcement: MatchAnnouncement,
     *,
@@ -751,23 +886,38 @@ async def build_announcement_embed(
     switches the player label to end-of-game champion mastery points and
     reuses values fetched by live-game views.
 
+    Finished Mayhem/Clash embeds use purple, including unavailable-result notices.
     Both the column lookups and the chart render are blocking, so each runs on
     a worker thread rather than on the event loop.
     """
     if announcement.game_type == "tft":
         embed = make_embed(
-            announcement.text, color=outcome_color(announcement.outcome)
+            announcement.text, color=_match_embed_color(announcement)
         )
         await asyncio.to_thread(
             _add_tft_match_fields, embed, announcement, mode=tft_display_mode
         )
         return embed, None
 
+    if announcement.result_unavailable:
+        embed = make_embed(announcement.text, color=_match_embed_color(announcement))
+        snapshot = announcement.match.get("liveGameSnapshot", {})
+        game = snapshot.get("game", {}) if isinstance(snapshot, dict) else {}
+        if game:
+            columns = await asyncio.to_thread(
+                build_lobby_columns,
+                game,
+                game.get("platformId") or "NA1",
+                highlight_puuids=announcement.highlight_puuids,
+            )
+            add_team_columns(embed, columns, include_rank_rows=False)
+        return embed, None
+
     LOGGER.debug(
         "Building match announcement embed: active_field=%s show_mastery=%s show_rank_names=%s",
         active_field, show_mastery, show_rank_names,
     )
-    embed = make_embed(announcement.text, color=outcome_color(announcement.outcome))
+    embed = make_embed(announcement.text, color=_match_embed_color(announcement))
     info = announcement.match.get("info", {})
 
     columns_task = asyncio.to_thread(
@@ -776,6 +926,7 @@ async def build_announcement_embed(
         server=info.get("platformId"),
         queue_id=rank_queue_id or info.get("queueId"),
         highlight_puuids=announcement.highlight_puuids,
+        game_start_ms=info.get("gameStartTimestamp"),
         show_rank_names=show_rank_names,
         show_mastery=show_mastery,
     )
@@ -824,6 +975,7 @@ async def build_live_game_embed(
         game,
         game.get("platformId") or "NA1",
         queue_id=rank_queue_id,
+        highlight_puuids=announcement.highlight_puuids,
         show_rank_names=show_rank_names,
         show_mastery=show_mastery,
     )
@@ -1118,10 +1270,10 @@ def build_rating_embed(
     match: dict[str, Any], ratings: dict[str, PlayerRating], *,
     summary: str | None = None, color: discord.Color | None = None,
 ) -> discord.Embed:
-    """Render lobby-relative ratings beneath the completed-match summary."""
+    """Render ratings beneath the shared match summary with brief confidence status."""
     info = match.get("info", {})
     embed = make_embed(
-        summary if summary is not None else f"Player ratings — {queue_name(info.get('queueId'))}",
+        summary if summary is not None else queue_name(info.get('queueId')),
         title="Match Ratings",
         color=color if color is not None else discord.Color.blue(),
     )
@@ -1129,14 +1281,12 @@ def build_rating_embed(
         embed.description = (
             embed.description or ""
         ) + (
-            "\n\nThis game is too short, has too few players, or isn't a "
-            "standard Summoner's Rift match, to rate."
+            "\n\nRatings unavailable for this match."
         )
         return embed
     add_rating_columns(embed, build_rating_columns(match, ratings))
-    notes = sorted({note for rating in ratings.values() for note in rating.notes})
-    if notes:
-        embed.add_field(name="Notes", value="\n".join(f"• {note}" for note in notes), inline=False)
+    if any(rating.confidence == "Limited" for rating in ratings.values()):
+        embed.set_footer(text="Limited ratings · Timeline unavailable")
     return embed
 
 
@@ -1148,14 +1298,14 @@ def build_inventory_embed(
     """Render every player's end-of-game item slots as blue/red name/items columns.
 
     ``color`` keeps the embed's side stripe matching the base match embed
-    (win/loss) instead of switching to a fixed color when Items is selected.
+    (win/loss or finished Mayhem/Clash purple) when Items is selected.
     ``timeline`` supplies the shared renderer's ADC boot fallback when the
     final Match-V5 participant slots no longer contain a purchased boot.
     ``summary`` preserves the completed-match header and tracked-player lines.
     """
     info = match.get("info", {})
     embed = make_embed(
-        summary if summary is not None else f"Item builds — {queue_name(info.get('queueId'))}",
+        summary if summary is not None else queue_name(info.get('queueId')),
         title="Items",
         color=color or discord.Color.dark_gold(),
     )
@@ -1346,7 +1496,7 @@ class _MatchDisplaySelect(discord.ui.Select):
             embed = build_rating_embed(
                 self._announcement.match, ratings,
                 summary=self._announcement.text,
-                color=outcome_color(self._announcement.outcome),
+                color=_match_embed_color(self._announcement),
             )
             chart = None
             if existing_chart_url:
@@ -1373,7 +1523,7 @@ class _MatchDisplaySelect(discord.ui.Select):
             timeline = await _fetch_match_timeline(self._announcement.match)
             embed = build_inventory_embed(
                 self._announcement.match,
-                color=outcome_color(self._announcement.outcome),
+                color=_match_embed_color(self._announcement),
                 timeline=timeline,
                 summary=self._announcement.text,
             )
@@ -1545,6 +1695,9 @@ class MatchAnnouncementView(GoldView):
                 _TftMatchDisplaySelect(announcement, active_mode=tft_display_mode)
             )
             return
+        if announcement.result_unavailable:
+            discord.ui.View.__init__(self, timeout=None)
+            return
         super().__init__(
             announcement.match,
             highlight_puuids=announcement.highlight_puuids,
@@ -1592,7 +1745,7 @@ class _RatingChartSelect(discord.ui.Select):
             else build_rating_embed(
                 self._announcement.match, {},
                 summary=self._announcement.text,
-                color=outcome_color(self._announcement.outcome),
+                color=_match_embed_color(self._announcement),
             )
         )
         if chart is not None:
@@ -1656,7 +1809,7 @@ class _InventoryChartSelect(discord.ui.Select):
             if interaction.message.embeds
             else build_inventory_embed(
                 self._announcement.match,
-                color=outcome_color(self._announcement.outcome),
+                color=_match_embed_color(self._announcement),
                 summary=self._announcement.text,
             )
         )
@@ -1863,6 +2016,9 @@ async def publish(
                     file=chart_file,
                     view=MatchAnnouncementView(announcement),
                 )
+                from .daily_summary import record_announcement
+                await asyncio.to_thread(record_announcement, channel.id, announcement,
+                                        names={a.puuid: a.riot_id for a in accounts.values()})
                 await remember_match_view_state(message, channel.id, announcement)
                 LOGGER.debug("Posted match announcement to channel=%s message=%s", channel.id, message.id)
             except Exception:
@@ -1921,8 +2077,18 @@ async def publish_live_games(
                 await remember_live_game_view_state(message, channel.id, announcement)
                 game_key = _live_game_key(announcement.game)
                 if game_key is not None:
-                    await asyncio.to_thread(
-                        remember_live_game_message, game_key, channel.id, message.id
+                    await asyncio.gather(
+                        asyncio.to_thread(
+                            remember_live_game_message,
+                            game_key,
+                            channel.id,
+                            message.id,
+                        ),
+                        asyncio.to_thread(
+                            remember_live_game_snapshot,
+                            game_key,
+                            live_game_announcement_payload(announcement),
+                        ),
                     )
                 LOGGER.debug("Posted live-game announcement to channel=%s message=%s", channel.id, message.id)
             except Exception:

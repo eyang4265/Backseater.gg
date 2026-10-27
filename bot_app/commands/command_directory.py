@@ -12,7 +12,7 @@ from ..render import make_embed
 # Categories determine presentation only; the registered tree remains the source
 # of membership and descriptions. Unknown commands appear under Other unless
 # explicitly excluded from the League directory.
-_LEAGUE_DIRECTORY_EXCLUSIONS = frozenset({"meetup", "flake"})
+_LEAGUE_DIRECTORY_EXCLUSIONS = frozenset({"flake"})
 _LEAGUE_GROUPS = (
     ("Players & Accounts", ("profile", "opgg", "livegame", "accounts", "add")),
     (
@@ -23,11 +23,11 @@ _LEAGUE_GROUPS = (
         "Champions & Builds",
         ("mastery", "champ", "championpool", "champstats", "counterstats", "trends", "coachless"),
     ),
-    ("Ranks & Records", ("today", "lpgraph", "leaderboard", "duo")),
+    ("Ranks & Records", ("today", "lpgraph", "leaderboard", "bestplayer", "duo", "party", "synergy", "dailyrecap")),
     ("Community & Setup", ("setchannel", "unsetchannel")),
     (
         "Guides & Riot Info",
-        ("help", "leaguecommands", "patchnotes", "rotation", "serverstatus"),
+        ("help", "emoji", "leaguecommands", "patchnotes", "rotation", "serverstatus"),
     ),
 )
 _TFT_GROUPS = (
@@ -83,7 +83,7 @@ def _chunks(lines: Iterable[str], limit: int = 1024) -> tuple[str, ...]:
 
 
 def build_game_command_directory(bot: discord.Bot, *, tft: bool) -> discord.Embed:
-    """Group live public commands by purpose, with new names in Other."""
+    """Group public commands by topic without introductory prose; new names use Other."""
     game = "TFT" if tft else "League"
     commands = tuple(
         command for command in public_commands(bot, tft=tft)
@@ -91,7 +91,7 @@ def build_game_command_directory(bot: discord.Bot, *, tft: bool) -> discord.Embe
     )
     by_name = {command.qualified_name: command for command in commands}
     embed = make_embed(
-        "Find a command by topic.",
+        "",
         title=f"{game} Commands",
     )
     if not commands:

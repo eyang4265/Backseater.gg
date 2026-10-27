@@ -16,6 +16,7 @@ from bot_app.render import (
     add_rating_columns,
     add_team_columns,
     build_lobby_columns,
+    build_inventory_columns,
     build_match_columns,
     _final_items_text,
     build_rating_columns,
@@ -328,6 +329,25 @@ class TeamColumnLayoutTests(unittest.TestCase):
         self.assertIn("C", embed.fields[2].value)
         self.assertIn("D", embed.fields[2].value)
 
+    def test_completed_arena_headings_show_final_placements(self) -> None:
+        """Completed Arena teams expose Riot's placement in each heading."""
+        columns = _columns_from_rows(
+            [
+                _Row(10, "Top", "A", "Gold", 10, placement=2),
+                _Row(10, "Top", "B", "Gold", 10, placement=2),
+                _Row(20, "Top", "C", "Silver", 5, placement=1),
+                _Row(20, "Top", "D", "Silver", 5, placement=1),
+            ],
+            arena=True,
+            colored_arena_headings=True,
+        )
+
+        self.assertEqual(
+            [team[0] for team in columns.arena_teams],
+            ["🔵 1st", "🔴 2nd"],
+        )
+        self.assertEqual([team[1] for team in columns.arena_teams], [["C", "D"], ["A", "B"]])
+
     def test_arena_1750_recovers_six_teams_from_shared_team_ids(self) -> None:
         """Split queue 1750's shared live team id into six groups of three."""
         rows = [_Row(100, "Top", f"Player {index}", "Unranked", None) for index in range(18)]
@@ -360,6 +380,7 @@ class TeamColumnLayoutTests(unittest.TestCase):
                 "championName": f"Champion {index}",
                 "teamId": 100 if subteam <= 3 else 200,
                 "playerSubteamId": subteam,
+                "placement": subteam,
             }
             for index, subteam in enumerate(
                 (4, 6, 6, 3, 3, 6, 4, 4, 5, 5, 1, 1, 1, 3, 5, 2, 2, 2),
@@ -391,12 +412,12 @@ class TeamColumnLayoutTests(unittest.TestCase):
         self.assertEqual(
             [team[0] for team in match_columns.arena_teams],
             [
-                "🔵 Team 1",
-                "🔴 Team 2",
-                "🟢 Team 3",
-                "🟡 Team 4",
-                "🟣 Team 5",
-                "🟠 Team 6",
+                "🔵 1st",
+                "🔴 2nd",
+                "🟢 3rd",
+                "🟡 4th",
+                "🟣 5th",
+                "⚪ 6th",
             ],
         )
         self.assertEqual(
@@ -440,6 +461,34 @@ class TeamColumnLayoutTests(unittest.TestCase):
         self.assertEqual(
             columns.red_names,
             ["\u2066<:champ:1> \u2067فاكهة\u2069 (5/8/11)\u2069"],
+        )
+
+    @patch("bot_app.render.tracked_puuids", return_value=())
+    @patch("bot_app.render._positions_by_index", return_value=["Top"])
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch(
+        "bot_app.render._resolve_concurrently",
+        return_value=[_PlayerLookup("فاكهة#NA1", None, False)],
+    )
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
+    @patch("bot_app.render.teammate_puuids", return_value=("player",))
+    def test_mayhem_live_rows_highlight_linked_teammates(
+        self, *_mocks: object
+    ) -> None:
+        """Mayhem linked teammates are highlighted in the shared team columns."""
+        columns = build_lobby_columns(
+            {
+                "gameQueueConfigId": 2400,
+                "participants": [
+                    {"puuid": "player", "teamId": 200, "championId": 103}
+                ],
+            },
+            server="na1",
+        )
+
+        self.assertEqual(
+            columns.red_names,
+            ["**\u2066<:champ:1> \u2067فاكهة\u2069 ⭐\u2069**"],
         )
 
     @patch("bot_app.render.tracked_puuids", return_value=())
@@ -506,6 +555,54 @@ def _rating(score: float, grade: str, label: str | None = None) -> PlayerRating:
 
 
 class RatingColumnLayoutTests(unittest.TestCase):
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value=None)
+    def test_arena_rating_and_item_headings_show_placements(
+        self, *_mocks: object
+    ) -> None:
+        """Every completed-match display keeps the Arena placement heading."""
+        match = {
+            "info": {
+                "queueId": 1740,
+                "participants": [
+                    {
+                        "puuid": "player",
+                        "playerSubteamId": 4,
+                        "championName": "Ahri",
+                        "placement": 2,
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(build_rating_columns(match, {}).arena_teams[0][0], "🔵 2nd")
+        self.assertEqual(build_inventory_columns(match).arena_teams[0][0], "🔵 2nd")
+
+    @patch("bot_app.render.ddragon.catalog", return_value=None)
+    @patch("bot_app.render.emoji_lookup.champion_emoji", return_value=None)
+    def test_arena_rating_and_item_teams_are_sorted_by_placement(
+        self, *_mocks: object
+    ) -> None:
+        """Every completed-match display lists first place before later teams."""
+        match = {
+            "info": {
+                "queueId": 1740,
+                "participants": [
+                    {"puuid": "later", "playerSubteamId": 1, "championName": "Ahri", "placement": 2},
+                    {"puuid": "winner", "playerSubteamId": 8, "championName": "Garen", "placement": 1},
+                ],
+            }
+        }
+
+        self.assertEqual(
+            [team[0] for team in build_rating_columns(match, {}).arena_teams],
+            ["🔵 1st", "🔴 2nd"],
+        )
+        self.assertEqual(
+            [team[0] for team in build_inventory_columns(match).arena_teams],
+            ["🔵 1st", "🔴 2nd"],
+        )
+
     @patch("bot_app.render.ddragon.catalog", return_value=None)
     @patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>")
     def test_score_and_kda_columns_line_up_with_the_name_column(
@@ -575,5 +672,348 @@ class RatingColumnLayoutTests(unittest.TestCase):
         self.assertEqual(columns, RatingColumns())
 
 
+class PartymateRowTests(unittest.TestCase):
+    """Registry markers stay distinct across both shared surfaces and all modes."""
+
+    def test_lonely_marker_replaces_star_on_both_surfaces_and_all_modes(self):
+        participants = [{"puuid": puuid, "teamId": team, "championId": 1}
+                        for puuid, team in (("tracked", 100), ("other", 100), ("mate", 200))]
+        with patch("bot_app.render.load_partymates", return_value={}), \
+             patch("bot_app.render.tracked_puuids", return_value=("tracked",)), \
+             patch("bot_app.render.teammate_puuids", return_value=("mate",)), \
+             patch("bot_app.render.ddragon.catalog", return_value=None), \
+             patch("bot_app.render.ddragon.champion_tags_by_internal_id", return_value={}), \
+             patch("bot_app.render._positions_by_index", return_value=["Top", "Mid", "Top"]), \
+             patch("bot_app.render._lookup_mastery", return_value=123), \
+             patch("bot_app.render._lookup_player", return_value=_PlayerLookup("Alice#NA1", None, False)):
+            for mode in ({}, {"show_rank_names": True}, {"show_mastery": True}):
+                for companion in (False, True):
+                    participants[2]["teamId"] = 100 if companion else 200
+                    for queue in (420, 2400, 1700, None, 0):
+                        for columns in (
+                            build_match_columns(participants, server="NA1", queue_id=queue, **mode),
+                            build_lobby_columns({"participants": participants,
+                                                 "gameQueueConfigId": queue}, "NA1", **mode),
+                        ):
+                            with self.subTest(mode=mode, companion=companion, queue=queue):
+                                row = (columns.arena_teams[0][1][0] if columns.arena_teams
+                                       else columns.blue_names[0])
+                                lonely = not companion and queue in (420, 2400)
+                                self.assertEqual("😢" in row, lonely)
+                                self.assertNotIn("⭐", row)
+                                self.assertEqual("🫂" in row, not lonely)
+                                self.assertTrue(row.startswith("**"))
+
+    def test_hugging_requires_exactly_two_starred_players_in_each_game(self):
+        from contextlib import ExitStack
+        for count in (1, 2, 3):
+            participants = [{"puuid": puuid, "teamId": 100, "championId": 1}
+                            for puuid in ["party"] + [f"tracked{i}" for i in range(count)]]
+            with ExitStack() as stack:
+                for target, value in (
+                    ("load_partymates", {"party": object()}),
+                    ("tracked_puuids", tuple(f"tracked{i}" for i in range(count))),
+                    ("teammate_puuids", ()),
+                    ("ddragon.catalog", None),
+                    ("ddragon.champion_tags_by_internal_id", {}),
+                    ("_positions_by_index", ["Top"] * len(participants)),
+                    ("_lookup_mastery", 123),
+                    ("_lookup_player", _PlayerLookup("Alice#NA1", None, False)),
+                ):
+                    stack.enter_context(patch("bot_app.render." + target, return_value=value))
+                for mode in ({}, {"show_rank_names": True}, {"show_mastery": True}):
+                    for columns in (
+                        build_match_columns(participants, server="NA1", queue_id=420, **mode),
+                        build_lobby_columns({"participants": participants,
+                                             "gameQueueConfigId": 420}, "NA1", **mode),
+                    ):
+                        with self.subTest(count=count, mode=mode):
+                            self.assertIn("👥", columns.blue_names[0])
+                            for row in columns.blue_names[1:]:
+                                self.assertEqual("🫂" in row, count == 2)
+                                self.assertEqual("⭐" in row, count != 2)
+
+    def test_saved_partymate_rows_are_bold_with_marker_in_every_label_mode(self):
+        for riot_id in ("Alice#NA1", "שלום#NA1"):
+            with patch("bot_app.render.load_partymates", return_value={"party": object(), "tracked": object()}), \
+                 patch("bot_app.render.tracked_puuids", return_value=("tracked",)), \
+                 patch("bot_app.render.teammate_puuids", return_value=("mate", "tracked")), \
+                 patch("bot_app.render.ddragon.catalog", return_value=None), \
+                 patch("bot_app.render.ddragon.champion_tags_by_internal_id", return_value={}), \
+                 patch("bot_app.render._positions_by_index", return_value=["Top", "Jungle", "Mid", "Bottom"]), \
+                 patch("bot_app.render._lookup_mastery", return_value=123), \
+                 patch("bot_app.render._lookup_player", side_effect=lambda puuid, *_args:
+                       _PlayerLookup(riot_id if puuid == "party" else puuid.title() + "#NA1", None, False)), \
+                 patch("bot_app.render.emoji_lookup.champion_emoji", return_value="<:champ:1>"):
+                participants = [{"puuid": puuid, "teamId": 100, "championId": 1,
+                                 "championName": "Ahri", "kills": 2, "deaths": 1,
+                                 "assists": 3} for puuid in ("party", "solo", "tracked", "mate")]
+                for mode in ({}, {"show_rank_names": True}, {"show_mastery": True}):
+                    with self.subTest(riot_id=riot_id, mode=mode):
+                        match = build_match_columns(participants, server="NA1", **mode)
+                        live = build_lobby_columns({"participants": participants}, "NA1", **mode)
+                        for columns in (match, live):
+                            party, solo, tracked, mate = columns.blue_names
+                            self.assertIn(" 🫂", tracked)
+                            self.assertNotIn("👥", tracked)
+                            self.assertIn(" 🫂", mate)
+                            self.assertTrue(tracked.startswith("**") and mate.startswith("**"))
+                            self.assertTrue(party.startswith("**") and party.endswith("**"))
+                            self.assertEqual(party.count("👥"), 1)
+                            self.assertNotIn("👥", solo)
+                            self.assertFalse(solo.startswith("**"))
+                            if not mode:
+                                self.assertIn(riot_id.split("#")[0], party)
+                            embed = make_embed("Partymates")
+                            add_team_columns(embed, columns)
+                            self.assertIn(party, embed.fields[0].value)
+                            self.assertTrue(all(len(field.value) <= 1024 for field in embed.fields))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepeatEncounterRowTests(unittest.TestCase):
+    def test_relation_markers_match_on_both_surfaces_and_all_modes(self):
+        from contextlib import ExitStack
+        from bot_app.match_cache import MatchCache
+        cache = MatchCache(':memory:')
+        self.addCleanup(cache.close)
+        # Prior blue ally and red enemy; current sides reverse.
+        prior = [{'puuid': 'you', 'teamId': 100}, {'puuid': 'ally', 'teamId': 100},
+                 {'puuid': 'enemy', 'teamId': 200}, {'puuid': 'switched', 'teamId': 200}]
+        # A player from an older lobby must not regain a marker in this game.
+        cache.remember_live_team_games('NA1_0', 2400, 500,
+                                      {'you': {'teamId': 100}, 'older': {'teamId': 100}})
+        cache.remember_live_team_games('NA1_1', 2400, 1000, {p['puuid']: p for p in prior})
+        current = [dict(p, championId=1, teamId=(100 if p['puuid'] == 'enemy' else 200)) for p in prior]
+        current.append({'puuid': 'older', 'teamId': 100, 'championId': 1})
+        with ExitStack() as stack:
+            for name, value in (
+                ('get_match_cache', cache), ('load_partymates', {}),
+                ('tracked_puuids', ('you',)), ('teammate_puuids', ()),
+                ('ddragon.catalog', None), ('ddragon.champion_tags_by_internal_id', {}),
+                ('_positions_by_index', ['Top', 'Jungle', 'Top', 'Mid', 'Mid']),
+                ('_lookup_mastery', 123),
+            ):
+                stack.enter_context(patch('bot_app.render.' + name, return_value=value))
+            stack.enter_context(patch('bot_app.render._lookup_player',
+                                      side_effect=lambda puuid, *_args: _PlayerLookup(puuid, None, False)))
+            for mode in ({}, {'show_rank_names': True}, {'show_mastery': True}):
+                live = build_lobby_columns({'participants': current, 'gameQueueConfigId': 2400,
+                                           'gameStartTime': 2000}, 'NA1', **mode)
+                match = build_match_columns(current, server='NA1', queue_id=2400, game_start_ms=2000, **mode)
+                for columns in (live, match):
+                    self.assertNotIn('👤', columns.blue_names[1])
+                    self.assertNotIn('😈', columns.blue_names[1])
+                    self.assertNotIn('🔄', columns.blue_names[1])
+                    self.assertIn('👤', columns.red_names[1])
+                    self.assertIn('😈', columns.blue_names[0])
+                    self.assertIn('🔄', columns.red_names[2])
+                    self.assertNotIn('🔄', columns.red_names[1])
+                    self.assertNotIn('🔄', columns.blue_names[0])
+                    self.assertNotIn('👤', columns.red_names[2])
+                    self.assertNotIn('😈', columns.red_names[2])
+                    self.assertNotIn('👤', columns.red_names[0])
+                for queue, start in ((1700, 2000), (None, 2000), (2400, None), (2400, 500)):
+                    columns = build_match_columns(current, server='NA1', queue_id=queue, game_start_ms=start, **mode)
+                    text = str(columns)
+                    self.assertNotIn('👤', text)
+                    self.assertNotIn('😈', text)
+                    self.assertNotIn('🔄', text)
+
+    def test_registry_markers_override_both_encounter_markers_in_every_mode(self):
+        from contextlib import ExitStack
+        participants = [{'puuid': p, 'teamId': t, 'championId': 1}
+                        for p, t in (('you', 100), ('ally', 100), ('enemy', 200))]
+        with ExitStack() as stack:
+            cache = stack.enter_context(patch('bot_app.render.get_match_cache')).return_value
+            cache.prior_encounters.return_value = {'ally': {True, False}, 'enemy': {True, False}}
+            parties = stack.enter_context(patch('bot_app.render.load_partymates', return_value={}))
+            tracked = stack.enter_context(patch('bot_app.render.tracked_puuids', return_value=('you',)))
+            mates = stack.enter_context(patch('bot_app.render.teammate_puuids', return_value=()))
+            for name, value in (
+                ('ddragon.catalog', None), ('ddragon.champion_tags_by_internal_id', {}),
+                ('_positions_by_index', ['Top', 'Mid', 'Top']), ('_lookup_mastery', 123),
+                ('_lookup_player', _PlayerLookup('Name#NA1', None, False)),
+            ):
+                stack.enter_context(patch('bot_app.render.' + name, return_value=value))
+            for registry in ('tracked', 'teammate', 'partymate'):
+                tracked.return_value = ('you', 'ally', 'enemy') if registry == 'tracked' else ('you',)
+                mates.return_value = ('ally', 'enemy') if registry == 'teammate' else ()
+                parties.return_value = {'ally': object(), 'enemy': object()} if registry == 'partymate' else {}
+                for mode in ({}, {'show_rank_names': True}, {'show_mastery': True}):
+                    for columns in (
+                        build_match_columns(participants, server='NA1', queue_id=420, game_start_ms=2000, **mode),
+                        build_lobby_columns({'participants': participants, 'gameQueueConfigId': 420,
+                                             'gameStartTime': 2000}, 'NA1', **mode),
+                    ):
+                        with self.subTest(registry=registry, mode=mode):
+                            for row in (columns.blue_names[1], columns.red_names[0]):
+                                marker = '👥' if registry == 'partymate' else '⭐'
+                                if registry == 'tracked':
+                                    marker = '😢' if row == columns.red_names[0] else '🫂'  # Existing lonely-tracked behavior stays intact.
+                                self.assertIn(marker, row)
+                                self.assertNotIn('👤', row)
+                                self.assertNotIn('😈', row)
+                                self.assertNotIn('🔄', row)
+
+    def test_both_switch_directions_and_mixed_history(self):
+        from bot_app.render import _repeat_encounter_markers
+        participants = [{'puuid': p, 'teamId': t} for p, t in
+                        (('you', 100), ('ex_ally', 200), ('ex_enemy', 100), ('both', 100), ('new', 200))]
+        with patch('bot_app.render.get_match_cache') as get_cache:
+            get_cache.return_value.prior_encounters.return_value = {
+                'ex_ally': {True}, 'ex_enemy': {False}, 'both': {True, False},
+            }
+            self.assertEqual(_repeat_encounter_markers(participants, 420, 2000, {'you'}),
+                             {'ex_ally': ' 🔄', 'ex_enemy': ' 🔄', 'both': ' 👤 🔄'})
+
+
+class FiveStackRowTests(unittest.TestCase):
+    """Full-roster evidence, marker precedence, and read-only rendering."""
+
+    def setUp(self):
+        from bot_app.match_cache import MatchCache
+        self.cache = MatchCache(':memory:')
+        self.addCleanup(self.cache.close)
+        self.start = 2_000_000_000_000
+        self.roster = [dict(puuid=p, teamId=100, championId=1, championName='Ahri')
+                       for p in ('a', 'b', 'c', 'd', 'e')]
+
+    def seed(self, match_id, roster=None, queue=420, end=None):
+        end = end or self.start - 1000000
+        self.cache.put(match_id, 'NA1', {'info': {
+            'queueId': queue, 'gameStartTimestamp': end - 600000,
+            'gameEndTimestamp': end, 'gameDuration': 600,
+            'participants': roster if roster is not None else self.roster,
+        }})
+
+    def test_clowns_replace_all_markers_on_both_surfaces_and_every_mode(self):
+        from contextlib import ExitStack
+        self.seed('NA1_1')
+        self.seed('NA1_2', end=self.start - 2000000)
+        with ExitStack() as stack:
+            for name, value in (
+                ('get_match_cache', self.cache), ('tracked_puuids', ('a',)),
+                ('teammate_puuids', ('b',)), ('load_partymates', {'c': object()}),
+                ('ddragon.catalog', None), ('ddragon.champion_tags_by_internal_id', {}),
+                ('_positions_by_index', ['Top', 'Jungle', 'Mid', 'Bottom', 'Support']),
+                ('_lookup_mastery', 123),
+            ):
+                stack.enter_context(patch('bot_app.render.' + name, return_value=value))
+            stack.enter_context(patch('bot_app.render._lookup_player',
+                                      side_effect=lambda puuid, *_: _PlayerLookup(puuid, None, False)))
+            for mode in ({}, {'show_rank_names': True}, {'show_mastery': True}):
+                for columns in (
+                    build_match_columns(self.roster, server='NA1', queue_id=420,
+                                        game_start_ms=self.start, **mode),
+                    build_lobby_columns({'participants': self.roster, 'gameQueueConfigId': 420,
+                                         'gameStartTime': self.start}, 'NA1', **mode),
+                ):
+                    self.assertEqual(len(columns.blue_names), 5)
+                    for row in columns.blue_names:
+                        self.assertEqual(row.count('🤡'), 1)
+                        for marker in ('⭐', '👥', '😢', '👤', '😈', '🔄'):
+                            self.assertNotIn(marker, row)
+                    self.assertTrue(all(row.startswith('**') for row in columns.blue_names[:3]))
+
+    def test_incomplete_rosters_pairs_and_insufficient_history_do_not_qualify(self):
+        from bot_app.render import _five_stack_puuids
+        with patch('bot_app.render.get_match_cache', return_value=self.cache):
+            self.seed('NA1_1')
+            self.assertFalse(_five_stack_puuids(self.roster, 420, self.start))
+            self.seed('NA1_2', roster=[dict(p, teamId=200 if p['puuid'] == 'e' else 100)
+                                        for p in self.roster])
+            self.assertFalse(_five_stack_puuids(self.roster, 420, self.start))
+            self.seed('NA1_3')
+            self.assertEqual(_five_stack_puuids(self.roster, 420, self.start), set('abcde'))
+            for roster, queue, start in (
+                (self.roster[:4], 420, self.start),
+                ([dict(p, bot=True) for p in self.roster], 420, self.start),
+                (self.roster, 1700, self.start), (self.roster, 420, None),
+                (self.roster, 420, self.start + 8 * 86400000),
+            ):
+                self.assertFalse(_five_stack_puuids(roster, queue, start))
+            for index in range(5):
+                self.seed(f'NA1_extra{index}', roster=[self.roster[0]], end=self.start - index - 1)
+            self.assertFalse(_five_stack_puuids(self.roster, 420, self.start))
+
+    def test_mayhem_requires_three_observations_and_rendering_adds_none(self):
+        from bot_app.render import _five_stack_puuids
+        roster = {p['puuid']: p for p in self.roster}
+        with patch('bot_app.render.get_match_cache', return_value=self.cache):
+            for index in range(2):
+                self.cache.remember_live_team_games(f'NA1_{index}', 2400,
+                                                    self.start - (2-index)*1000000, roster)
+            self.seed('NA1_finished', queue=2400)
+            self.assertFalse(_five_stack_puuids(self.roster, 2400, self.start))
+            self.assertEqual(len(self.cache.recent_live_team_games('a', 2400, self.start)), 2)
+            self.cache.remember_live_team_games('NA1_current', 2400, self.start, roster)
+            self.assertEqual(_five_stack_puuids(self.roster, 2400, self.start), set('abcde'))
+            self.assertFalse(_five_stack_puuids(self.roster, 2400, self.start - 1))
+
+    def test_full_known_team_overrides_stars_without_history_or_timing(self):
+        from contextlib import ExitStack
+        from bot_app.render import _five_stack_puuids
+        with ExitStack() as stack:
+            for name, value in (
+                ('get_match_cache', self.cache), ('tracked_puuids', tuple('abcde')),
+                ('teammate_puuids', ()), ('load_partymates', {}),
+                ('ddragon.catalog', None), ('ddragon.champion_tags_by_internal_id', {}),
+                ('_positions_by_index', ['Top', 'Jungle', 'Mid', 'Bottom', 'Support']),
+                ('_lookup_mastery', 123),
+            ):
+                stack.enter_context(patch('bot_app.render.' + name, return_value=value))
+            stack.enter_context(patch('bot_app.render._lookup_player',
+                                      side_effect=lambda puuid, *_: _PlayerLookup(puuid, None, False)))
+            for mode in ({}, {'show_rank_names': True}, {'show_mastery': True}):
+                for columns in (
+                    build_match_columns(self.roster, server='NA1', queue_id=440, **mode),
+                    build_lobby_columns({'participants': self.roster, 'gameQueueConfigId': 440},
+                                        'NA1', **mode),
+                ):
+                    self.assertEqual(len(columns.blue_names), 5)
+                    for row in columns.blue_names:
+                        self.assertIn('🤡', row)
+                        self.assertNotIn('⭐', row)
+                        self.assertTrue(row.startswith('**'))
+            self.assertEqual(_five_stack_puuids(self.roster, 440, None, set('abcde')), set('abcde'))
+            self.assertEqual(_five_stack_puuids(self.roster, 440, None, set('abcd')), set('abcde'))
+            split = [dict(p, teamId=200 if p['puuid'] == 'e' else 100) for p in self.roster]
+            self.assertFalse(_five_stack_puuids(split, 440, None, set('abcde')))
+
+    def test_flex_four_known_players_mark_whole_team_on_both_surfaces(self):
+        """Four mixed known identities qualify only in Flex without adding the fifth."""
+        from contextlib import ExitStack
+        from bot_app.render import _five_stack_puuids
+        with ExitStack() as stack:
+            for name, value in (
+                ('get_match_cache', self.cache), ('tracked_puuids', ('a',)),
+                ('teammate_puuids', ('b',)), ('load_partymates', {'c': {}, 'd': {}}),
+                ('ddragon.catalog', None), ('ddragon.champion_tags_by_internal_id', {}),
+                ('_positions_by_index', ['Top', 'Jungle', 'Mid', 'Bottom', 'Support']),
+                ('_lookup_mastery', 123),
+            ):
+                stack.enter_context(patch('bot_app.render.' + name, return_value=value))
+            stack.enter_context(patch('bot_app.render._lookup_player',
+                                      side_effect=lambda puuid, *_: _PlayerLookup(puuid, None, False)))
+            for mode in ({}, {'show_rank_names': True}, {'show_mastery': True}):
+                for columns in (
+                    build_match_columns(self.roster, server='NA1', queue_id=440, **mode),
+                    build_lobby_columns({'participants': self.roster, 'gameQueueConfigId': 440},
+                                        'NA1', **mode),
+                ):
+                    self.assertEqual(len(columns.blue_names), 5)
+                    for row in columns.blue_names:
+                        self.assertEqual(row.count('🤡'), 1)
+                        self.assertFalse(any(m in row for m in ('⭐', '👥', '😢', '🫂')))
+            for queue in (420, 400, 450, 2400):
+                self.assertFalse(_five_stack_puuids(self.roster, queue, None, set('abcd')))
+            self.assertFalse(_five_stack_puuids(self.roster, 440, None, set('abc')))
+            self.assertFalse(_five_stack_puuids(self.roster[:4], 440, None, set('abcd')))
+            self.assertFalse(_five_stack_puuids(
+                [dict(p, bot=p['puuid'] == 'e') for p in self.roster], 440, None, set('abcd')))
+            split = [dict(p, teamId=200 if p['puuid'] == 'd' else 100) for p in self.roster]
+            self.assertFalse(_five_stack_puuids(split, 440, None, set('abcd')))

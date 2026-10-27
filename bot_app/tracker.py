@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,7 @@ from .announce import (
     resolve_announcement_channel,
 )
 from .queues import (
+    LIMITED_RESULT_QUEUE_IDS,
     RANKED_QUEUE_IDS,
     TFT_RANKED_QUEUE_ID,
 )
@@ -31,8 +33,11 @@ from .store import (
     PlayerState,
     TftPlayerState,
     load_accounts,
+    load_embed_button_states,
     load_live_game_messages,
+    load_live_game_snapshots,
     load_live_game_state,
+    load_processed_match_ids,
     load_teammates,
     load_tft_live_game_state,
     load_tft_accounts,
@@ -40,6 +45,7 @@ from .store import (
     load_tracker_state,
     league_state_transaction,
     save_live_game_state,
+    remember_processed_match_ids,
     save_tft_live_game_state,
     save_tft_tracker_state,
     save_tracker_state,
@@ -75,6 +81,7 @@ class _AccountPoll:
     new_match_ids: list[str] = field(default_factory=list)
     match_sources: dict[str, str] = field(default_factory=dict)
     expected_pending_match_ids: set[str] = field(default_factory=set)
+    finished_live_match_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -177,7 +184,9 @@ def update_all_tft_rank_snapshots() -> tuple[int, int]:
 
 
 def _poll_accounts(
-    accounts: dict[str, Account], state: dict[str, PlayerState]
+    accounts: dict[str, Account],
+    state: dict[str, PlayerState],
+    processed_match_ids: set[str],
 ) -> list[_AccountPoll]:
     """List each account's unseen match ids, oldest first."""
     client = get_client()
@@ -195,9 +204,10 @@ def _poll_accounts(
                 "Could not fetch match ids for %s: %s", account.riot_id, error
             )
             return poll
-        known = set(entry.matches)
         poll.new_match_ids = [
-            match_id for match_id in reversed(match_ids) if match_id not in known
+            match_id
+            for match_id in reversed(match_ids)
+            if match_id not in processed_match_ids
         ]
         return poll
 
@@ -206,7 +216,7 @@ def _poll_accounts(
     with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(accounts))) as pool:
         polls = list(pool.map(fetch, accounts.values()))
 
-    # Some rotating modes (notably ARAM: Mayhem) appear in Spectator-V5 but
+    # Some modes (including ARAM: Mayhem and Clash) appear in Spectator-V5 but
     # are absent from Match-V5's by-PUUID id listing.  A live announcement
     # gives us the canonical platform/game id, so try that match directly.
     # Recorded message keys remain available for one poll after a lobby ends,
@@ -218,27 +228,56 @@ def _poll_accounts(
         if (match_id := _match_id_from_live_key(key)) is not None
     }
     active_keys = set(live_state.values())
-    stale_announcement_candidates = {
-        match_id
-        for key in set(load_live_game_messages()) - active_keys
-        if (match_id := _match_id_from_live_key(key)) is not None
-    }
+    stale_keys = set(load_live_game_messages()) - active_keys
+    stale_announcement_candidates: dict[str, dict[str, Any]] = {}
+    snapshots = load_live_game_snapshots()
+    for key in stale_keys:
+        payload = snapshots.get(key)
+        match_id = _match_id_from_live_key(key)
+        if payload is not None and match_id is not None:
+            stale_announcement_candidates[match_id] = payload
+
+    # Persistent component state predates dedicated live snapshots. Keep it as
+    # a migration fallback for announcements posted before this feature deployed.
+    for record in load_embed_button_states():
+        if record.get("kind") != "live_game":
+            continue
+        payload = record.get("payload", {})
+        game = payload.get("game", {}) if isinstance(payload, dict) else {}
+        platform = game.get("platformId") or game.get("platform")
+        game_id = game.get("gameId")
+        if not platform or game_id is None:
+            continue
+        key = f"{platform}:{game_id}"
+        if key not in stale_keys:
+            continue
+        match_id = _match_id_from_live_key(key)
+        if match_id is None:
+            continue
+        stale_announcement_candidates.setdefault(match_id, payload)
     for poll in polls:
-        known = set(poll.state.matches)
         active_match_id = active_candidates.get(poll.account.discord_id)
         if (
             active_match_id is not None
-            and active_match_id not in known
+            and active_match_id not in processed_match_ids
             and active_match_id not in poll.new_match_ids
         ):
             poll.new_match_ids.append(active_match_id)
             poll.match_sources[active_match_id] = poll.account.riot_id
             poll.expected_pending_match_ids.add(active_match_id)
-        for match_id in sorted(stale_announcement_candidates):
-            if match_id not in known and match_id not in poll.new_match_ids:
+        for match_id, payload in sorted(stale_announcement_candidates.items()):
+            puuids = {
+                str(puuid) for puuid in payload.get("highlight_puuids", []) if puuid
+            }
+            if (
+                poll.account.puuid in puuids
+                and match_id not in processed_match_ids
+                and match_id not in poll.new_match_ids
+            ):
                 poll.new_match_ids.append(match_id)
                 poll.match_sources[match_id] = "saved live-game announcement"
                 poll.expected_pending_match_ids.add(match_id)
+                poll.finished_live_match_payloads[match_id] = payload
     total_new = sum(len(poll.new_match_ids) for poll in polls)
     LOGGER.debug(
         "Polled %d accounts; %d unseen match ids found", len(accounts), total_new
@@ -247,11 +286,17 @@ def _poll_accounts(
 
 
 def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
-    """Fetch each newly-seen match exactly once, even when several accounts shared it."""
+    """Fetch matches or saved-lobby Mayhem/Clash 403 notices after confirmed ends.
+
+    Estimated notice durations subtract two minutes for polling delay. Active
+    lobbies and other HTTP failures never become unavailable-result notices.
+    """
     servers: dict[str, str] = {}
     sources: dict[str, list[str]] = {}
     fallback_candidates: set[str] = set()
     normal_history_matches: set[str] = set()
+    finished_live_payloads: dict[str, dict[str, Any]] = {}
+    candidate_players: dict[str, list[Account]] = {}
     for poll in polls:
         for match_id in poll.new_match_ids:
             platform, separator, _game_id = match_id.partition("_")
@@ -267,6 +312,11 @@ def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
                 fallback_candidates.add(match_id)
             else:
                 normal_history_matches.add(match_id)
+            if match_id in poll.finished_live_match_payloads:
+                finished_live_payloads.setdefault(
+                    match_id, poll.finished_live_match_payloads[match_id]
+                )
+                candidate_players.setdefault(match_id, []).append(poll.account)
 
     expected_pending = fallback_candidates - normal_history_matches
 
@@ -279,6 +329,40 @@ def _fetch_matches(polls: list[_AccountPoll]) -> dict[str, dict[str, Any]]:
         try:
             return match_id, get_client().match(match_id, server)
         except RiotAPIError as error:
+            payload = finished_live_payloads.get(match_id, {})
+            game = payload.get("game", {}) if isinstance(payload, dict) else {}
+            queue_id = game.get("gameQueueConfigId")
+            if (
+                error.status_code == 403
+                and queue_id in LIMITED_RESULT_QUEUE_IDS
+            ):
+                detected_end_ms = int(time.time() * 1000)
+                game_start_ms = game.get("gameStartTime")
+                estimated_duration = None
+                if isinstance(game_start_ms, (int, float)) and game_start_ms > 0:
+                    estimated_duration = max(
+                        0, int((detected_end_ms - game_start_ms) / 1000) - 120
+                    )
+                LOGGER.info(
+                    "Match %s ended but Riot denied its results; posting a completion notice",
+                    match_id,
+                )
+                return match_id, {
+                    "metadata": {"matchId": match_id},
+                    "info": {
+                        "platformId": server,
+                        "queueId": queue_id,
+                        "gameEndTimestamp": detected_end_ms,
+                        "estimatedGameDuration": estimated_duration,
+                        "resultUnavailable": True,
+                        "participants": game.get("participants", [])
+                        or [
+                            {"puuid": account.puuid}
+                            for account in candidate_players.get(match_id, [])
+                        ],
+                    },
+                    "liveGameSnapshot": payload,
+                }
             if error.status_code == 404 and match_id in expected_pending:
                 LOGGER.debug(
                     "Match %s for %s is not published yet: %s",
@@ -330,7 +414,8 @@ def collect_new_matches() -> list[MatchAnnouncement]:
     Every completed queue a tracked player finishes is rendered through the
     shared match announcement renderer; there is no queue filter. Only Ranked
     Solo/Duo and Ranked Flex (``RANKED_QUEUE_IDS``) fetch ranks and record LP
-    changes — every other queue is announced without a rank lookup.
+    changes — every other queue is announced without a rank lookup. Linked
+    teammates present join the summary in every queue without initiating polls.
 
     Each tracked player's stored rank for the match's queue is the pre-match baseline.
     When a ranked match is announced, the current rank is fetched, the swing is
@@ -342,8 +427,9 @@ def collect_new_matches() -> list[MatchAnnouncement]:
     """
     accounts = load_accounts()
     state = load_tracker_state()
+    processed_match_ids = load_processed_match_ids(state)
 
-    polls = _poll_accounts(accounts, state)
+    polls = _poll_accounts(accounts, state, processed_match_ids)
     matches = _fetch_matches(polls)
 
     participants: dict[str, list[_AccountPoll]] = {}
@@ -430,45 +516,44 @@ def collect_new_matches() -> list[MatchAnnouncement]:
                         else None
                     ),
                     rank=current if is_only_game else poll.state.ranks.get(queue_id),
+                    previous_rank=poll.state.ranks.get(queue_id) if is_only_game else None,
                 )
             )
 
-        # A teammate never supplies match ids, but a live-game announcement may
-        # have captured their pre-game rank. When that exact lobby is surfaced
-        # by a real tracked account, include the teammate and compare against
-        # the saved baseline.
-        if queue_id in RANKED_QUEUE_IDS:
-            for teammate in load_teammates().values():
-                participant = participants_by_puuid.get(teammate.puuid)
-                if participant is None:
-                    continue
-                teammate_state = state.get(_teammate_state_key(teammate.puuid))
-                before = teammate_state.ranks.get(queue_id) if teammate_state else None
-                if before is None:
-                    continue
-                current = (fetch_ranks(teammate.puuid, teammate.server) or {}).get(
-                    queue_id
+        # Teammates join every shared match summary, but only a ranked lobby
+        # with a saved baseline can attribute their LP change.
+        included_puuids = {player.puuid for player in players}
+        for teammate in load_teammates().values():
+            participant = participants_by_puuid.get(teammate.puuid)
+            if participant is None or teammate.puuid in included_puuids:
+                continue
+            teammate_state = state.get(_teammate_state_key(teammate.puuid))
+            before = teammate_state.ranks.get(queue_id) if teammate_state else None
+            current = None
+            if queue_id in RANKED_QUEUE_IDS and before is not None:
+                current = (fetch_ranks(teammate.puuid, teammate.server) or {}).get(queue_id)
+            players.append(
+                TrackedPlayer(
+                    puuid=teammate.puuid,
+                    riot_id=teammate.riot_id,
+                    server=teammate.server,
+                    lp_change=lp_change(before, current),
+                    rank=current or before,
+                    previous_rank=before,
                 )
-                players.append(
-                    TrackedPlayer(
-                        puuid=teammate.puuid,
-                        riot_id=teammate.riot_id,
-                        server=teammate.server,
-                        lp_change=lp_change(before, current),
-                        rank=current or before,
+            )
+            included_puuids.add(teammate.puuid)
+            if current is not None:
+                teammate_poll = _AccountPoll(teammate, teammate_state)
+                pending_ranks.append(
+                    _PendingRank(
+                        poll=teammate_poll,
+                        queue_id=queue_id,
+                        snapshot=current,
+                        participant=participant,
+                        attributable=True,
                     )
                 )
-                if current is not None:
-                    teammate_poll = _AccountPoll(teammate, teammate_state)
-                    pending_ranks.append(
-                        _PendingRank(
-                            poll=teammate_poll,
-                            queue_id=queue_id,
-                            snapshot=current,
-                            participant=participant,
-                            attributable=True,
-                        )
-                    )
 
         announcement = format_match(
             match,
@@ -496,19 +581,21 @@ def collect_new_matches() -> list[MatchAnnouncement]:
         announcements.append(announcement)
         announced_ids.add(match_id)
 
-    for poll in polls:
-        fetched = [
-            match_id
-            for match_id in poll.new_match_ids
-            if match_id in matches
-            and (
-                matches[match_id].get("info", {}).get("queueId") not in RANKED_QUEUE_IDS
-                or match_id in announced_ids
-            )
-        ]
-        if fetched:
-            poll.state.remember(fetched)
-            dirty = True
+    handled_ids = {
+        match_id
+        for match_id in match_order
+        if (
+            matches[match_id].get("info", {}).get("queueId") not in RANKED_QUEUE_IDS
+            or match_id in announced_ids
+        )
+    }
+    legacy_ids_present = any(player.matches for player in state.values())
+    if processed_match_ids or handled_ids:
+        remember_processed_match_ids(processed_match_ids | handled_ids)
+    if legacy_ids_present:
+        for player in state.values():
+            player.matches = []
+        dirty = True
 
     if dirty:
         save_tracker_state(state)
@@ -673,6 +760,7 @@ def collect_new_tft_matches() -> list[MatchAnnouncement]:
 def collect_new_live_games() -> list[LiveGameAnnouncement]:
     """Find games that tracked accounts entered since the previous poll.
 
+    Linked teammates present in any queue join the summary without being polled.
     Ranked teammates in a newly announced shared lobby have their current queue
     rank saved as the pre-game baseline for completed-match LP attribution. They
     remain excluded from polling and cannot surface a lobby on their own.
@@ -767,31 +855,33 @@ def collect_new_live_games() -> list[LiveGameAnnouncement]:
         if isinstance(match, dict) and match.get("info", {}).get("gameEndTimestamp"):
             continue
         queue_id = game.get("gameQueueConfigId")
-        if queue_id in RANKED_QUEUE_IDS:
-            lobby_puuids = {
-                participant.get("puuid")
-                for participant in game.get("participants", []) or []
-            }
-            for teammate in teammates.values():
-                if teammate.puuid not in lobby_puuids:
-                    continue
+        lobby_puuids = {
+            participant.get("puuid")
+            for participant in game.get("participants", []) or []
+        }
+        included_puuids = {player.puuid for player in players}
+        for teammate in teammates.values():
+            if teammate.puuid not in lobby_puuids or teammate.puuid in included_puuids:
+                continue
+            snapshot = None
+            if queue_id in RANKED_QUEUE_IDS:
                 ranks = fetch_ranks(teammate.puuid, teammate.server)
                 snapshot = (ranks or {}).get(queue_id)
-                if snapshot is None:
-                    continue
-                state_key = _teammate_state_key(teammate.puuid)
-                teammate_state = tracker_state.setdefault(state_key, PlayerState())
-                if teammate_state.ranks.get(queue_id) != snapshot:
-                    teammate_state.ranks[queue_id] = snapshot
-                    tracker_state_dirty = True
-                players.append(
-                    TrackedPlayer(
-                        puuid=teammate.puuid,
-                        riot_id=teammate.riot_id,
-                        server=teammate.server,
-                        rank=snapshot,
-                    )
+                if snapshot is not None:
+                    state_key = _teammate_state_key(teammate.puuid)
+                    teammate_state = tracker_state.setdefault(state_key, PlayerState())
+                    if teammate_state.ranks.get(queue_id) != snapshot:
+                        teammate_state.ranks[queue_id] = snapshot
+                        tracker_state_dirty = True
+            players.append(
+                TrackedPlayer(
+                    puuid=teammate.puuid,
+                    riot_id=teammate.riot_id,
+                    server=teammate.server,
+                    rank=snapshot,
                 )
+            )
+            included_puuids.add(teammate.puuid)
         announcement = format_live_game(game, players)
         if announcement is not None:
             announcements.append(announcement)

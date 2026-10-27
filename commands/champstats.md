@@ -3,6 +3,10 @@
 Show your cached record for a champion, including rune, final-item, and boot
 breakdowns.
 
+You can start one report per 60 seconds across `/championpool` and `/champstats`.
+Wait for your current scan to finish before starting another. Repeated calls
+receive a private reply and do not start extra scans.
+
 By default, results include all available history. The `patch` option offers
 the six newest patches and accepts a major/minor version such as `26.1` or a
 full game version such as `26.1.1` to select one patch instead. Set
@@ -21,3 +25,5 @@ picks.
 
 Anyone who can see the result can use its breakdown selector and pagination.
 The controls remain usable after a bot restart.
+
+Results use concise embeds; usage and counting details remain in this help.

@@ -91,7 +91,7 @@ Two rules keep it that way:
   `render._lookup_player`, not calling it in the row loop.
 - Poller state files are written atomically. Anything persisted per player
   belongs on `store.PlayerState`.
-- Mutable accounts, poller state, caches, meetup records, and diagnostics live
+- Mutable accounts, poller state, caches and diagnostics live
   under `data/`, never in source control. Legacy `json/` state is copied there
   automatically when it is newer and retained as a local backup, which keeps
   upgrades safe while the previous bot process is still running.

@@ -157,6 +157,34 @@ def lp_change(before: RankSnapshot | None, after: RankSnapshot | None) -> str | 
     return f"{'+' if diff >= 0 else ''}{diff} LP"
 
 
+
+def _rank_movement(before: RankSnapshot | None, after: RankSnapshot | None) -> int:
+    """Compare tier/division only when exactly one ranked game is attributable."""
+    if before is None or after is None or after.games != before.games + 1:
+        return 0
+    tiers = (*SUB_MASTER_TIERS, "MASTER", "GRANDMASTER", "CHALLENGER")
+    def position(snapshot):
+        if snapshot.tier not in tiers:
+            return None
+        division = 0 if snapshot.tier in APEX_TIERS else DIVISIONS.get(snapshot.division)
+        return None if division is None else (tiers.index(snapshot.tier), division)
+    previous, current = position(before), position(after)
+    if previous is None or current is None:
+        return 0
+    return (current > previous) - (current < previous)
+
+
+
+def is_promotion(before: RankSnapshot | None, after: RankSnapshot | None) -> bool:
+    """True for an attributable increase in ranked tier/division, excluding LP."""
+    return _rank_movement(before, after) > 0
+
+
+def is_demotion(before: RankSnapshot | None, after: RankSnapshot | None) -> bool:
+    """True for an attributable decrease in ranked tier/division, excluding LP."""
+    return _rank_movement(before, after) < 0
+
+
 def average_value(values: list[int]) -> float | None:
     """Handle value."""
     return sum(values) / len(values) if values else None

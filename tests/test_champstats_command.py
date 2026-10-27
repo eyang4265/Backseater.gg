@@ -119,6 +119,7 @@ class ChampStatsLoadingTests(unittest.TestCase):
 
         client.match_timeline.assert_called_once_with("jinx", "NA1")
 
+
     def test_background_scan_edits_channel_message_and_persists_view(self) -> None:
         async def run() -> None:
             report = ChampionStatsReport("Garen", "All Games", 0, 0, (), (), (), ())

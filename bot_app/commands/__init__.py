@@ -15,11 +15,14 @@ from . import (
     admin,
     ai,
     champ,
+    bestplayer,
     championpool,
     champstats,
     coachless,
     counterstats,
     duo,
+    emoji,
+    dailyrecap,
     flake,
     flakerank,
     guilds,
@@ -28,7 +31,10 @@ from . import (
     mastery,
     msg,
     patchnotes,
+    party,
+    synergy,
     player,
+    purge,
     rankings,
     registry,
     tftadd,
@@ -37,8 +43,8 @@ from . import (
     tftmatchhistory,
     tftupdate,
     trends,
+    updatepartymate,
 )
-from .meetup import setup_meetup
 from .match import setup_jungleproximity, setup_laning, setup_match, setup_timeline
 
 if TYPE_CHECKING:
@@ -53,15 +59,19 @@ _SETUPS = (
     rankings.setup,
     guilds.setup,
     champ.setup,
+    bestplayer.setup,
     championpool.setup,
     champstats.setup,
     counterstats.setup,
     coachless.setup,
     duo.setup,
+    emoji.setup,
+    party.setup,
+    synergy.setup,
+    dailyrecap.setup,
     flake.setup,
     flakerank.setup,
     mastery.setup,
-    setup_meetup,
     setup_timeline,
     setup_jungleproximity,
     setup_laning,
@@ -78,6 +88,8 @@ _SETUPS = (
     admin.setup,
     ai.setup,
     msg.setup,
+    purge.setup,
+    updatepartymate.setup,
 )
 
 

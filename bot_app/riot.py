@@ -522,17 +522,23 @@ class RiotClient:
         return self._get(server, f"/lol/league/v4/{tier}leagues/by-queue/{queue_type}")
 
     def match_ids(
-        self, puuid: str, server: str, *, start: int = 0, count: int = 20
+        self, puuid: str, server: str, *, start: int = 0, count: int = 20,
+        start_time: int | None = None, end_time: int | None = None,
     ) -> list[str]:
-        """Return one paginated Match-V5 history page for an account."""
+        """Return a Match-V5 history page, optionally bounded by epoch seconds."""
         route = match_route(server)
         if route is None:
             LOGGER.warning("Unknown platform %r; cannot list matches", server)
             return []
+        params = {"start": start, "count": count}
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
         return self._get(
             route,
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids",
-            params={"start": start, "count": count},
+            params=params,
         )
 
     def match(self, match_id: str, server: str) -> dict[str, Any]:

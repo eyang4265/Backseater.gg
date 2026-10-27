@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 MATCH_CACHE_PATH = DATA_DIR / "matches.sqlite"
 LEGACY_MATCH_CACHE_PATH = JSON_DIR / "matches.sqlite"
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 EMBED_BUTTON_STATE_LIMIT = 500
 
@@ -270,6 +270,17 @@ class MatchCache:
                     CREATE INDEX IF NOT EXISTS participants_puuid ON participants(puuid);
                     CREATE INDEX IF NOT EXISTS matches_game_end_ms ON matches(game_end_ms);
 
+                    CREATE TABLE IF NOT EXISTS live_teammate_history (
+                        match_id TEXT NOT NULL,
+                        puuid TEXT NOT NULL,
+                        queue_id INTEGER NOT NULL,
+                        game_start_ms INTEGER NOT NULL,
+                        team_id INTEGER NOT NULL,
+                        PRIMARY KEY (match_id, puuid)
+                    );
+                    CREATE INDEX IF NOT EXISTS live_teammate_history_puuid_start
+                        ON live_teammate_history(puuid, queue_id, game_start_ms);
+
                     CREATE TABLE IF NOT EXISTS lane_matchups (
                         patch        TEXT    NOT NULL,
                         position     TEXT    NOT NULL,
@@ -322,7 +333,7 @@ class MatchCache:
                     CREATE INDEX IF NOT EXISTS embed_button_states_updated_at
                         ON embed_button_states(updated_at);
 
-                    PRAGMA user_version = 5;
+                    PRAGMA user_version = 6;
                     """
                 )
                 if version < 2:
@@ -533,12 +544,16 @@ class MatchCache:
             return 0
 
     def prune(self, *, older_than_days: int = 180) -> int:
-        """Prune prune."""
+        """Prune expired match data and live teammate observations."""
         if not self._usable:
             return 0
         cutoff_ms = int((time.time() - older_than_days * 86400) * 1000)
         try:
             with self._lock, self._database() as db:
+                db.execute(
+                    "DELETE FROM live_teammate_history WHERE game_start_ms < ?",
+                    (int((time.time() - 7 * 86400) * 1000),),
+                )
                 ids = [
                     row[0]
                     for row in db.execute(
@@ -618,6 +633,164 @@ class MatchCache:
             if isinstance(payload, dict):
                 payloads.append(payload)
         return payloads
+
+    def remember_live_team_games(
+        self, match_id: str, queue_id: int, start_ms: int,
+        participants: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, int]]:
+        """Save each live identity once and return ten games including this lobby.
+
+        Live observations are separate from completed statistics/results. The
+        inclusive start-time window counts the current lobby, excludes future
+        lobbies, and survives repeated formatting and process restarts.
+        """
+        histories = {puuid: {} for puuid in participants}
+        if not self._usable:
+            return histories
+        try:
+            with self._lock, self._database() as db:
+                db.executemany(
+                    "INSERT OR IGNORE INTO live_teammate_history "
+                    "(match_id, puuid, queue_id, game_start_ms, team_id) VALUES (?, ?, ?, ?, ?)",
+                    [(match_id, puuid, queue_id, start_ms, p["teamId"])
+                     for puuid, p in participants.items()],
+                )
+                for puuid in participants:
+                    rows = db.execute(
+                        "SELECT match_id, team_id FROM live_teammate_history "
+                        "WHERE puuid = ? AND queue_id = ? "
+                        "AND game_start_ms >= ? AND game_start_ms <= ? "
+                        "ORDER BY game_start_ms DESC, match_id DESC LIMIT 10",
+                        (puuid, queue_id, start_ms - 7 * 86400000, start_ms),
+                    ).fetchall()
+                    histories[puuid] = {r["match_id"]: int(r["team_id"]) for r in rows}
+            return histories
+        except sqlite3.DatabaseError as error:
+            LOGGER.warning("Could not save live teammate history: %s", error)
+            return {puuid: {} for puuid in participants}
+
+    def recent_live_team_games(self, puuid: str, queue_id: int, start_ms: int) -> dict[str, int]:
+        """Read ten observed lobbies through this start time within seven days.
+
+        Includes the selected lobby if already observed; rendering never writes
+        observations or turns completed Mayhem notices into party evidence.
+        """
+        if not self._usable or not puuid:
+            return {}
+        try:
+            with self._lock, self._database() as db:
+                rows = db.execute(
+                    "SELECT match_id, team_id FROM live_teammate_history "
+                    "WHERE puuid = ? AND queue_id = ? "
+                    "AND game_start_ms >= ? AND game_start_ms <= ? "
+                    "ORDER BY game_start_ms DESC, match_id DESC LIMIT 10",
+                    (puuid, queue_id, start_ms - 7 * 86400000, start_ms),
+                ).fetchall()
+            return {row["match_id"]: int(row["team_id"]) for row in rows}
+        except sqlite3.DatabaseError as error:
+            LOGGER.warning("Could not query live teammate history: %s", error)
+            return {}
+
+    def prior_encounters(self, puuid: str, before_ms: int) -> dict[str, set[bool]]:
+        """Allies/enemies from only the immediately previous observed game.
+
+        Select the latest completed match or live observation before this game.
+        Older encounters never contribute, even when the previous game has no
+        eligible relations (such as a remake or Arena). Cached history may be
+        incomplete. Teams are compared within that one game, not blue/red sides.
+        """
+        if not self._usable or not puuid or before_ms <= 0:
+            return {}
+        try:
+            with self._lock, self._database() as db:
+                rows = db.execute(
+                    """
+                    WITH previous_game AS (
+                        SELECT match_id FROM (
+                            SELECT m.match_id, m.game_end_ms AS observed_ms
+                            FROM participants a JOIN matches m ON m.match_id = a.match_id
+                            WHERE a.puuid = ? AND m.game_end_ms < ?
+                            UNION ALL
+                            SELECT a.match_id, a.game_start_ms AS observed_ms
+                            FROM live_teammate_history a
+                            WHERE a.puuid = ? AND a.game_start_ms < ?
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM matches m WHERE m.match_id = a.match_id
+                                    AND m.game_end_ms >= ?
+                              )
+                        ) ORDER BY observed_ms DESC, match_id DESC LIMIT 1
+                    )
+                    SELECT b.puuid, a.team_id = b.team_id AS ally
+                    FROM participants a JOIN participants b ON a.match_id = b.match_id
+                    JOIN matches m ON m.match_id = a.match_id
+                    WHERE a.puuid = ? AND b.puuid != a.puuid
+                      AND a.match_id IN (SELECT match_id FROM previous_game)
+                      AND a.remake = 0 AND b.remake = 0
+                      AND a.team_id IN (100, 200) AND b.team_id IN (100, 200)
+                      AND m.queue_id > 0 AND m.queue_id NOT BETWEEN 1700 AND 1799
+                    UNION
+                    SELECT b.puuid, a.team_id = b.team_id AS ally
+                    FROM live_teammate_history a JOIN live_teammate_history b
+                      ON a.match_id = b.match_id
+                    WHERE a.puuid = ? AND b.puuid != a.puuid
+                      AND a.match_id IN (SELECT match_id FROM previous_game)
+                      AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.match_id = a.match_id)
+                      AND a.team_id IN (100, 200) AND b.team_id IN (100, 200)
+                      AND a.queue_id > 0 AND a.queue_id NOT BETWEEN 1700 AND 1799
+                    """, (puuid, before_ms, puuid, before_ms, before_ms, puuid, puuid),
+                ).fetchall()
+            encounters = {}
+            for row in rows:
+                encounters.setdefault(row["puuid"], set()).add(bool(row["ally"]))
+            return encounters
+        except sqlite3.DatabaseError as error:
+            LOGGER.warning("Could not query prior encounters: %s", error)
+            return {}
+
+    def recent_team_matches(
+        self, puuid: str, queue_id: int, before_ms: int
+    ) -> dict[str, int]:
+        """Last ten cached non-remake games in this queue in the prior seven days.
+
+        The strict end-time cutoff excludes the game being inspected and future
+        games when viewing an old match. This is partial cached history, not a
+        guarantee that every game the account played has been collected.
+        """
+        if not self._usable or not puuid:
+            return {}
+        try:
+            with self._lock, self._database() as db:
+                rows = db.execute(
+                    """
+                    SELECT m.match_id, p.team_id
+                    FROM participants p JOIN matches m ON m.match_id = p.match_id
+                    WHERE p.puuid = ? AND m.queue_id = ? AND p.remake = 0
+                      AND m.game_end_ms >= ? AND m.game_end_ms < ?
+                    ORDER BY m.game_end_ms DESC, m.match_id DESC LIMIT 10
+                    """,
+                    (puuid, queue_id, before_ms - 7 * 86400000, before_ms),
+                ).fetchall()
+            return {row["match_id"]: int(row["team_id"]) for row in rows}
+        except sqlite3.DatabaseError as error:
+            LOGGER.warning("Could not query premade history: %s", error)
+            return {}
+
+    def player_match_payloads(self, puuid: str) -> list[dict[str, Any]]:
+        """Read cached non-remake games for a party report, without Riot requests."""
+        if not self._usable or not puuid:
+            return []
+        try:
+            with self._lock, self._database() as db:
+                rows = db.execute(
+                    """SELECT m.payload FROM matches m JOIN participants p
+                       ON p.match_id = m.match_id
+                       WHERE p.puuid = ? AND p.remake = 0
+                       ORDER BY m.game_end_ms DESC, m.match_id DESC""", (puuid,),
+                ).fetchall()
+            return [json.loads(row["payload"]) for row in rows]
+        except (sqlite3.DatabaseError, ValueError, TypeError) as error:
+            LOGGER.warning("Could not query party history: %s", error)
+            return []
 
     def duo_record(
         self, first_puuid: str, second_puuid: str, *, game_mode: str | None = None

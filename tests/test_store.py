@@ -15,13 +15,19 @@ from bot_app.store import (
     dedupe_tail,
     load_embed_button_states,
     load_live_game_messages,
+    load_live_game_snapshots,
     load_live_game_state,
+    load_processed_match_ids,
     pop_live_game_messages,
+    pop_live_game_snapshots,
     remember_live_game_message,
+    remember_live_game_snapshot,
+    remember_processed_match_ids,
     save_live_game_state,
     league_state_transaction,
 )
 from bot_app.config import migrate_legacy_runtime_file, migrate_legacy_sqlite_file
+from tests.support import temporary_state
 
 
 class RuntimeStorageTests(unittest.TestCase):
@@ -185,11 +191,27 @@ class PlayerStateTests(unittest.TestCase):
         state = TftPlayerState(["NA1_TFT_1"], True)
         self.assertEqual(TftPlayerState.from_json(state.to_json()), state)
 
-    def test_remember_appends_and_caps(self) -> None:
-        """Verify that remember appends and caps."""
-        state = PlayerState(matches=["NA1_1"])
-        state.remember(["NA1_1", "NA1_2"])
-        self.assertEqual(state.matches, ["NA1_1", "NA1_2"])
+    def test_global_ledger_keeps_all_unique_match_ids(self) -> None:
+        """The global League ledger never forgets a processed match."""
+        with temporary_state():
+            original = [f"NA1_{index}" for index in range(150)]
+            remember_processed_match_ids(original)
+            remember_processed_match_ids(["NA1_1", "NA1_150"])
+            self.assertEqual(
+                load_processed_match_ids(), {*original, "NA1_150"}
+            )
+
+    def test_global_ledger_includes_legacy_per_player_match_ids(self) -> None:
+        """Migration unions old per-player histories before clearing them."""
+        with temporary_state():
+            state = {
+                "1": PlayerState(matches=["NA1_1", "NA1_SHARED"]),
+                "2": PlayerState(matches=["NA1_2", "NA1_SHARED"]),
+            }
+            self.assertEqual(
+                load_processed_match_ids(state),
+                {"NA1_1", "NA1_2", "NA1_SHARED"},
+            )
 
     def test_malformed_entries_degrade_to_empty(self) -> None:
         """Verify that malformed entries degrade to empty."""
@@ -239,6 +261,31 @@ class LiveGameMessageRecordTests(unittest.TestCase):
             self.assertCountEqual(popped, [(10, 100), (11, 101)])
             self.assertEqual(load_live_game_messages(), {"NA1:2": [[12, 102]]})
             self.assertEqual(pop_live_game_messages(["NA1:1"]), [])
+
+    def test_live_announcement_snapshot_round_trips_and_clears(self) -> None:
+        """The full shared live payload survives until its lobby is cleaned up."""
+        payload = {
+            "text": "Player is in ARAM: Mayhem",
+            "game": {
+                "platformId": "NA1",
+                "gameId": 123,
+                "gameQueueConfigId": 2400,
+                "participants": [{"puuid": "p1", "championId": 22}],
+            },
+            "highlight_puuids": ["p1"],
+            "game_type": "lol",
+        }
+        with TemporaryDirectory() as directory, patch(
+            "bot_app.store.LIVE_GAME_SNAPSHOT_PATH",
+            Path(directory) / "live_snapshots.json",
+        ):
+            remember_live_game_snapshot("NA1:123", payload)
+
+            self.assertEqual(load_live_game_snapshots(), {"NA1:123": payload})
+            self.assertEqual(
+                pop_live_game_snapshots(["NA1:123"]), {"NA1:123": payload}
+            )
+            self.assertEqual(load_live_game_snapshots(), {})
 
 
 if __name__ == "__main__":

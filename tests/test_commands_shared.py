@@ -15,6 +15,8 @@ from bot_app.commands.shared import (
     Target,
     target_at_latest_match_position,
     target_at_match_position,
+    tracked_players_in_lobby,
+    tracked_players_in_match,
 )
 from bot_app.store import Account
 
@@ -172,6 +174,51 @@ class TargetResolutionTests(unittest.TestCase):
             ("blue-support", "NA1", "Supporter#BLUE"),
         )
         self.assertIsNone(target_at_match_position(match, 6, "NA1"))
+
+    def test_match_and_livegame_include_every_tracked_participant(self) -> None:
+        """Both announcement commands highlight all tracked players present."""
+        target = Target("p1", "NA1", "One#NA1")
+        participants = [{"puuid": "p1"}, {"puuid": "p2"}, {"puuid": "other"}]
+        with patch("bot_app.commands.shared.load_accounts", return_value=self.accounts):
+            match_players = tracked_players_in_match(
+                {"info": {"participants": participants}}, target
+            )
+            live_players = tracked_players_in_lobby(
+                {"participants": participants}, target
+            )
+
+        self.assertEqual({player.puuid for player in match_players}, {"p1", "p2"})
+        self.assertEqual({player.puuid for player in live_players}, {"p1", "p2"})
+
+    def test_match_and_livegame_include_linked_teammates_present(self) -> None:
+        """Command summaries include teammates once and exclude absent accounts."""
+        target = Target("p1", "NA1", "One#NA1")
+        teammates = {
+            "mate": Account("3", "mate", "NA1", "Mate#NA1"),
+            "absent": Account("4", "absent", "NA1", "Absent#NA1"),
+            "duplicate": self.accounts["1"],
+        }
+        participants = [{"puuid": "p1"}, {"puuid": "mate"}]
+        with (
+            patch("bot_app.commands.shared.load_accounts", return_value=self.accounts),
+            patch("bot_app.commands.shared.load_teammates", return_value=teammates),
+        ):
+            for players in (
+                tracked_players_in_match({"info": {"participants": participants}}, target),
+                tracked_players_in_lobby({"participants": participants}, target),
+            ):
+                self.assertEqual([player.puuid for player in players], ["p1", "mate"])
+
+    def test_explicit_untracked_target_is_still_highlighted(self) -> None:
+        """A selected player remains highlighted even without a stored account."""
+        target = Target("guest", "KR", "Guest#KR")
+        participants = [{"puuid": "p2"}, {"puuid": "guest"}]
+        with patch("bot_app.commands.shared.load_accounts", return_value=self.accounts):
+            players = tracked_players_in_match(
+                {"info": {"participants": participants}}, target
+            )
+
+        self.assertEqual({player.puuid for player in players}, {"p2", "guest"})
 
     def test_not_found_replies_echo_every_supplied_option(self) -> None:
         """A failed lookup names the platforms searched and the caller's own inputs."""

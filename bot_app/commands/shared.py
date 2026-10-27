@@ -184,13 +184,16 @@ def match_reference_index(reference: str | None) -> int | None:
     return number - 1 if 1 <= number <= 20 else None
 
 
-def tracked_players_in_lobby(game: dict[str, Any], target: Target) -> list[Any]:
-    """Build tracked-player descriptors for either live-game command."""
+def _tracked_players_in_participants(
+    participants: list[dict[str, Any]], target: Target
+) -> list[Any]:
+    """Return tracked accounts and linked teammates present, plus the selected target."""
     from ..announce import TrackedPlayer
 
-    registered = {account.puuid: account for account in load_accounts().values()}
+    registered = {account.puuid: account for account in load_teammates().values()}
+    registered.update({account.puuid: account for account in load_accounts().values()})
     players = []
-    for participant in game.get("participants", []) or []:
+    for participant in participants:
         account = registered.get(participant.get("puuid"))
         if account is None:
             continue
@@ -198,6 +201,20 @@ def tracked_players_in_lobby(game: dict[str, Any], target: Target) -> list[Any]:
     if target.puuid not in registered:
         players.append(TrackedPlayer(target.puuid, target.riot_id, target.server))
     return players
+
+
+def tracked_players_in_lobby(game: dict[str, Any], target: Target) -> list[Any]:
+    """Build descriptors for every tracked player and linked teammate in a live-game command."""
+    return _tracked_players_in_participants(
+        game.get("participants", []) or [], target
+    )
+
+
+def tracked_players_in_match(match: dict[str, Any], target: Target) -> list[Any]:
+    """Build descriptors for every tracked player and linked teammate in a completed-match command."""
+    return _tracked_players_in_participants(
+        match.get("info", {}).get("participants", []) or [], target
+    )
 
 
 def tracked_tft_players_in_lobby(

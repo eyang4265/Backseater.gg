@@ -269,7 +269,8 @@ class AdminCommands(commands.Cog):
 
         The recency gate is off; the shared formatter never filters by queue.
         """
-        announcement = format_match(
+        announcement = await asyncio.to_thread(
+            format_match,
             match,
             players,
             require_finished=False,
@@ -278,7 +279,7 @@ class AdminCommands(commands.Cog):
         if announcement is None:
             await ctx.respond(
                 embed=make_embed(
-                    "No tracked players were found in that match, so there is nothing to announce."
+                    "No tracked players found in that match."
                 )
             )
             return
@@ -288,7 +289,7 @@ class AdminCommands(commands.Cog):
 
         footer = []
         if not MATPLOTLIB_AVAILABLE:
-            footer.append("Damage graph unavailable (matplotlib not installed).")
+            footer.append("Damage graph unavailable.")
         if footer:
             embed.set_footer(text=" | ".join(footer))
 

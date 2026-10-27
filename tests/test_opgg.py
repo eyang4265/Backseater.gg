@@ -151,30 +151,5 @@ class OPGGStatsTests(unittest.TestCase):
         self.assertEqual(first, second)
         get.assert_called_once()
 
-    def test_position_result_keeps_the_returned_position(self) -> None:
-        """Verify that fetched position results can populate position buttons."""
-        stats = ChampionStats(
-            50.0,
-            10.0,
-            2.0,
-            "1 Tier",
-            "16.16",
-            "mid",
-            (),
-            (),
-            (),
-            None,
-            None,
-            (),
-        )
-        results = [stats, RuntimeError("position unavailable")]
-        by_position = {
-            result.position: result
-            for result in results
-            if isinstance(result, ChampionStats)
-        }
-        self.assertEqual(by_position, {"mid": stats})
-
-
 if __name__ == "__main__":
     unittest.main()

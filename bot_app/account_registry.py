@@ -13,6 +13,7 @@ from .store import (
     load_live_game_state,
     load_tracker_state,
     save_live_game_state,
+    remember_processed_match_ids,
     save_tracker_state,
     update_accounts,
 )
@@ -61,7 +62,7 @@ def track_account(
     allow_reassign: bool = False,
     max_accounts: int = 25,
 ) -> Account:
-    """Resolve, seed, and link an account without backfilling announcements.
+    """Resolve, globally seed recent match ids, and link an account.
 
     ``server`` only picks which platform is checked first; NA, EUW, and KR are
     always swept afterwards, and the account is stored on whichever platform
@@ -71,7 +72,8 @@ def track_account(
     ``discord_id`` may be ``None`` to track an account tied to no Discord
     user: it is then keyed under a synthetic sentinel id, reusing the
     existing key if that PUUID is already tracked so a re-add replaces it
-    in place rather than piling up sentinels.
+    in place rather than piling up sentinels. Recent ids enter the permanent
+    global ledger, preventing registration from backfilling announcements.
     """
     LOGGER.info("Tracking account request: discord_id=%s summoner=%s#%s", discord_id, summoner, tag)
     client = get_client()
@@ -125,7 +127,7 @@ def track_account(
             )
 
         state = load_tracker_state()
-        seeded = PlayerState(matches=list(match_ids))
+        seeded = PlayerState()
         if ranks is not None:
             seeded.ranks.update(ranks)
         state[target_id] = seeded
@@ -133,6 +135,7 @@ def track_account(
             state.pop(duplicate.discord_id, None)
             accounts.pop(duplicate.discord_id, None)
         save_tracker_state(state)
+        remember_processed_match_ids(match_ids)
         live = load_live_game_state()
         live.pop(target_id, None)
         if duplicate:

@@ -5,20 +5,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import discord
+
 from .commands.champ import ChampionPositionView
 from .commands.champstats import VIEW_KIND as CHAMPSTATS_VIEW_KIND, ChampStatsView
 from .commands.coachless import CoachlessView
 from .commands.counterstats import VIEW_KIND as COUNTERSTATS_VIEW_KIND, CounterStatsView
 from .commands.trends import TrendsGameLengthView
 from .champstats import ChampionStatsReport, ChoiceRecord
-from .meetups.store import get_meetup_store
-from .meetups.views import (
-    CONFIRM_VIEW_KIND,
-    VIEW_KIND,
-    ConfirmationView,
-    build_meetup_view,
-)
 from .opgg import ChampionStats
+from .daily_summary import RecapPaginator
 from .store import load_embed_button_states
 
 LOGGER = logging.getLogger(__name__)
@@ -43,17 +39,6 @@ def _champstats_report(payload: dict[str, Any]) -> ChampionStatsReport:
     return ChampionStatsReport(**values)
 
 
-def _meetup_view(payload: dict[str, Any]) -> Any:
-    """Rebuild a meetup's controls from its stored id.
-
-    Only the id is persisted, so the restored view always reflects the
-    meetup's current state and votes rather than a snapshot taken when the
-    message was last edited.
-    """
-    meetup = get_meetup_store().get(int(payload["meetup_id"]))
-    return build_meetup_view(meetup) if meetup is not None else None
-
-
 def register_persistent_command_views(bot: Any) -> int:
     """Restore persistent public command views after startup."""
     restored = 0
@@ -62,7 +47,12 @@ def register_persistent_command_views(bot: Any) -> int:
     for state in states:
         payload = state.get("payload", {})
         try:
-            if state["kind"] == "champ":
+            if state["kind"] == "daily_recap":
+                view = RecapPaginator(
+                    [discord.Embed.from_dict(embed) for embed in payload["embeds"]],
+                    page=int(payload.get("page", 0)),
+                )
+            elif state["kind"] == "champ":
                 view = ChampionPositionView(
                     str(payload["champion_name"]),
                     str(payload["server"]),
@@ -114,12 +104,6 @@ def register_persistent_command_views(bot: Any) -> int:
                     page=int(payload.get("page", 0)),
                 )
                 view.add_role_buttons()
-            elif state["kind"] == VIEW_KIND:
-                view = _meetup_view(payload)
-                if view is None:
-                    continue
-            elif state["kind"] == CONFIRM_VIEW_KIND:
-                view = ConfirmationView(int(payload["meetup_id"]))
             else:
                 continue
             bot.add_view(view, message_id=state["message_id"])

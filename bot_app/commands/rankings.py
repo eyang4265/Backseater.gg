@@ -96,7 +96,7 @@ class RankingCommands(commands.Cog):
         required=False,
     )
     async def today(self, ctx, server, username, queue="solo", days=1):
-        """Summarize saved LP movement across recent local calendar days."""
+        """Summarize recent saved LP movement, with a brief status when empty."""
         log_command(
             ctx, server=server, username=username, queue=queue, days=days
         )
@@ -121,7 +121,7 @@ class RankingCommands(commands.Cog):
             period = "today" if days == 1 else f"in the last {days} local days"
             await ctx.respond(
                 embed=make_embed(
-                    f"No LP history recorded {period}. It starts filling after the next ranked game."
+                    f"No LP history recorded {period}."
                 )
             )
             return
@@ -146,7 +146,7 @@ class RankingCommands(commands.Cog):
         required=False,
     )
     async def lpgraph(self, ctx, server, username, queue="solo", days=30):
-        """Handle lpgraph."""
+        """Show the LP chart and summary, with brief empty and chart-unavailable statuses."""
         log_command(
             ctx,
             server=server,
@@ -163,7 +163,7 @@ class RankingCommands(commands.Cog):
         if not entries:
             await ctx.respond(
                 embed=make_embed(
-                    "No LP history recorded yet. It starts filling after the next ranked game."
+                    "No LP history recorded yet."
                 )
             )
             return
@@ -172,7 +172,7 @@ class RankingCommands(commands.Cog):
             summary_text(summarize(entries)), title=f"LP History — {target.riot_id}"
         )
         if chart is None:
-            embed.set_footer(text="Chart rendering is unavailable; showing the text summary.")
+            embed.set_footer(text="Chart unavailable.")
             await ctx.respond(embed=embed)
             return
         embed.set_image(url=f"attachment://{LP_CHART_FILENAME}")

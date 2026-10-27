@@ -16,6 +16,9 @@ FLEX_QUEUE_ID = 440
 SWIFTPLAY_QUEUE_ID = 480
 RANKED_5S_QUEUE_ID = 710
 ARAM_MAYHEM_QUEUE_ID = 2400
+CLASH_QUEUE_IDS = frozenset({700, 720})
+# These queues share saved-lobby finished notices and Mayhem-style rendering.
+LIMITED_RESULT_QUEUE_IDS = CLASH_QUEUE_IDS | frozenset({ARAM_MAYHEM_QUEUE_ID})
 ARENA_QUEUE_IDS = frozenset({1700, 1710, 1740, 1750})
 ARENA_TEAM_SIZES: dict[int, int] = {1700: 2, 1710: 2, 1740: 3, 1750: 3}
 RANKED_QUEUE_IDS = frozenset({SOLO_QUEUE_ID, FLEX_QUEUE_ID})

@@ -11,3 +11,5 @@ Use `/laning` for your linked account's latest match. Optional `username` accept
 a League or Discord username, `server` selects its region, `match_id` accepts a
 match ID or recent-game number (1 is latest), and `position` selects a player by
 match slot (1–10).
+
+Results and status messages are concise; explanations remain in command help.

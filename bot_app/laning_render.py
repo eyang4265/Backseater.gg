@@ -66,12 +66,12 @@ async def build_laning_embed(
     match: dict[str, Any], timeline: dict[str, Any] | None, puuid: str,
     checkpoints: tuple[tuple[str, int], ...] | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
-    """Render the selected lane-comparison checkpoints and their Gold/XP chart."""
+    """Render lane checkpoints and the Gold/XP chart with a concise queue header."""
     LOGGER.info("Building laning-phase embed for puuid=%s", puuid)
     info = match.get("info", {})
     participants = info.get("participants", []) or []
     embed = make_embed(
-        f"Laning-phase comparison — {queue_name(info.get('queueId'))}",
+        queue_name(info.get("queueId")),
         title="Laning Phase",
         color=discord.Color.gold(),
     )
@@ -86,8 +86,7 @@ async def build_laning_embed(
     if not position or position == "JUNGLE":
         LOGGER.debug("Laning: position=%s has no lane opponent, skipping", position)
         embed.description = (
-            f"{embed.description}\n\nJungle has no lane opponent, so there is nothing to compare "
-            "for this player in this match."
+            f"{embed.description}\n\nJungle has no lane opponent."
         )
         return embed, None
 

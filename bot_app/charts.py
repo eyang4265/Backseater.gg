@@ -17,6 +17,8 @@ from typing import Any, Sequence
 import discord
 
 from . import ddragon
+from .arena_teams import ARENA_TEAM_COLORS, arena_ordinal
+from .queues import ARENA_QUEUE_IDS
 from .ranks import TIER_LABELS, value_to_rank
 from .timeline import KillEvent, MatchTimeline
 
@@ -88,9 +90,10 @@ def _build_damage_chart(
 ) -> discord.File | None:
     """Horizontal bar chart of damage to champions, one bar per participant.
 
-    Bars are coloured by team; highlighted players get a gold outline, a ★ in
-    the label, and a gold axis label. Returns None when matplotlib is missing
-    or the match carries no participants.
+    Bars are coloured by team; Arena bars match the shared team markers and
+    center the ordinal inside each bar. Highlighted players get a gold outline,
+    a ★ in the label, and a gold axis label. Returns None when matplotlib is
+    missing or the match carries no participants.
     """
     if not MATPLOTLIB_AVAILABLE:
         LOGGER.warning("matplotlib is not installed; skipping the damage chart")
@@ -118,6 +121,33 @@ def _build_damage_chart(
 
     catalog = ddragon.catalog()
     highlighted = set(highlight_puuids)
+    arena = match.get("info", {}).get("queueId") in ARENA_QUEUE_IDS
+    arena_team_numbers: dict[int, int] = {}
+    if arena:
+        subteam_placements: dict[int, int | None] = {}
+        for participant in participants:
+            subteam_id = participant.get("playerSubteamId")
+            if subteam_id is None:
+                continue
+            try:
+                placement = int(participant.get("placement") or 0) or None
+            except (TypeError, ValueError):
+                placement = None
+            if subteam_id not in subteam_placements or placement is not None:
+                subteam_placements[subteam_id] = placement
+        ordered_subteams = sorted(
+            subteam_placements,
+            key=lambda subteam_id: (
+                subteam_placements[subteam_id]
+                if subteam_placements[subteam_id] is not None
+                else 10_000,
+                subteam_id,
+            ),
+        )
+        arena_team_numbers = {
+            subteam_id: number
+            for number, subteam_id in enumerate(ordered_subteams, start=1)
+        }
 
     gold_differences: dict[int, int] = {}
     if metric_field == "goldDifference":
@@ -156,19 +186,35 @@ def _build_damage_chart(
     colors: list[str] = []
     edge_colors: list[str] = []
     edge_widths: list[float] = []
+    placement_labels: list[str | None] = []
+    placement_text_colors: list[str] = []
     is_highlighted: list[bool] = []
 
     for participant in rows:
         champion = catalog.by_key(participant.get("championId")) if catalog else None
         name = champion.name if champion else participant.get("championName", "Unknown")
         highlight = participant.get("puuid") in highlighted
-        team_color = _TEAM_BLUE if participant.get("teamId") == 100 else _TEAM_RED
+        if arena and participant.get("playerSubteamId") in arena_team_numbers:
+            team_number = arena_team_numbers[participant["playerSubteamId"]]
+            team_color = ARENA_TEAM_COLORS[(team_number - 1) % len(ARENA_TEAM_COLORS)]
+            placement_label = arena_ordinal(team_number)
+            red, green, blue = (
+                int(team_color[index:index + 2], 16) for index in (1, 3, 5)
+            )
+            brightness = 0.299 * red + 0.587 * green + 0.114 * blue
+            placement_text_color = "#111111" if brightness >= 140 else "#FFFFFF"
+        else:
+            team_color = _TEAM_BLUE if participant.get("teamId") == 100 else _TEAM_RED
+            placement_label = None
+            placement_text_color = _TEXT
 
         labels.append(f"★  {name}" if highlight else name)
         values.append(metric_value(participant))
         colors.append(team_color)
         edge_colors.append(_HIGHLIGHT if highlight else team_color)
         edge_widths.append(1.8 if highlight else 0.0)
+        placement_labels.append(placement_label)
+        placement_text_colors.append(placement_text_color)
         is_highlighted.append(highlight)
 
     figure, axes = plt.subplots(figsize=_FIGURE_SIZE, dpi=_FIGURE_DPI)
@@ -208,6 +254,22 @@ def _build_damage_chart(
             fontsize=10,
             fontweight="medium",
         )
+        for bar, placement_label, text_color in zip(
+            bars, placement_labels, placement_text_colors
+        ):
+            if placement_label is None:
+                continue
+            axes.text(
+                bar.get_width() / 2,
+                bar.get_y() + bar.get_height() / 2,
+                placement_label,
+                ha="center",
+                va="center",
+                color=text_color,
+                fontsize=9,
+                fontweight="bold",
+                zorder=4,
+            )
 
         axes.set_xlim(right=max(values, default=0) * 1.16 or 1)
 
@@ -224,12 +286,26 @@ def _build_damage_chart(
             axes.spines[side].set_visible(False)
         axes.spines["bottom"].set_color(_GRID)
 
+        if arena_team_numbers:
+            legend_entries = [
+                (
+                    plt.Rectangle(
+                        (0, 0), 1, 1,
+                        facecolor=ARENA_TEAM_COLORS[(number - 1) % len(ARENA_TEAM_COLORS)],
+                        edgecolor="none",
+                    ),
+                    f"{arena_ordinal(number)} place",
+                )
+                for number in arena_team_numbers.values()
+            ]
+        else:
+            legend_entries = [
+                (plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_BLUE, edgecolor="none"), "Blue"),
+                (plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_RED, edgecolor="none"), "Red"),
+            ]
         axes.legend(
-            [
-                plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_BLUE, edgecolor="none"),
-                plt.Rectangle((0, 0), 1, 1, facecolor=_TEAM_RED, edgecolor="none"),
-            ],
-            ["Blue", "Red"],
+            [entry[0] for entry in legend_entries],
+            [entry[1] for entry in legend_entries],
             loc="lower right",
             frameon=False,
             fontsize=9,

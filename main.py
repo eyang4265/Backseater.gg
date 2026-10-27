@@ -24,8 +24,8 @@ from bot_app.http_debug import install_rate_limit_debug_logging
 from bot_app.logging_config import configure_logging
 from bot_app.match_cache import get_match_cache
 from bot_app.owner_notifications import OwnerErrorNotifier
-from bot_app.meetups import poll_and_close_meetups
 from bot_app.queues import validate_current_queue_ids
+from bot_app.daily_summary import poll_daily_summary
 from bot_app.runtime import configure_bot
 from bot_app.singleton import acquire_singleton_lock
 from bot_app.render import make_embed
@@ -43,10 +43,6 @@ LOGGER = logging.getLogger(__name__)
 
 
 Poller = Callable[[discord.Bot], Awaitable[None]]
-
-MEETUP_CLOSE_INTERVAL_SECONDS = 600
-"""Meetups close on a fixed slow cadence; nothing here is time-critical."""
-
 
 def mention_reply_content(latency_seconds: float) -> str:
     """Return the concise response sent when the bot is mentioned."""
@@ -196,6 +192,11 @@ def main() -> None:
         extra={"category": "STARTUP"},
     )
 
+    LOGGER.info(
+        "Daily recaps scheduled at 04:00 America/Los_Angeles (04:00-to-04:00 gaming day)",
+        extra={"category": "STARTUP"},
+    )
+
     stale_queue_ids = validate_current_queue_ids()
     if stale_queue_ids:
         LOGGER.warning(
@@ -215,6 +216,12 @@ def main() -> None:
     pollers = [
         make_poller(
             bot,
+            poll_daily_summary,
+            interval_seconds=60,
+            notifier=notifier,
+        ),
+        make_poller(
+            bot,
             poll_and_announce,
             interval_seconds=settings.poll_interval_seconds,
             notifier=notifier,
@@ -224,13 +231,6 @@ def main() -> None:
             poll_live_games_and_announce,
             interval_seconds=settings.poll_interval_seconds,
             initial_delay_seconds=settings.poll_interval_seconds / 3,
-            notifier=notifier,
-        ),
-        make_poller(
-            bot,
-            poll_and_close_meetups,
-            interval_seconds=MEETUP_CLOSE_INTERVAL_SECONDS,
-            initial_delay_seconds=settings.poll_interval_seconds / 2,
             notifier=notifier,
         ),
     ]
@@ -258,7 +258,7 @@ def main() -> None:
             extra={"category": "STARTUP"},
         )
 
-        if not pollers[0].is_running():
+        if not pollers[1].is_running():
             await asyncio.to_thread(ddragon.recent_patch_prefixes, 6)
             updated, failed = await asyncio.to_thread(update_all_rank_snapshots)
             LOGGER.info(

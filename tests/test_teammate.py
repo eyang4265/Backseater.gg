@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 from bot_app import store
 from bot_app.account_registry import RegistryError
 from bot_app.commands.add import (
-    _demote_to_teammate,
-    _promote_from_teammate,
-    _register_teammate,
+    _switch_to_companion,
+    _promote_from_companion,
+    _register_companion,
 )
 from bot_app.commands.registry import _account_line, _is_unlinked, _teammate_line
 from bot_app.render import build_match_columns
@@ -34,7 +34,7 @@ class SwitchRegistryTests(unittest.TestCase):
             store._teammate_puuid_cache.invalidate()
             save_accounts({"55": Account("55", "p-league", "EUW1", "Real#EUW")})
 
-            mate = _demote_to_teammate("55")
+            mate = _switch_to_companion("55", "teammate")
 
             self.assertEqual((mate.discord_id, mate.puuid, mate.server), ("55", "p-league", "EUW1"))
             self.assertNotIn("55", load_accounts())
@@ -45,8 +45,8 @@ class SwitchRegistryTests(unittest.TestCase):
         with temporary_state() as root, patch.object(
             store, "TEAMMATE_DATA_PATH", root / "teammates.json"
         ):
-            with self.assertRaisesRegex(RegistryError, "no tracked account"):
-                _demote_to_teammate("999")
+            with self.assertRaisesRegex(RegistryError, "no saved account"):
+                _switch_to_companion("999", "teammate")
 
     def test_promote_re_tracks_and_drops_the_teammate_entry(self) -> None:
         league = Account("55", "p-league", "NA1", "Real#NA1")
@@ -65,7 +65,7 @@ class SwitchRegistryTests(unittest.TestCase):
                 )
             )
 
-            result = _promote_from_teammate("55", 25)
+            result = _promote_from_companion("55", 25)
 
             self.assertEqual(result, (league, tft))
             self.assertEqual(load_teammates(), {})
@@ -74,19 +74,19 @@ class SwitchRegistryTests(unittest.TestCase):
 class AccountsListingTests(unittest.TestCase):
     def test_linked_account_renders_a_mention(self) -> None:
         line = _account_line(Account("123456789012345678", "p", "NA1", "Real#NA1"))
-        self.assertEqual(line, "<@123456789012345678> — **Real#NA1** (NA1)")
+        self.assertEqual(line, "⭐ <@123456789012345678> — **Real#NA1** (NA1)")
 
     def test_unlinked_account_renders_a_marker(self) -> None:
         self.assertTrue(_is_unlinked("000000000000000001"))
         self.assertFalse(_is_unlinked("123456789012345678"))
         line = _account_line(Account("000000000000000001", "p", "EUW1", "Solo#EUW"))
-        self.assertEqual(line, "*(unlinked)* — **Solo#EUW** (EUW1)")
+        self.assertEqual(line, "⭐ *(unlinked)* — **Solo#EUW** (EUW1)")
 
     def test_teammate_line_shows_the_tie_only_when_present(self) -> None:
         tied = _teammate_line(Account("42", "p", "NA1", "Mate#NA1"))
-        self.assertEqual(tied, "🤝 **Mate#NA1** (NA1) — <@42>")
+        self.assertEqual(tied, "⭐ **Mate#NA1** (NA1) — <@42>")
         loose = _teammate_line(Account("", "p", "NA1", "Mate#NA1"))
-        self.assertEqual(loose, "🤝 **Mate#NA1** (NA1)")
+        self.assertEqual(loose, "⭐ **Mate#NA1** (NA1)")
 
 
 class _PlayerLookup:
@@ -146,7 +146,7 @@ class TeammateStoreTests(unittest.TestCase):
             self.assertEqual(teammate_puuids(), frozenset())
 
     def test_add_teammate_resolves_and_stores_tied_to_the_user(self) -> None:
-        """`/add ... teammate:True` stores a bare PUUID tied to the user."""
+        """`/add ... account_type:teammate` stores a bare PUUID tied to the user."""
         client = MagicMock()
         client.puuid.side_effect = lambda name, tag, platform: (
             "mate-puuid" if platform == "EUW1" else None
@@ -157,7 +157,7 @@ class TeammateStoreTests(unittest.TestCase):
             store, "TEAMMATE_DATA_PATH", root / "teammates.json"
         ), patch("bot_app.commands.add.get_client", return_value=client):
             store._teammate_puuid_cache.invalidate()
-            account = _register_teammate("456", "Mate", "EUW")
+            account = _register_companion("456", "Mate", "EUW", "teammate")
 
             self.assertEqual(account.puuid, "mate-puuid")
             self.assertEqual(account.server, "EUW1")

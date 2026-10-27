@@ -39,6 +39,7 @@ from .shared import (
     target_at_latest_match_position,
     target_for,
 )
+from .history_scan_limit import limit_history_scan
 
 _CACHE_PATH = DATA_DIR / "matches.sqlite"
 _PAGE_SIZE = 10
@@ -98,7 +99,7 @@ def _stats_embed(
     page: int,
     apply_filter: bool = False,
 ) -> discord.Embed:
-    """Render one selected report table with aligned Discord columns."""
+    """Render concise report results with aligned Discord columns."""
     last_match = ""
     if report.earliest_match_timestamp:
         try:
@@ -136,8 +137,7 @@ def _stats_embed(
         embed.add_field(name="Record", value="\n".join(_record_text(row) for row in page_rows), inline=True)
         embed.add_field(name="Win Rate", value="\n".join(f"{row.win_rate:.1%}" for row in page_rows), inline=True)
     if not added:
-        embed.description += "\n\nNo details were present in the cached payloads for this view."
-    embed.set_footer(text="Local cache plus the latest Riot history scan; local results are subject to the 180-day retention window.")
+        embed.description += "\n\nNo details available for this view."
     return embed
 
 
@@ -409,8 +409,9 @@ class ChampStatsCommands(commands.Cog):
     @discord.option("username", description="League or Discord username (defaults to you)", required=False)
     @discord.option("filter", bool, description="Hide choices with a play rate below 1%", required=False, default=True)
     @discord.option("position", int, description=MATCH_POSITION_DESCRIPTION, min_value=1, max_value=10, required=False)
+    @limit_history_scan
     async def champstats(self, ctx, champion, queue, role, patch, since_patch, server, username, filter: bool, position):
-        """Show match-derived choices for a direct target or latest-match slot."""
+        """Show choices and hold shared scan admission until the report is ready."""
         queue = queue or ALL_GAMES
         role = role or ALL_ROLES
         apply_filter = bool(filter)
@@ -436,7 +437,7 @@ class ChampStatsCommands(commands.Cog):
             return
         LOGGER.info("/champstats showing %s for %s (queue=%s)", found.name, target.riot_id, queue)
         message = await ctx.respond(embed=make_embed(
-            "Scanning Riot match history; this message will refresh when it finishes.",
+            "Scanning match history…",
             title=f"{found.name} Stats — {target.riot_id}",
         ))
         if message is not None:
@@ -446,6 +447,7 @@ class ChampStatsCommands(commands.Cog):
             ))
             self._scan_tasks.add(task)
             task.add_done_callback(self._scan_tasks.discard)
+            await task
 
 
 def setup(bot: discord.Bot) -> None:

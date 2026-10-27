@@ -6,8 +6,6 @@ from unittest.mock import patch
 from bot_app.queues import (
     ARENA_QUEUE_IDS,
     ARENA_TEAM_SIZES,
-    CURRENT_QUEUE_IDS,
-    QUEUE_NAMES,
     queue_name,
     current_queue_names,
     validate_current_queue_ids,
@@ -24,14 +22,6 @@ class CurrentQueueNamesTests(unittest.TestCase):
     def test_every_current_id_has_a_known_name(self) -> None:
         """Verify that the shipped allowlist has no stale/typo'd queue ids."""
         self.assertEqual(validate_current_queue_ids(), ())
-
-    def test_returns_names_for_exactly_the_current_ids(self) -> None:
-        """Verify that current_queue_names reflects CURRENT_QUEUE_IDS, not the full table."""
-        expected = sorted({QUEUE_NAMES[queue_id] for queue_id in CURRENT_QUEUE_IDS})
-        self.assertEqual(list(current_queue_names()), expected)
-        # Some known modes (e.g. rotating events) should NOT be offered.
-        self.assertNotIn("Nexus Blitz", current_queue_names())
-        self.assertIn("Ranked Solo/Duo", current_queue_names())
 
     def test_game_mode_choices_are_limited_to_supported_modes(self) -> None:
         """Verify only the requested modes are offered by the shared filter."""

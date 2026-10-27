@@ -52,6 +52,25 @@ class ChampionPoolTests(unittest.TestCase):
             )
         self.assertEqual(embed.fields[0].value, "<:Garen:1> Garen\nJinx")
 
+    def test_monkeyking_and_wukong_share_one_record(self):
+        rows = aggregate_pool([match("MonkeyKing", True), match("Wukong", False)], "player")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0].champion, rows[0].games, rows[0].wins), ("Wukong", 2, 1))
+
+    def test_monkeyking_displays_wukong_with_either_icon_or_text_fallback(self):
+        for icon_name in ("Wukong", "MonkeyKing", None):
+            with self.subTest(icon_name=icon_name), patch(
+                "bot_app.commands.championpool.emoji.champion_emoji",
+                side_effect=lambda _champion, *, name: "<:champion:62>" if name == icon_name else None,
+            ):
+                embed = _pool_embed(
+                    "Player#NA1", [match("MonkeyKing", True), match("Wukong", False)],
+                    "player", "All SR", 2, 0,
+                )
+            expected = "<:champion:62> Wukong" if icon_name else "Wukong"
+            self.assertEqual(embed.fields[0].value, expected)
+            self.assertEqual(embed.fields[1].value, "1W–1L · 50%")
+
     def test_player_title_links_to_opgg_even_without_eligible_games(self):
         profile = "https://op.gg/lol/summoners/na/Player-NA1?hl=en_US"
         embed = _pool_embed("Player#NA1", [], "player", "All SR", 0, 0, profile)

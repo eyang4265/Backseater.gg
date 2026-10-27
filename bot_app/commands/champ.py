@@ -75,12 +75,13 @@ def _rune_row(runes, *, selected: bool = False) -> str:
 def _champion_stats_embed(
     champion_name: str, stats: ChampionStats, url: str, server: str
 ) -> discord.Embed:
-    """Render a live OP.GG champion panel."""
+    """Render concise OP.GG statistics with the source linked from the title."""
     role_label = stats.position.title() if stats.position != "all" else "All roles"
     embed = make_embed(
-        f"[View source on OP.GG]({url})",
+        "",
         title=f"{champion_name} — OP.GG ({role_label}) · {server}",
     )
+    embed.url = url
     embed.add_field(name="Tier", value=stats.tier or "Unavailable", inline=True)
     embed.add_field(name="Win rate", value=f"{stats.win_rate:.2f}%", inline=True)
     embed.add_field(name="Pick rate", value=f"{stats.pick_rate:.2f}%", inline=True)
