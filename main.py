@@ -26,12 +26,19 @@ from bot_app.match_cache import get_match_cache
 from bot_app.owner_notifications import OwnerErrorNotifier
 from bot_app.queues import validate_current_queue_ids
 from bot_app.daily_summary import poll_daily_summary
+from bot_app.worlds import poll_worlds
+from bot_app.worlds_schedule import poll_worlds_schedule
+from bot_app.worlds_schedule_posts import poll_worlds_schedule_posts
+from bot_app.worlds_polling import schedule_aware
+from bot_app.worlds_routing import remove_worlds_channel
 from bot_app.runtime import configure_bot
 from bot_app.singleton import acquire_singleton_lock
 from bot_app.render import make_embed
-from bot_app.commands.guilds import unset_guild_channel
+from bot_app.guild_routing import unset_guild_channel
+from bot_app.channel_preferences import clear_server_preferences
 from bot_app.announce import register_persistent_embed_views
 from bot_app.command_views import register_persistent_command_views
+from bot_app.worlds_stats_views import register_worlds_stats_views
 from bot_app.tracker import (
     poll_and_announce,
     poll_live_games_and_announce,
@@ -106,7 +113,8 @@ async def sync_and_restore_views(
     if state.persistent_views_restored:
         return
     try:
-        restored = register_persistent_embed_views(bot) + register_persistent_command_views(bot)
+        restored = (register_persistent_embed_views(bot) + register_persistent_command_views(bot)
+                    + register_worlds_stats_views(bot))
     except Exception as error:
         LOGGER.exception(
             "Could not restore persistent embed views",
@@ -233,6 +241,9 @@ def main() -> None:
             initial_delay_seconds=settings.poll_interval_seconds / 3,
             notifier=notifier,
         ),
+        make_poller(bot, schedule_aware(poll_worlds), interval_seconds=60, notifier=notifier),
+        make_poller(bot, schedule_aware(poll_worlds_schedule, daily=True), interval_seconds=60, notifier=notifier),
+        make_poller(bot, schedule_aware(poll_worlds_schedule_posts), interval_seconds=60, notifier=notifier),
     ]
 
     @bot.event
@@ -295,8 +306,10 @@ def main() -> None:
 
     @bot.event
     async def on_guild_remove(guild: discord.Guild) -> None:
-        """Handle guild remove."""
+        """Clear this server's announcement routes and opt-outs."""
         await asyncio.to_thread(unset_guild_channel, guild.id)
+        await asyncio.to_thread(remove_worlds_channel, guild.id)
+        await asyncio.to_thread(clear_server_preferences, guild.id)
 
     @bot.event
     async def on_application_command_error(ctx, error: Exception) -> None:

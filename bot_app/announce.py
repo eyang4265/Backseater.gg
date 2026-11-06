@@ -32,6 +32,7 @@ from .charts import (
     build_jungle_proximity_comparison_chart,
     build_team_gold_difference_chart,
 )
+from .channel_preferences import disabled_guilds, channel_is_disabled
 from .config import get_settings
 from .jungle_proximity_render import jungle_chart_checkpoints
 from .premades import remember_game_partymates
@@ -632,7 +633,7 @@ def _format_tft_live_game(
 
 
 async def resolve_announcement_channel(bot: Any) -> Any | None:
-    """The configured announcement channel, fetched if it isn't cached."""
+    """Resolve the default transport channel; publishing applies per-server opt-outs."""
     channel_id = get_settings().announcement_channel_id
     channel = bot.get_channel(channel_id)
     if channel is not None:
@@ -655,7 +656,8 @@ async def resolve_announcement_channels(
     channel_cache: dict[int, Any | None] | None = None,
     global_channel: Any = _UNSET,
 ) -> list[Any]:
-    """Resolve membership routes while always preserving the legacy channel."""
+    """Resolve enabled membership routes and honor server opt-outs on the default channel."""
+    disabled = await asyncio.to_thread(disabled_guilds, "matches")
     configured_routes = (
         configured
         if configured is not None
@@ -678,6 +680,8 @@ async def resolve_announcement_channels(
         channel_cache = {}
     if global_channel is _UNSET:
         global_channel = await resolve_announcement_channel(bot)
+    if global_channel is not None and channel_is_disabled(global_channel, disabled):
+        global_channel = None
 
     discord_ids = {
         int(account.discord_id)
@@ -689,6 +693,8 @@ async def resolve_announcement_channels(
         {getattr(global_channel, "id", None)} if global_channel is not None else set()
     )
     for guild_id, channel_id in configured_routes.items():
+        if str(guild_id) in disabled:
+            continue
         guild = bot.get_guild(int(guild_id))
         if guild is None:
             continue

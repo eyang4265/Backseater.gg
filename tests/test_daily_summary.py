@@ -153,6 +153,24 @@ class DailyPollTests(unittest.IsolatedAsyncioTestCase):
         await daily.poll_daily_summary(self.bot, now=at(15, 6))
         self.assertEqual(self.channels[1].send.await_count, 3)
 
+    async def test_oldest_receipt_survives_before_four_am_and_journal_pruning(self):
+        await daily.poll_daily_summary(self.bot, now=at(12, 6))
+        await daily.poll_daily_summary(self.bot, now=at(26, 3))
+        self.assertEqual(self.channels[1].send.await_count, 13)
+        # The next calendar date must not expire a still-eligible gaming day.
+        await daily.poll_daily_summary(self.bot, now=at(27, 2))
+        self.assertEqual(self.channels[1].send.await_count, 14)
+        daily.record_announcement(1, announcement(), now=at(27, 3))
+        await daily.poll_daily_summary(self.bot, now=at(27, 3))
+        await daily.poll_daily_summary(self.bot, now=at(27, 3, 59))
+        self.assertEqual(self.channels[1].send.await_count, 14)
+        self.assertEqual(daily._state(0)["channels"]["1"]["sent"]["2026-10-12"], "done")
+        await daily.poll_daily_summary(self.bot, now=at(27, 4))
+        self.assertEqual(self.channels[1].send.await_count, 15)
+        self.assertNotIn("2026-10-12", daily._state(0)["channels"]["1"]["sent"])
+        await daily.poll_daily_summary(self.bot, now=at(27, 6))
+        self.assertEqual(self.channels[1].send.await_count, 15)
+
     async def test_multipage_recap_retries_one_message_with_persistent_buttons(self):
         await daily.poll_daily_summary(self.bot, now=at(12, 6))
         for i in range(10):

@@ -80,6 +80,52 @@ _MID_BOTTOM_BOUNDARY_COLOR = "#FF9F1C"
 _HEATMAP_KILL_WEIGHT = 5
 
 
+def build_worlds_damage_share_chart(stats, series) -> discord.File | None:
+    """Chart own-team damage shares with team-prefix-free player labels."""
+    from .worlds_player_names import player_name
+    if not MATPLOTLIB_AVAILABLE:
+        return None
+    with _chart_lock:
+        figure, axes = plt.subplots(figsize=(10, 6.8), dpi=_FIGURE_DPI)
+        try:
+            figure.patch.set_facecolor(_BACKGROUND)
+            axes.set_facecolor(_BACKGROUND)
+            names, values, colors = [], [], []
+            team_names = dict(zip(series["teams"], series.get("team_names", series["names"])))
+            legend = []
+            for team in stats["teams"]:
+                color = _TEAM_BLUE if team["side"] == "blue" else _TEAM_RED
+                legend.append((plt.Rectangle((0, 0), 1, 1, facecolor=color), team_names[team["id"]]))
+                for player in team["players"]:
+                    name = player_name(player["name"], series, team["id"])
+                    names.append(f"{name[:40]} ({player['champion'][:25]})")
+                    values.append(player["damage_share"] * 100)
+                    colors.append(color)
+            bars = axes.barh(range(len(values)), values, color=colors, height=.72, zorder=3)
+            axes.set_yticks(range(len(names)), labels=names)
+            axes.invert_yaxis()
+            axes.set_xlim(0, min(100, max(50, max(values, default=0) * 1.18)))
+            axes.set_title(f"Game {stats['game_number']} · Champion Damage Share", color=_TEXT, fontsize=15, pad=20)
+            axes.set_xlabel("% of own team's damage to champions", color=_TEXT, labelpad=10)
+            axes.tick_params(axis="both", colors=_TEXT, length=0)
+            axes.axhline(4.5, color=_GRID, linewidth=1)
+            axes.grid(axis="x", color=_GRID, alpha=.6, zorder=0)
+            for spine in axes.spines.values():
+                spine.set_visible(False)
+            for bar, value in zip(bars, values):
+                axes.text(value + .6, bar.get_y() + bar.get_height()/2, f"{value:.1f}%",
+                          va="center", color=_TEXT, fontsize=10)
+            axes.legend([item[0] for item in legend], [item[1] for item in legend],
+                        loc="lower right", frameon=False, labelcolor=_TEXT, fontsize=9)
+            figure.tight_layout(pad=1.5)
+            buffer = io.BytesIO()
+            figure.savefig(buffer, format="png", facecolor=figure.get_facecolor())
+        finally:
+            plt.close(figure)
+    buffer.seek(0)
+    return discord.File(buffer, filename=f"worlds-{stats['game_id']}-damage-share.png")
+
+
 def _build_damage_chart(
     match: dict[str, Any],
     highlight_puuids: Sequence[str] | set[str] = (),

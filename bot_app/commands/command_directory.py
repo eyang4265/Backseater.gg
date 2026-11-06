@@ -24,10 +24,10 @@ _LEAGUE_GROUPS = (
         ("mastery", "champ", "championpool", "champstats", "counterstats", "trends", "coachless"),
     ),
     ("Ranks & Records", ("today", "lpgraph", "leaderboard", "bestplayer", "duo", "party", "synergy", "dailyrecap")),
-    ("Community & Setup", ("setchannel", "unsetchannel")),
+    ("Community & Setup", ("setchannel", "setworldschannel", "unsetchannel")),
     (
         "Guides & Riot Info",
-        ("help", "emoji", "leaguecommands", "patchnotes", "rotation", "serverstatus"),
+        ("help", "emoji", "leaguecommands", "patchnotes", "worlds", "stats", "bracket", "rotation", "serverstatus"),
     ),
 )
 _TFT_GROUPS = (

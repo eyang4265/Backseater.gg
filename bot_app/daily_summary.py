@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from .config import DATA_DIR, get_settings
+from .channel_preferences import disabled_guilds, channel_is_disabled
 from .paginator import Paginator
 from .render import make_embed
 from .store import (load_accounts, load_guild_channels, load_teammates, load_tft_accounts,
@@ -68,9 +69,9 @@ def completed_window(now):
 
 
 def _prune(state, now):
-    """Bound journal and receipt retention even during days with no activity."""
+    """Prune receipts only after their gaming day leaves the catch-up window."""
     cutoff = int(now.timestamp()*1000) - 14 * 86400000
-    oldest_day = (now.astimezone(PACIFIC).date() - timedelta(days=14)).isoformat()
+    oldest_day = (completed_window(now)[0].date() - timedelta(days=13)).isoformat()
     for saved in state["channels"].values():
         saved["events"] = {k: e for k, e in saved["events"].items() if e["posted_ms"] >= cutoff}
         saved["sent"] = {k: v for k, v in saved["sent"].items() if k >= oldest_day}
@@ -347,18 +348,20 @@ def latest_recap(channel_id):
 
 
 async def poll_daily_summary(bot, *, now=None):
-    """Post each closed day as one message with persistent buttons for extra pages."""
+    """Post closed days with persistent page buttons, skipping opted-out servers."""
     async with _POLL_LOCK:
         now = now or datetime.now(timezone.utc)
         start, end = completed_window(now)
         routes = await asyncio.to_thread(load_guild_channels)
+        disabled = await asyncio.to_thread(disabled_guilds, "matches")
+        routes = {guild: channel for guild, channel in routes.items() if str(guild) not in disabled}
         channel_ids = set(routes.values()) | {get_settings().announcement_channel_id}
         channel_ids.discard(0)
         due = await asyncio.to_thread(_load_due, channel_ids, now, start, end)
         for channel_id, events, _progress, start, end in due:
             try:
                 channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-                if channel is None:
+                if channel is None or channel_is_disabled(channel, disabled):
                     continue
                 embeds = summary_embeds(events, start, end)
                 view = RecapPaginator(embeds) if len(embeds) > 1 else None

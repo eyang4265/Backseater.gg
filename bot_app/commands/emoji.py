@@ -10,9 +10,16 @@ from .shared import GUILD_IDS, log_command
 
 
 def build_emoji_legend() -> discord.Embed:
-    """Explain shared announcement symbols, including per-match pentakills, offline."""
+    """Explain player markers, controls, Worlds team logos, and reaction subscriptions."""
     embed = make_embed("", title="Emoji Guide")
     sections = (
+        ("Worlds alerts", (
+            "1️⃣–9️⃣ / 🔟 — Today's series numbers on the 4 a.m. Pacific Worlds schedule.",
+            "1., 2., … — Manual /worlds schedule order; no reaction subscriptions. /stats selects series by matchup.",
+            "React to subscribe to that series' start ping; remove your reaction to opt out.",
+            "Team logos before names identify Worlds teams; announcements use official team names.",
+            "Team icon aliases: TLAW → TL, TES → TOP, GEN → GenG; other teams use their named icon. Missing icons show text only.",
+        )),
         ("Players", (
             "⭐ — Tracked account or linked teammate.",
             "👥 — Saved partymate inferred from repeated same-team games.",
@@ -53,7 +60,8 @@ def build_emoji_legend() -> discord.Embed:
         )),
         ("Team Colors & Game Icons", (
             "🔵 🔴 🟢 🟡 🟣 ⚪ 🟤 🟠 — Arena team colors matching the charts; placement is shown separately.",
-            "Champion icons use the original named champion artwork, with plain text when unavailable.",
+            "Champion icons use original artwork, including Worlds player names; plain text when unavailable.",
+            "Renata Glasc also uses the Renata champion icon in stats.",
             "Rank, item, rune, and summoner-spell icons represent the named game content.",
         )),
     )

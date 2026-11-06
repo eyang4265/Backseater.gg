@@ -18,7 +18,7 @@ _COMMANDS = (
     (
         "Command Guides",
         "**`/emoji`** — Explain the bot's emojis and player markers.\n"
-        "Usage: run with no options to see player, streak, pentakill, rank, chart, and custom-icon meanings.\n\n"
+        "Usage: run with no options to see player, streak, pentakill, rank, chart, custom-icon, Worlds team-logo, and numbered-reaction meanings.\n\n"
         "**`/leaguecommands`** — List League and general bot commands, excluding `/flake`.\n"
         "Usage: run with no options; the list is generated from registered commands.\n\n"
         "**`/tftcommands`** — List every public Teamfight Tactics command.\n"
@@ -86,14 +86,23 @@ _COMMANDS = (
     ),
     (
         "Riot & Server",
+        "**`/bracket`** — Show the current Worlds bracket.\n"
+        "Usage: no options; view Swiss rounds or the knockout bracket without a spoiler cover. No watch links.\n\n"
+        "**`/worlds`** — Live-updating schedules and past results; switch dates in the post.\n"
+        "Usage: no options; choose Today, Tomorrow, Yesterday, or another available date. Use `/stats` for Worlds game stats. Automatic 4 a.m. Pacific posts offer reaction start pings.\n\n"
+        "**`/stats`** — Show Worlds game stats.\n"
+        "Usage: no options; opens the latest played Worlds series. Choose any played series from this year’s Worlds, then a Game button for K/D/A, champions, winners, and damage shares. Newer series is at the top; Older series at the bottom. Fetched final stats are saved. Only official LoL Esports feeds are used. Winners reuse saved metadata and received scores; results omit bans and links.\n\n"
         "**`/patchnotes`** — Show recent updates to this bot.\n"
         "Usage: run with no options; reads the maintained bot patch notes.\n\n"
         "**`/rotation`** — Show this week's free champion rotation.\n\n"
         "**`/serverstatus`** — Show active maintenance and incidents.\n"
         "Usage: optionally choose a `server`.\n\n"
-        "**`/setchannel`** — Route this server's announcements to a channel (Manage Server).\n"
-        "Usage: optionally choose a `channel`.\n\n"
-        "**`/unsetchannel`** — Remove this server's announcement route (Manage Server).",
+        "**`/setchannel`** — Set or re-enable Tracked Players, Worlds, or Both (Manage Server).\n"
+        "Usage: choose `type` (default Tracked Players); optionally choose a `channel`, otherwise this channel. Tracked Players includes daily recaps.\n\n"
+        "**`/setworldschannel`** — Route this server's Worlds schedules and series alerts (Manage Server).\n"
+        "Usage: optionally choose a `channel`; defaults to this channel. Overrides the general announcement channel for Worlds only.\n\n"
+        "**`/unsetchannel`** — Disable Tracked Players, Worlds, or Both (Manage Server).\n"
+        "Usage: choose `type` (default Both); disables only the selected routes and their fallback posts.",
     ),
 )
 

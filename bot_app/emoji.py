@@ -82,6 +82,7 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
     ``name`` covers callers that only have a display string (e.g. a match
     payload's raw ``championName``) and no catalog entry. All champions use
     their original named icons, with plain text when the emoji is unavailable.
+    Name-only Renata Glasc payloads also resolve the internal Renata icon.
     """
     index = _emoji_index()
     if not index:
@@ -96,6 +97,9 @@ def champion_emoji(champion: Champion | None, *, name: str | None = None) -> Any
         ]
     if name:
         candidates += [name, name.replace(" ", "").replace("'", "")]
+
+    if any(_NON_ALNUM_RE.sub("", candidate.lower()) == "renataglasc" for candidate in candidates):
+        candidates.append("Renata")
 
     for candidate in candidates:
         lowered = candidate.lower()

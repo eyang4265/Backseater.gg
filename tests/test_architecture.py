@@ -211,6 +211,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             root / "ddragon.py",
             root / "opgg.py",
             root / "coachless.py",
+            root / "lolesports.py",
             root / "commands" / "ai.py",
         }
         offenders = []

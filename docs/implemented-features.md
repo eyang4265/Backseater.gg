@@ -242,6 +242,213 @@ in commits. The protected hard rules remain in the root instruction files.
   and bounded chart bytes are cached, and display-only changes preserve unchanged
   chart attachments.
 
+### Worlds esports announcements
+
+- Worlds schedules/results, player statistics, live records and damage
+  charts display directly without spoiler formatting. `/bracket` also shows its
+  image directly. Current automatic schedules and recent result posts migrate
+  in place when the rendering version changes.
+- `/stats` (no options) opens directly to Game 1 of the latest played Worlds
+  series from the current year. Its dropdown lists matchups and Pacific dates, newest first, with
+  menu pages beyond 23 series (Newer series at the top, Older series at the bottom).
+  Selecting a series resets to Game 1; buttons
+  include only played games. No date tabs, schedule rows, or back button appear.
+  `WorldsStatsView.render_game` reuses `game_stats_embed` and the announcement
+  chart renderer for initial sends and subsequent edits. Saved stats are reused;
+  missing stats are requested after acknowledgement; winners use saved data. Series/game
+  changes replace attachments, removing charts when unavailable. Controls expire
+  after 30 minutes; no played series shows a concise empty status.
+  `/worlds` keeps date schedules/results without the stats picker.
+  `worlds_history` saves all played current-year Worlds series to private
+  `data/worlds_history.json`. The full-year official history query refreshes at
+  most hourly, splitting saturated date ranges to avoid truncated pages; fresh
+  30-second schedule data merges in without regressing saved scores. Archived
+  series survive restarts and refresh failures. A failed first complete history
+  fetch returns unavailable rather than silently presenting a partial list.
+  Final player stats (`data/worlds_stats/`) and winners
+  (`data/worlds_game_details/`) persist independently and are reused on selection;
+  missing stats are fetched on demand, rather than prefetching every game's stats.
+
+- Automatic Worlds results post the cumulative score after each completed game
+  and the final series score, without player stats, charts, or game tabs. Series-start
+  alerts and intermediate score posts are deleted after the final result is delivered. `/stats` retains manual
+  player K/D/A tables, damage-share charts, and game selection; automatic results
+  are never enriched or upgraded into stats messages.
+- Completed esports game IDs/numbers are retained from the schedule/live feeds.
+  Timestamped `window` and `details` requests must supply a `finished` window and
+  a detail frame at exactly the same timestamp, matching game/match/team IDs,
+  ten unique players, synchronized K/D/A, and complete finite team damage shares.
+  Default feed requests return opening frames and are never used as final stats.
+  Only validated final snapshots are cached under private `data/worlds_stats/`.
+- Final stats are fetched and cached on demand through `/stats`; the automatic
+  announcement poller does not fetch or publish player statistics. Delivery
+  receipts persist in private `data/worlds.json`; historical series stay silent.
+- `/setchannel [channel] [type]` and `/unsetchannel [type]` (Manage Server)
+  offer Tracked Players, Worlds, and Both. Set defaults to Tracked Players and
+  the invoking channel; unset defaults to Both. Tracked Players includes automatic
+  player matches/live games and recaps; Worlds includes schedules/start/final
+  alerts. Both sets or disables both families. Single-family changes preserve the
+  other family; an inherited Worlds route is pinned before changing/removing a
+  configured player route. Worlds/Both setting checks numbered-post permissions.
+  `/setworldschannel` remains a Worlds-only shortcut. Selected unsets clear their
+  routes and persist independent player/Worlds opt-outs in private
+  `data/announcement_preferences.json`, preventing fallback destinations from
+  restoring unwanted posts. Shared publishing filters enabled server routes
+  while collection remains active for other servers. The recap poller and both
+  Worlds pollers honor the same opt-outs. Other servers and manual replies are
+  unaffected. Set commands re-enable only their selected families. Guild removal clears the
+  saved opt-outs. Public channel commands live in their own named modules;
+  shared route updates live outside command handlers.
+- Public `/setworldschannel [channel]` (Manage Server) saves a dedicated Worlds
+  destination in private `data/worlds_channels.json`, defaulting to the invoking
+  channel. Permission checks require View Channel, Send Messages, Embed Links,
+  Add Reactions, and Read Message History. Both Worlds pollers share the same
+  resolver: each server's override replaces its regular and fallback Worlds
+  destinations while player match/recap routing stays unchanged. Unconfigured
+  servers retain their existing routes. Route writes are serialized, and guild
+  removal clears both general and Worlds settings.
+- Changing the route after 04:00 posts today's numbered schedule in the new
+  channel on its next poll; users subscribe on that new post. Old-channel
+  reactions are not transferred. Existing posts remain; an ongoing series may
+  get a new-channel live notice, but completed history is seeded without spam.
+  Manual `/worlds` and `/bracket` replies still use the invoking channel.
+- Schedule rows and series announcement footers show the entering Swiss record
+  bracket (for example `Swiss · 2-2 Bracket`) or `Quarterfinal`, `Semifinal`, or `Final`.
+  Series-start descriptions show the same label. Swiss records count completed
+  series, never individual games, and remain the pre-series record after results.
+  Recent feeds are enriched with saved current-year history or an hourly cached
+  official full-year lookup; incomplete history omits the record rather than guessing.
+- Worlds start and final announcements use Riot's full official
+  team names with the configured custom team logo before each name. Schedules
+  and Past Results keep compact team codes with the same logos. Named emoji lookup
+  maps TLAW to TL, TES to TOP, and GEN to GenG; other codes use their matching
+  emoji names. Missing/unavailable icons fall back to plain team text. Bracket
+  images continue using the source's official names and downloaded team logos.
+  `/emoji` and its docs list these team-logo meanings and aliases.
+- At 04:00 America/Los_Angeles, a separate minute poller posts the shared
+  `/worlds` schedule in every resolved Worlds channel, once per local
+  day. After downtime or initial deployment it catches up today's post after
+  04:00; it never backfills previous days. Automatic posts show only today's
+  series; off days show a brief no-games-today status. Manual `/worlds` still
+  includes the next game day. Existing daily posts are edited in place when
+  migrating to the today-only layout, preserving their reactions/subscriptions.
+  Today's series are marked 1️⃣–9️⃣/🔟 in chronological order and matching reactions
+  are added to the message; next-day series have no subscription numbers.
+- Reacting subscribes to that specific series' live-start alert in the same
+  channel. Removing the reaction opts out. Subscribers are fetched from Discord
+  when the series goes live; bots are ignored and only those user mentions are
+  allowed. No roles, reaction event handlers, or privileged intents are required.
+  The bot needs Add Reactions, Read Message History, View Channel, Send Messages,
+  and Embed Links. Start pings follow confirmed live status, never the schedule
+  time alone. Score/final announcements do not ping subscribers.
+- Private `data/worlds_schedule.json` stores per-day message IDs, stable
+  number-to-series IDs, and reaction setup progress for fourteen days. Daily
+  delivery and partial reaction setup resume after restart without reposting;
+  deleted schedule posts are not recreated and cannot supply subscriptions.
+  Large subscriber groups split into mention batches with persisted progress;
+  failures retry unsent batches. As with other Discord sends, a crash after
+  sending but before saving its receipt can repeat a delivery. Overflow schedule
+  pages use acknowledged page controls in the same message (30-minute timeout).
+- Public `/bracket` (no options) renders the current Worlds stage as a PNG. Swiss:
+  five rounds grouped by entering series record, team logos/names, game scores,
+  winner highlights, and advancing/eliminated teams with series W/L. Undrawn
+  matchups remain TBD. It uses the latest tournament with Swiss events and
+  requires all eight opening matches and consistent series records; partial
+  history fails with a concise status. Optional logos use cached Riot-hosted
+  images with neutral-circle fallbacks. It defers before data, logo, and rendering
+  work; the command refreshes on each invocation and has no watch or title links.
+  After Swiss finishes or a knockout series starts (including its scheduled
+  start), it switches to four quarterfinals, two semifinals, and one final in a
+  connected tree. Future knockout fixtures alone do not hide active Swiss.
+  Published participants/scores/logos populate cards; unassigned slots stay TBD.
+  Connections between known matches require shared published participants;
+  no downstream pairing or advancement is invented from chronological order.
+  Both stage selection and rendering use the latest tournament in the feed.
+- Public `/worlds` (no options) shows the full Pacific-date schedule for today
+  and the next date with games, including completed results, live scores,
+  scheduled/awaiting-start statuses, best-of formats, stages, local Discord
+  start times, and future countdowns. Off days show an empty today plus the full
+  next game day; earlier-day series still live get an additional schedule.
+  Undrawn matchups remain TBD in schedules and stay excluded from announcements
+  and bracket reconstruction. Rows split into aligned inline columns/pages before
+  embed limits. Manual `/worlds` initially shows Today, with buttons ordered Past Results, Today, then the next
+  game date as buttons switching the same message. Adjacent dates use Tomorrow/Yesterday; other dates retain weekday labels. Only
+  the selected day is visible. Past Results shows every series from the latest
+  Pacific match date strictly before today, including unfinished series and
+  skipping off days; no past date shows a brief empty status. Date changes reset overflow pages; buttons defer
+  before editing. Manual schedules refresh scores/status on the adaptive cadence below using direct
+  channel edits, preserve the selected date/page, and retain persistent date controls
+  across restarts. Message IDs and selections are retained privately for 14 days;
+  deleted messages are forgotten and failed edits retry without reposting.
+  Other date headings and dated buttons include abbreviated weekdays. Compact headings
+  and aligned columns have no spacer fields or footer.
+  Automatic daily posts stay today-only without date buttons. The schedule title links to the
+  [LoL Esports league schedule](https://lolesports.com/en-US/lolesports/leagues/first_stand,lck,lpl,msi,worlds);
+  Watch links include [Caedrel](https://www.twitch.tv/caedrel) and official
+  [Twitch](https://www.twitch.tv/riotgames),
+  [YouTube](https://www.youtube.com/@lolesports/live), and
+  [Kick](https://kick.com/riotgames). Links display on two lines: Caedrel: Twitch, then Official: Twitch, YouTube,
+  Kick, appearing in
+  series start/score/final announcements and bracket replies. Manual schedule/
+  Past Results tabs and daily posts have no broadcast-link block. Existing
+  daily posts refresh scores/status on the same adaptive cadence in place while preserving reactions. No later games is noted in the message.
+  The command defers before fetching. Commands and the poller share a 30-second,
+  coalesced feed cache; source failures have a concise retry status.
+- `bot_app/worlds.py` combines scheduled/completed Worlds page data with the
+  website's persisted `homeEvents` query for live and recent completed series,
+  scoped to Worlds with a two-day lookback and a next-day end bound. Both UTC
+  date bounds are supplied so finished series remain visible while the page cache
+  catches up. The
+  server-rendered schedule omits in-progress series. Live-query failures stop
+  that poll with a visible error rather than silently dropping active series;
+  the public persisted operation ID may require maintenance when the site changes.
+  Live requests use a wall-clock minute refresh key to avoid the CDN serving
+  multi-minute stale game scores while retaining one cache key per minute;
+  command/poller consumers still share the in-process 30-second cache.
+  Duplicate records prefer the most advanced status at the same score. Team
+  arrays are aligned to saved team IDs before comparing scores or sending alerts,
+  since the live query can reverse scheduled team order. All three Worlds background jobs (announcements, daily schedules and retained
+  manual schedules) run once per minute from thirty minutes before a scheduled
+  start through six hours after it while awaiting a delayed start, and whenever
+  a series is live. They run every fifteen minutes otherwise to discover schedule
+  changes. A local minute timer wakes them as soon as the lead-in begins without
+  making idle network requests. Minute polling continues for fifteen minutes
+  after observed activity for final delivery and cleanup retries. Startup fetches
+  immediately, daily schedules still run at 04:00 Pacific, and manual commands
+  retain on-demand fetching with the shared 30-second cache. Background jobs run
+  independently of tracked-player polling. Alerts follow published site status, which can lag the
+  broadcast; scheduled times alone never trigger a start alert.
+- Each existing announcement channel receives one series-live alert, a cumulative
+  series score after each newly observed game result, and a final series result
+  replacing the last game's ordinary score update. Later game starts never send
+  separate live notices. The green `Worlds · Series started` alert leads with
+  the bold matchup, followed by the stage and best-of format. It shows verified entering
+  Swiss record when available, official team names/logos, and watch links, without
+  a game number. If first observed mid-series, it still sends only one series alert.
+  Series alert IDs, intermediate score IDs, legacy game notice IDs, and split subscriber-ping batches
+  are saved per channel and deleted after the final series result is delivered.
+  Failed deletions retry without reposting the final; missing messages count as
+  cleaned up. A one-time bounded history scan recovers legacy bot-authored live
+  and intermediate score posts for the same matchup within recent series, excluding schedules,
+  final results, and other authors. Restart receipts preserve cleanup progress.
+  Finished games never receive retroactive live notices. Numbered reactions ping
+  only for the initial series alert; result posts have no pings.
+- Private `data/worlds.json` stores per-channel start/score/final receipts, retaining
+  them across restarts. Already completed series are seeded silently when a
+  channel first joins; an ongoing series receives a live notice and its current
+  score. Failed Discord sends retry without repeating previously saved deliveries.
+  As with ordinary sends, a crash between Discord accepting a message and saving
+  its receipt can repeat that message.
+- The parser reads embedded `EventMatch` JSON without executing JavaScript and
+  filters to Worlds. Two known teams, best-of format, completed-game counts, and
+  published cumulative scores must agree; malformed or incomplete events are
+  skipped. Regressing scores do not announce. If several games finish during an
+  outage, only the latest confirmed score is announced, without inventing past
+  game winners. Website schema changes fail without modifying delivery receipts
+  and are reported through the existing background-error handler. This website
+  feed is separate from Riot's player API and may need maintenance when the site
+  changes; it does not require an esports API subscription.
+
 ## Teamfight Tactics
 
 ### Registration and polling
@@ -355,8 +562,8 @@ in commits. The protected hard rules remain in the root instruction files.
 ### Lookups, builds, and discovery
 
 - `/emoji` (no options) explains player markers, previous-game cues, streaks, pentakills,
-  promotions/demotions, display and chart icons, Arena colors, and custom champion
-  aliases. It distinguishes inferred groups from confirmed parties and resolves
+  promotions/demotions, display and chart icons, Arena colors, champion icons,
+  and numbered Worlds series subscriptions. It distinguishes inferred groups from confirmed parties and resolves
   custom icons from the bot cache with readable aliases as fallbacks. Available
   in the public help and League command directories; no Riot requests or controls.
 
@@ -494,7 +701,9 @@ in commits. The protected hard rules remain in the root instruction files.
   pages use First/Prev/Next/Last buttons that anyone can use. Buttons acknowledge
   before editing or saving state, and pages and selection restore after restart.
   Single-page recaps omit controls. Per-channel/day delivery receipts survive
-  restarts, and failed sends retry on later polls.
+  restarts, and failed sends retry on later polls. Receipt pruning uses the same
+  closed gaming-day boundary as catch-up, including before 4 a.m., so eligible
+  days keep their receipts and cannot repeat after calendar midnight.
   Up to 14 closed days catch up after downtime. Events and receipt history are
   retained for 14 days. A process crash between Discord accepting a page and
   saving its receipt can cause that message to repeat; normal restart/retry paths
@@ -659,6 +868,11 @@ in commits. The protected hard rules remain in the root instruction files.
 
 ## Runtime and storage
 
+- Development, tests, debugging, commits, and GitHub pushes run on the Oracle VM
+  in `/opt/discord-bot`, reached with `ssh backseater-prod`. No laptop checkout
+  or project backup is retained. Migration backups stay private on the VM and
+  outside Git; production runtime data and secrets remain excluded.
+
 - `RiotClient` centralizes platform/regional routing, bounded retries, per-key
   sliding-window rate limits, bounded request fan-out, connection pooling,
   coalesced concurrent misses, and optional SQLite match/timeline caching.
@@ -667,7 +881,8 @@ in commits. The protected hard rules remain in the root instruction files.
   map images, patch-aware caches, and internal-ID-to-display-name resolution.
   Shared champion-emoji lookup uses original named champion icons across commands
   and announcements, including Ryze, Yone, Aatrox, Viego, and Kayn; unavailable
-  emoji fall back to plain text. `/emoji` documents this behavior.
+  emoji fall back to plain text. Name-only `Renata Glasc`/`RenataGlasc` stats
+  payloads resolve the `Renata` icon through the shared helper. `/emoji` documents this behavior.
 - Environment-first configuration falls back to JSON, validates numeric/boolean
   settings, and supports IANA timezones, polling intervals, cache controls, and
   clean startup/shutdown. `LOG_LEVEL` / `log_level` defaults to INFO for routine

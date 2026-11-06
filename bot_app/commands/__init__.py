@@ -25,7 +25,8 @@ from . import (
     dailyrecap,
     flake,
     flakerank,
-    guilds,
+    setchannel,
+    unsetchannel,
     info,
     leaguecommands,
     mastery,
@@ -44,6 +45,10 @@ from . import (
     tftupdate,
     trends,
     updatepartymate,
+    worlds,
+    stats,
+    bracket,
+    setworldschannel,
 )
 from .match import setup_jungleproximity, setup_laning, setup_match, setup_timeline
 
@@ -57,7 +62,8 @@ _SETUPS = (
     registry.setup,
     add.setup,
     rankings.setup,
-    guilds.setup,
+    setchannel.setup,
+    unsetchannel.setup,
     champ.setup,
     bestplayer.setup,
     championpool.setup,
@@ -90,6 +96,10 @@ _SETUPS = (
     msg.setup,
     purge.setup,
     updatepartymate.setup,
+    worlds.setup,
+    stats.setup,
+    bracket.setup,
+    setworldschannel.setup,
 )
 
 

@@ -44,7 +44,7 @@ If a change cannot be expressed that way, say so and stop rather than forking.
 
 Deploy and restart production after code or runtime changes. Documentation-only edits (such as Markdown files) require no deployment or restart unless explicitly requested. For restarts, first stop every production bot process, then use system Python 3.9.25: `/usr/bin/python3 main.py`, never `.venv`.
 
-Never push to a remote unless the user explicitly requests it.
+Push only when requested, always from the Oracle VM; never from the laptop.
 
 When you add or change a public slash command, update the `/commands` command directory with its current description and usage instructions. Keep owner-only commands out of that directory.
 Keep each public slash command in its own command module named after the command (for example, `/champ` belongs in `commands/champ.py`). Move reusable logic shared by multiple commands into a separate shared module.
@@ -66,9 +66,8 @@ the task.
 
 ## Development instructions
 
-Read the relevant [feature reference](docs/implemented-features.md) before changes.
-Document behavior/constraints; keep debugging history in commits. Update both
-root summaries and the reference for behavior changes.
+Read the [feature reference](docs/implemented-features.md) first; update it
+and root summaries for behavior changes. Keep debugging in Git on the VM.
 
 Keep all command responses concise: results, filters, dates, and page numbers.
 Put command descriptions, methodology, and retention notes in `/commands` help
@@ -83,8 +82,7 @@ Use the current date, newest first, with an America/Los_Angeles timestamp per
 entry. `/patchnotes` reads this file directly; describe behavior, not commits.
 
 Keep everything from this heading onward identical in `AGENTS.md` and `CLAUDE.md`.
-Each root file has a 12 KiB budget, including its protected hard rules; shorten
-editable prose or move details to the reference before raising that budget.
+Each root file has a 12 KiB budget; move editable detail to the reference.
 `tests/test_agent_docs.py` checks synchronization, size, and local Markdown links.
 It never rewrites either hard-rule section.
 
@@ -94,8 +92,6 @@ Register commands explicitly through `bot_app.commands.register_all`; keep Riot
 transport, retries, and rate limits in `RiotClient`.
 
 ## Project map
-
-Paths are repository-relative.
 
 | Work area | Start here |
 | --- | --- |
@@ -111,9 +107,8 @@ Paths are repository-relative.
 
 ## Verification
 
-Run focused checks from the root with system Python and `requirements.txt`.
-No credentials needed. Registration/docs checks are network-free;
-rendering tests may attempt API requests and use offline fallbacks.
+Run checks on the VM from `/opt/discord-bot` with system Python.
+Registration/docs checks are network-free; rendering uses offline fallbacks.
 
 ```sh
 # Documentation checks
@@ -134,12 +129,13 @@ For public command changes, verify fresh startup logs contain
 
 ## Deployment
 
-Treat the live Oracle VM deployment at `/opt/discord-bot` as the production bot.
-For verified code/runtime changes, stop `discord-bot.service`, sync the repository over
-SSH while excluding `.git/`, `.venv/`, secrets, `data/`, caches, and logs, then
-restart the service. It must run `/usr/bin/python3 main.py`. Verify the service is
-active and fresh logs contain `Synchronized application commands`. Never copy
-production secrets or runtime data into Git.
+Work only through `ssh backseater-prod` in `/opt/discord-bot`: edit, test,
+debug, commit, and push to GitHub on the VM. Keep no laptop checkout or backups.
+Never sync laptop files onto production. Before code/runtime restarts, stop
+`discord-bot.service` and every bot process; use `/usr/bin/python3 main.py`
+(Python 3.9.25). Verify active service and fresh logs containing
+`Synchronized application commands`. Docs need no restart. Keep secrets,
+runtime data, caches, and migration backups out of Git.
 
 ## Implemented features
 
@@ -151,6 +147,7 @@ production secrets or runtime data into Git.
   third-live-game partymate detection, Mayhem three-lobby evidence, bold 👥 names, 😢 solo, 🫂 for two stars, 🤡 for five-stacks/Flex four-known teams, Arena team-colored charts, persistent
   Display/Chart controls retaining summaries, seven-slot ADC inventories, boot and Stormrazor item recovery,
   and delayed live-post cleanup.
+- `/worlds` live dates, `/stats` newest-first archive, `/bracket` link-free Swiss/KO; feeds, team names/emojis, manual stats tabs, game/final scores, official feeds, no result links, live/score cleanup, /setchannel and /unsetchannel routing, 4 a.m. pings, Swiss W-L Bracket/KO; 1min near/live, 15min idle polls; no game-start alerts.
 - [Teamfight Tactics](docs/implemented-features.md#teamfight-tactics): separate
   identities/state, completed-match announcements, rank/trait displays, filtered
   history, and startup rank baselines. TFT live polling remains disabled.
@@ -159,16 +156,16 @@ production secrets or runtime data into Git.
   match positions, /add types, /accounts partymates, owner /updatepartymate scans, and teammate LP changes.
 - [Commands and statistics](docs/implemented-features.md#commands-and-champion-statistics):
   profiles, mastery, histories, OP.GG/Coachless builds, linked pool records naming Wukong and champion/counter/duo statistics with /duo game-mode labels,
-  role-based OP.GG trends, public paged patch notes, rank graphs, /bestplayer 180-day champion rankings with queue/min-games filters,
-  /emoji legend, concise command responses, topic-grouped public command directories, deduplicated owner directory,
-  all-tracked highlights, owner message purging, a curated League directory,
-  resilient history refreshes, shared champion-report cooldowns and scan guards,
-  server flake tier lists, exact cached /party group records, /synergy 2–5-player lineups with safe follow-ups, and 4 a.m. Pacific recaps with Player (Games), W/L, and LP columns, no unavailable counts, tag-free summoner names including Mayhem teammates, blank missing values with aligned rows, persistent automatic page buttons, and /dailyrecap replay.
+  role-based OP.GG trends, paged patch notes, rank graphs, /bestplayer 180-day champion rankings with queue/min-games filters,
+  /emoji legend, concise command responses, public command directories, deduplicated owner directory,
+  tracked highlights, owner purging, a curated League directory,
+  history refreshes, shared champion-report cooldowns/scan guards,
+  server flake tier lists, exact cached /party group records, /synergy 2–5-player lineups with safe follow-ups, and 4 a.m. Pacific recaps with aligned Player (Games)/W/L/LP, tag-free names, persistent pages, catch-up receipts, and /dailyrecap replay.
 - [Timeline analysis and ratings](docs/implemented-features.md#timeline-analysis-and-ratings):
   jungle proximity, three-at-a-time lane comparisons through game end, role-aware match ratings, and manually
   collected aggregate lane statistics and population baselines.
 - [Runtime and storage](docs/implemented-features.md#runtime-and-storage): per-key Riot
   limits, caching, private migrated runtime data, serialized state transactions,
-  typed configuration, original named champion icons, sync retry, single-instance startup, argument-complete logs,
-  locked dependencies, pull-request-only CI, and hermetic tests including documentation drift checks.
+  typed configuration, champion icons/Renata aliases, sync retry, single-instance startup, argument-complete logs,
+  locked dependencies, pull-request-only CI, and hermetic tests/docs checks.
   Runtime failures also produce sanitized, rate-limited owner DMs.

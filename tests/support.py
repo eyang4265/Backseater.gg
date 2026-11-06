@@ -29,4 +29,6 @@ def temporary_state():
         }.items():
             stack.enter_context(patch(f"bot_app.store.{name}", root / filename))
         stack.enter_context(patch("bot_app.daily_summary.STATE_PATH", root / "daily_summary.json"))
+        stack.enter_context(patch("bot_app.channel_preferences.STATE_PATH", root / "announcement_preferences.json"))
+        stack.enter_context(patch("bot_app.worlds_routing.STATE_PATH", root / "worlds_channels.json"))
         yield root
