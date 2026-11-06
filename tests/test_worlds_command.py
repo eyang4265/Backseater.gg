@@ -93,6 +93,7 @@ class WorldsStatusTests(unittest.TestCase):
     def test_feed_cache_is_shared_and_expires(self):
         with patch.object(worlds, "_cached_series", None), patch.object(worlds, "_cache_until", 0), \
              patch.object(worlds.time, "monotonic", return_value=100) as clock, \
+             patch.object(worlds, "enrich_stage_labels"), \
              patch.object(worlds, "fetch_worlds_page", return_value=json.dumps(event())) as fetch:
             self.assertEqual(worlds.fetch_series(), worlds.fetch_series())
             fetch.assert_called_once()
@@ -111,7 +112,7 @@ class WorldsCommandTests(unittest.IsolatedAsyncioTestCase):
             return parse(event())
 
         with patch("bot_app.commands.worlds.log_command"), \
-             patch("bot_app.commands.worlds.fetch_series", side_effect=fetch):
+             patch("bot_app.worlds_command.fetch_series", side_effect=fetch):
             await WorldsCommands.worlds.callback(WorldsCommands(Mock()), ctx)
         ctx.respond.assert_awaited_once()
         self.assertIn("embeds", ctx.respond.call_args.kwargs)
@@ -123,8 +124,8 @@ class WorldsCommandTests(unittest.IsolatedAsyncioTestCase):
         now = datetime(2026, 10, 28, 19, tzinfo=timezone.utc)
         tabs = schedule_tabs(series + [tomorrow], now=now)
         with patch("bot_app.commands.worlds.log_command"), \
-             patch("bot_app.commands.worlds.fetch_series", return_value=series), \
-             patch("bot_app.commands.worlds.schedule_tabs", return_value=tabs):
+             patch("bot_app.worlds_command.fetch_series", return_value=series), \
+             patch("bot_app.worlds_command.schedule_tabs", return_value=tabs):
             await WorldsCommands.worlds.callback(WorldsCommands(Mock()), ctx)
         ctx.respond.assert_awaited_once()
         sent = ctx.respond.call_args.kwargs["embeds"]
@@ -140,8 +141,8 @@ class WorldsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_feed_failure_is_a_concise_response(self):
         ctx = SimpleNamespace(defer=AsyncMock(), respond=AsyncMock())
         with patch("bot_app.commands.worlds.log_command"), \
-             patch("bot_app.commands.worlds.fetch_series", side_effect=EsportsUnavailable("offline")), \
-             self.assertLogs("bot_app.commands.worlds", level="WARNING"):
+             patch("bot_app.worlds_command.fetch_series", side_effect=EsportsUnavailable("offline")), \
+             self.assertLogs("bot_app.worlds_command", level="WARNING"):
             await WorldsCommands.worlds.callback(WorldsCommands(Mock()), ctx)
         self.assertIn("unavailable", ctx.respond.call_args.kwargs["embed"].description)
 
@@ -183,7 +184,7 @@ class WorldsDateButtonTests(unittest.IsolatedAsyncioTestCase):
         result = tabs[0][1][0]
         self.assertIn("Past Results", result.fields[0].name)
         self.assertIn("Mon, Oct 26", result.fields[0].name)
-        self.assertEqual(result.fields[2].value, "**Score / Status**\n||2–0 · Final||\n||1–2 · Final||")
+        self.assertEqual(result.fields[2].value, "**Score / Status**\n2–0 · Final\n1–2 · Final")
         view = WorldsScheduleView(tabs)
         interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock())
         await view.day_buttons[0].callback(interaction)
@@ -201,7 +202,7 @@ class WorldsDateButtonTests(unittest.IsolatedAsyncioTestCase):
         result = tabs[0][1][0]
         self.assertEqual(tabs[0][0], "Yesterday")
         self.assertIn("Yesterday", result.fields[0].name)
-        self.assertEqual(result.fields[2].value, "**Score / Status**\n||2–0 · Final||\n||1–0 · Live||")
+        self.assertEqual(result.fields[2].value, "**Score / Status**\n2–0 · Final\n1–0 · Live")
 
     async def test_past_results_empty_when_only_today_is_available(self):
         now = datetime(2026, 10, 28, 23, tzinfo=timezone.utc)

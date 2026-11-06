@@ -1,4 +1,4 @@
-"""Manual series navigation, spoiler payloads, and acknowledgement before slow work."""
+"""Manual series navigation, visible stats payloads, and acknowledgement before slow work."""
 
 from datetime import datetime, timezone
 from io import BytesIO
@@ -45,8 +45,8 @@ class WorldsPickerTests(unittest.IsolatedAsyncioTestCase):
         options = interaction.message.edit.call_args.kwargs
         stats_view = options["view"]
         self.assertIsInstance(stats_view, WorldsStatsView)
-        self.assertTrue(options["file"].spoiler)
-        self.assertIsNone(options["embed"].image)
+        self.assertFalse(options["file"].spoiler)
+        self.assertEqual(options["embed"].image.url, "attachment://chart.png")
         self.assertEqual([b.label for b in stats_view.children],
                          ["Game 1", "Game 2", "Game 3", "Back to schedule"])
         back = self.interaction()
@@ -103,19 +103,20 @@ class WorldsPickerTests(unittest.IsolatedAsyncioTestCase):
             await view.change(self.interaction(), 1)
         fetch.assert_not_called()
 
-    async def test_default_spoilers_cover_scores_winners_player_fields_and_live_records(self):
+    async def test_scores_winners_player_fields_and_live_records_are_visible(self):
         self.series["live_title"] = "Worlds Swiss Stage 2-1"
         live = announcement(self.series, game_start=2)
         self.assertEqual(live.title, "Worlds · Live game")
-        self.assertIn("||Worlds Swiss Stage 2-1 · Game 2||", live.description)
+        self.assertIn("Worlds Swiss Stage 2-1 · Game 2", live.description)
+        self.assertNotIn("||", live.description)
         final = announcement(self.series, final=True)
-        self.assertTrue(all(line.startswith("||") and line.endswith("||")
-                            for line in final.description.split("\n\n")[0].splitlines()))
+        self.assertNotIn("||", final.description)
+        self.assertIn("wins the series", final.description)
         with patch("bot_app.worlds_game_details.load_game_details", return_value=None):
             embed = game_stats_embed(self.series, 1, self.stats)
         self.assertEqual([f.name for f in embed.fields[:3]], ["Team 1", "K/D/A", "Damage share"])
-        self.assertTrue(all(line.startswith("||") and line.endswith("||")
-                            for field in embed.fields for line in field.value.splitlines()))
+        self.assertTrue(all("||" not in field.value for field in embed.fields))
+        self.assertEqual(embed.fields[1].value.splitlines()[0], "1/2/3")
 
     async def test_relative_dates_use_pacific_calendar_and_skip_off_days(self):
         now = datetime(2026, 10, 29, 1, tzinfo=timezone.utc)  # Oct 28 in Pacific

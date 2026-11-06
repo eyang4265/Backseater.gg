@@ -120,9 +120,9 @@ class BracketCommandTests(unittest.IsolatedAsyncioTestCase):
              patch("bot_app.commands.bracket.fetch_series", side_effect=fetch), \
              patch("bot_app.commands.bracket.build_bracket", side_effect=render):
             await BracketCommands.bracket.callback(BracketCommands(Mock()), ctx)
-        self.assertEqual(ctx.respond.call_args.kwargs["file"].filename, "SPOILER_worlds-bracket.png")
-        self.assertTrue(ctx.respond.call_args.kwargs["file"].spoiler)
-        self.assertIsNone(ctx.respond.call_args.kwargs["embed"].image)
+        self.assertEqual(ctx.respond.call_args.kwargs["file"].filename, "worlds-bracket.png")
+        self.assertFalse(ctx.respond.call_args.kwargs["file"].spoiler)
+        self.assertEqual(ctx.respond.call_args.kwargs["embed"].image.url, "attachment://worlds-bracket.png")
 
     async def test_incomplete_history_has_concise_status(self):
         ctx = SimpleNamespace(defer=AsyncMock(), respond=AsyncMock())

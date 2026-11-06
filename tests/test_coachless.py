@@ -1,4 +1,4 @@
-"""Coachless JSON-API client tests."""
+"""Offline Coachless build-stage tests with a fresh isolated patch cache."""
 import unittest
 from unittest.mock import patch, MagicMock
 from bot_app.coachless import CoachlessError, _cache, fetch_build_stage
@@ -15,8 +15,13 @@ def _response(payload):
 class CoachlessTests(unittest.TestCase):
     def setUp(self):
         _cache.clear()
+        self.addCleanup(_cache.clear)
         import bot_app.coachless as coachless_module
-        coachless_module._patch_cache = (0.0, {"major": 16, "patch": 15, "patchAdditions": 0})
+        patcher = patch.object(coachless_module, "_patch_cache",
+                               (coachless_module.time.monotonic(),
+                                {"major": 16, "patch": 15, "patchAdditions": 0}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @patch("bot_app.coachless._session.post")
     def test_all_stages_share_one_fetch(self, post, _version):
